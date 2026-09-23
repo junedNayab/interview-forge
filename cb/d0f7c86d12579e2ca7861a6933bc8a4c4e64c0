@@ -1,0 +1,47 @@
+.gitignore
+  s_345a01c7c3fd8e::t_47b661ee390353 1-41
+README.md
+  s_345a01c7c3fd8e::t_45c480bad03da0 1-36
+eslint.config.mjs
+  s_345a01c7c3fd8e::t_e2a39710dec463 1-18
+next.config.ts
+  s_345a01c7c3fd8e::t_14de3c1a8e85eb 1-7
+package.json
+  s_345a01c7c3fd8e::t_c301f5f078149a 1-26
+postcss.config.mjs
+  s_345a01c7c3fd8e::t_512c87c819b242 1-7
+public/file.svg
+  s_345a01c7c3fd8e::t_3bd249aaca16c2 1
+public/globe.svg
+  s_345a01c7c3fd8e::t_73ba4353eddb96 1
+public/next.svg
+  s_345a01c7c3fd8e::t_a651b1c02bfe97 1
+public/vercel.svg
+  s_345a01c7c3fd8e::t_cd3a233428f32c 1
+public/window.svg
+  s_345a01c7c3fd8e::t_8b5763135cbfcc 1
+src/app/globals.css
+  s_345a01c7c3fd8e::t_871f8ee1715262 1-26
+src/app/layout.tsx
+  s_345a01c7c3fd8e::t_8446916e11f63e 1-29
+src/app/page.tsx
+  s_345a01c7c3fd8e::t_bebf2bf6b3b043 1-69
+tsconfig.json
+  s_345a01c7c3fd8e::t_be3cb3385b0c38 1-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cbd0f7c86d12579e2ca7861a6933bc8a4c4e64c0",
+  "prompts": {},
+  "sessions": {
+    "s_345a01c7c3fd8e": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "786b5cbe-4662-44f2-900e-ad6dd590bec1",
+        "model": "copilot/claude-opus-5"
+      },
+      "human_author": "mismoham <mismoham@cisco.com>"
+    }
+  }
+}
