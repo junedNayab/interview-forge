@@ -1,0 +1,386 @@
+---
+title: "Case 5 — Design a Notification System (email / SMS / push)"
+topic: "system-design"
+order: 305
+group: "Case Studies"
+difficulty: "medium"
+estimatedMinutes: 21
+tags: [case-study, queues, idempotency, third-party, fan-out, prioritization]
+prerequisites: [1-the-framework-how-to-drive-a-45-minute-design-interview, 15-microservice-reliability-patterns]
+format: "mdx"
+summary: "The design where the hard part is outside your system: third-party providers you cannot control, at-least-once delivery you cannot make exactly-once, and an OTP that must not queue behind ten million marketing emails."
+---
+
+## Layer 1 — The mental model
+
+Every other case study in this track is about scaling *your* infrastructure.
+This one is different: **the bottleneck and the failure modes both live outside
+your system**, in Twilio, SES, APNs and FCM.
+
+That inverts the usual design. You don't optimise your own throughput — you
+build machinery to absorb someone else's unreliability:
+
+> Accept the request instantly, durably queue it, and let workers fight the
+> providers on their own time.
+
+Which makes the whole shape fall out of one decision:
+
+```
+Caller ──► Notification API ──► Queue ──► Workers ──► Provider
+        (fast, returns 202)   (durable) (retry,      (slow, flaky,
+                                         backoff)     rate-limited)
+```
+
+The three things that make this hard, and the three things the interview is
+actually about:
+
+1. **You cannot get exactly-once.** A provider can send the SMS and then time
+   out before acking. Retrying sends it twice; not retrying may send it zero
+   times. Everything about dedupe flows from this.
+2. **Not all notifications are equal.** An OTP is worthless after 60 seconds; a
+   marketing email is fine tomorrow. One queue for both means the OTP waits.
+3. **"Notify all users" is a fan-out problem** hiding inside what looks like a
+   simple send.
+
+<Callout type="tip" title="Why this one is worth over-preparing">
+Notification systems are asked at every level because they're deceptively
+simple — the naive answer ("put it on a queue") is *correct*, which means the
+interviewer will spend the whole session on the follow-ups. You can't coast on
+the high-level diagram here the way you can on a URL shortener. The depth is the
+entire signal.
+</Callout>
+
+---
+
+## Layer 2 — Driving it with R-E-A-H-D-B
+
+### R — Requirements
+
+**Functional:** send notifications over push, SMS and email; respect per-user
+per-channel preferences and opt-outs; support templates; no duplicate sends;
+track delivery status.
+
+**Non-functional:**
+
+- **Reliable** — a queued notification is never silently dropped.
+- **Low latency for the notifications that need it.** Say this precisely:
+  transactional (OTP, password reset) under a few seconds; marketing can take
+  minutes.
+- High throughput, very bursty (a product launch email is 10M sends in one
+  request).
+- **Out of scope:** in-app notification inbox UI, the analytics pipeline, the
+  content/marketing tooling.
+
+The single most valuable clarifying question here: **"Are we treating
+transactional and promotional notifications the same?"** Asking it shows you
+already know prioritization is the core problem, and it buys you the constraint
+you need later.
+
+### E — Estimate
+
+```
+Users:     10M
+Push:      10M × 5/day  = 50M/day  ≈  580/sec   (peak ~3,000/sec)
+Email:     10M × 2/day  = 20M/day  ≈  230/sec
+SMS:       10M × 0.1/day = 1M/day  ≈   12/sec   (expensive! ~$0.01 each)
+                                          → $10K/day if unchecked
+Burst:     one marketing campaign = 10M sends in minutes
+```
+
+Two conclusions worth saying out loud, because they shape the design:
+
+- **Steady-state throughput is unremarkable; the bursts are the problem.** A
+  system sized for 580/sec dies on a campaign. That argues for a queue that
+  absorbs the burst and workers that drain at a *controlled* rate — the queue is
+  a shock absorber, not just a decoupler.
+- **SMS costs real money.** Notification systems are one of the few designs
+  where cost is a first-class constraint, and mentioning it separates you from
+  candidates reciting a template. It also justifies budget caps and a
+  cheapest-channel-first fallback.
+
+### A — API
+
+```
+POST /v1/notifications
+  Idempotency-Key: <uuid>          ← caller-supplied, see below
+  {
+    "userId": "u_123",
+    "type": "ORDER_SHIPPED",        ← not a channel: the event
+    "templateData": { "orderId": "A-42", "eta": "Friday" },
+    "priority": "transactional" | "promotional"
+  }
+  → 202 Accepted { "notificationId": "n_789" }
+
+GET /v1/notifications/{id}          → per-channel delivery status
+POST /v1/users/{id}/preferences     → channel opt-in/out, quiet hours
+```
+
+Three deliberate choices to defend:
+
+**`202 Accepted`, not `200 OK`.** You have accepted responsibility for the
+notification; you have not sent it. Returning 200 would be a lie, and it also
+means the caller blocks on Twilio's latency. This is the API expressing the
+async design.
+
+**The caller names an event type, not a channel.** `ORDER_SHIPPED`, not
+`send_email`. The *system* decides the channels from user preferences. If
+callers pick channels, every service has to know about preferences and opt-outs,
+and GDPR/TCPA compliance leaks across your whole codebase.
+
+**The caller supplies an idempotency key.** The order service may retry its
+HTTP call after a timeout; without a key you send two "your order shipped"
+emails. This is the same
+[idempotency key](/system-design/15-microservice-reliability-patterns) pattern as
+everywhere else, applied at the front door.
+
+### H — High-level design
+
+```
+                        ┌────────────────────────────────────────┐
+ Order svc ─┐           │  preferences  │  templates  │ dedupe   │
+ Auth svc  ─┼─► API ───►│         (Postgres / Redis)             │
+ Billing   ─┘   │       └────────────────────────────────────────┘
+                │ 202
+                ▼
+        ┌───────────────────────────────────────┐
+        │  Kafka  (partitioned by userId)       │
+        │  ├── topic: transactional   (drained first)
+        │  └── topic: promotional               │
+        └───────┬───────────┬───────────┬───────┘
+                ▼           ▼           ▼
+           Push wkrs    SMS wkrs    Email wkrs      ← independent scaling
+                │           │           │            + per-provider rate limits
+                ▼           ▼           ▼
+            APNs/FCM     Twilio       SES           ← retry, circuit-break,
+                │           │           │              fail over
+                └───────────┴───────────┴──► delivery-status events ──► DB
+                                                   + dead-letter queue
+```
+
+**The API does almost nothing.** Validate, assign an ID, check the idempotency
+key, write to the queue, return 202. Every slow or failure-prone operation is
+behind the queue. If the API starts resolving preferences and rendering
+templates synchronously, its latency becomes the sum of its dependencies.
+
+**Separate topics per priority, not one queue with a priority field.** This is
+the detail interviewers wait for. With a single queue, 10 million campaign
+messages sit ahead of the OTP, and a priority field doesn't help because
+consumers read in order. Separate topics with separate worker pools (or strictly
+weighted draining) mean the OTP path is physically isolated from the campaign.
+**A shared queue means your OTP is as slow as your slowest bulk job.**
+
+**Separate workers per channel** because the channels have nothing in common
+operationally: email is high-volume and cheap, SMS is low-volume and expensive,
+push has two entirely different provider APIs. Independent pools let you scale
+and rate-limit each against its provider's quota, and a Twilio outage doesn't
+back up email.
+
+### D — Storage
+
+| Data | Store | Why |
+|---|---|---|
+| User preferences | Postgres, cached in Redis | Small, relational, read on every send |
+| Templates | Postgres / object storage | Versioned, rarely written |
+| Dedupe keys | Redis, TTL 24–48 h | `SET NX` is the whole mechanism |
+| Delivery status | Cassandra | High write volume, queried by notification or user |
+| In-app inbox | Postgres / Cassandra | Read by user, paginated |
+
+The interesting one is **delivery status**, because the volume is larger than
+the notification volume: every send produces `queued → sent → delivered →
+opened/clicked`, and providers post those back asynchronously via webhooks.
+Four-plus writes per notification, append-only, queried by ID — the same
+argument for a wide-column store as in
+[the chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger).
+
+### Deduplication — the honest version
+
+Say this plainly, because the honest answer scores better than a confident wrong
+one: **you cannot achieve exactly-once delivery through a third party.** The
+provider can dispatch the SMS and then fail to ack. You get at-least-once and
+you shrink the duplicate window.
+
+Two layers:
+
+```
+1. At the API      — Idempotency-Key from the caller
+                     SET notif:idem:{key} = notificationId NX EX 86400
+                     Already exists? Return the original notificationId.
+
+2. At the worker   — before calling the provider
+                     SET notif:sent:{notificationId}:{channel} NX EX 172800
+                     Already exists? Skip. Another worker has it.
+```
+
+Then the residual race, which you should volunteer rather than wait to be
+caught on: a worker sets the key, calls the provider, and crashes before
+recording the result. Did the SMS go out? You genuinely don't know. Your choices
+are to retry (risking a duplicate) or not (risking a miss), **and the right
+answer depends on the notification type** — retry an OTP, don't retry a
+"payment received" receipt. Naming that trade-off instead of pretending it
+doesn't exist is the strongest thing you can do in this section.
+
+A third, product-level layer is worth a sentence: **collapse and digest.** Ten
+"someone liked your post" events in a minute should become one notification, not
+ten. That's a different kind of deduplication — semantic, not technical — and
+mentioning it shows product judgement.
+
+### Fighting the providers
+
+This is where the design earns its keep, and it's
+[reliability patterns](/system-design/15-microservice-reliability-patterns)
+applied end to end:
+
+- **Retry with exponential backoff and jitter** — and only on retryable errors.
+  A 500 or a 429 is retryable; "invalid phone number" is not, and retrying it
+  burns quota forever.
+- **Respect `Retry-After`.** Providers tell you when to come back. Ignoring it
+  gets you rate-limited harder.
+- **Circuit breaker per provider.** When Twilio starts failing, stop calling it
+  — every request during an outage is a thread blocked for a 30-second timeout,
+  and that's how one dead provider consumes your entire worker pool.
+- **Provider failover.** Two SMS vendors; when the breaker on the primary opens,
+  route to the secondary. This is worth building precisely because you don't
+  control provider uptime, and it's the answer to "what if Twilio goes down?"
+- **A dead-letter queue** after N attempts, with alerting and a replay tool.
+  A DLQ nobody looks at is just a slower way to drop messages, so say that the
+  DLQ has an owner and a dashboard.
+- **Rate-limit yourself** to each provider's quota with a
+  [token bucket](/system-design/case-2-design-a-distributed-rate-limiter) shared
+  across workers in Redis. Getting throttled by the provider is worse than
+  pacing yourself.
+
+<Callout type="pitfall" title="Timeouts are the failure that takes the system down">
+The naive worker calls Twilio with the client's default timeout — often none, or
+60 seconds. During a provider slowdown, every worker thread is parked waiting,
+the pool is exhausted, and the queue backs up. **Nothing has errored**, so your
+error-rate alerts stay green while the system is effectively dead.
+
+Always set an aggressive timeout (a few seconds), always pair it with a circuit
+breaker, and alert on **queue depth and consumer lag**, not just error rate.
+Queue depth is the metric that catches this class of failure, and naming it is a
+strong operational signal.
+</Callout>
+
+### Fan-out: "notify all 10 million users"
+
+The trap is doing it synchronously in the request. The fix is a two-stage
+fan-out, which mirrors [the news feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline):
+
+```
+POST /campaigns  ──► one "campaign" record, return 202 immediately
+                          │
+                     Fan-out workers: page through the audience
+                     in batches of ~1,000, filtering by preference
+                          │
+                     ──► enqueue individual notification jobs
+                          (promotional topic, drained at a paced rate)
+```
+
+Details that matter: make the fan-out **resumable** (checkpoint the last user ID
+per batch, so a crashed fan-out worker doesn't restart from zero or duplicate a
+million sends), **pace the drain** so you don't blow your provider quota or
+melt your own database with 10M preference lookups, and **filter before
+enqueueing** rather than enqueueing 10M jobs that mostly get discarded.
+
+### Preferences, quiet hours, and the compliance layer
+
+Easy to skip, and skipping it is a real-world red flag:
+
+- **Per-channel, per-type preferences** — a user can want push for orders and
+  nothing for marketing.
+- **Quiet hours in the user's timezone.** An OTP ignores quiet hours; marketing
+  respects them. Scheduling into the next allowed window is a small feature with
+  real product value.
+- **Global opt-out is legally binding.** CAN-SPAM, GDPR and TCPA make an ignored
+  unsubscribe a fine, not a bug. This check belongs at the worker, immediately
+  before the send, so it catches a message that was queued before the user opted
+  out.
+- **Frequency caps** — at most N promotional notifications per user per day.
+  This protects the one resource you can't buy more of: the user's willingness
+  to leave notifications enabled.
+
+### B — Bottlenecks and failure modes
+
+- **Provider outage** → circuit breaker plus failover to a secondary vendor;
+  degrade to a cheaper or slower channel rather than failing.
+- **Provider rate limits** → self-throttle with a shared token bucket; honour
+  `Retry-After`.
+- **Queue backlog** → alert on consumer lag; autoscale channel workers
+  independently; shed or defer promotional traffic first.
+- **Poison message** kills a worker repeatedly → cap retries, DLQ it, keep
+  moving.
+- **Preference DB hot on fan-out** → cache in Redis, and batch the lookups
+  during campaigns.
+- **Cost blowout** → per-tenant budget caps and anomaly alerts. A bug that loops
+  on SMS is a five-figure incident, not a page of stack trace.
+- **Thundering herd of retries** — everything fails at once during an outage and
+  then retries in lockstep when it recovers. Jitter, always.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why a queue?"** Providers are slow and unreliable; the queue decouples the
+   caller from them and absorbs bursts. The API returns 202 in milliseconds.
+2. **"How do you stop an OTP queuing behind 10M marketing emails?"** Separate
+   topics and separate worker pools per priority. A priority *field* on one
+   queue does not work, because consumers read in order.
+3. **"How do you prevent duplicates?"** Caller idempotency key at the API, a
+   Redis `SET NX` guard per notification-and-channel at the worker — and the
+   honest admission that exactly-once is impossible through a third party.
+4. **"A worker crashes after calling Twilio but before recording it?"** You
+   can't know whether it sent. Retry for an OTP, don't for a receipt. The
+   trade-off is the answer.
+5. **"What if Twilio is down?"** Circuit breaker opens, fail over to a secondary
+   SMS provider, DLQ what still fails. Aggressive timeouts so workers aren't
+   parked.
+6. **"How do you send to all 10 million users?"** Two-stage fan-out: accept the
+   campaign, then resumable batch workers enqueue individual jobs at a paced
+   rate, filtering by preference first.
+7. **"Which errors do you retry?"** 5xx and 429 yes; 4xx validation errors no.
+   Retrying an invalid phone number burns quota forever.
+8. **"How do you track delivery?"** Provider webhooks post status back;
+   append-only status events in Cassandra keyed by notification ID.
+9. **"How do you know the system is unhealthy?"** Queue depth and consumer lag,
+   not error rate — the dangerous failure is everything *slow*, not everything
+   erroring.
+10. **"How do you respect user preferences?"** Per-channel, per-type prefs plus
+    quiet hours and frequency caps, checked at the worker just before sending so
+    a late opt-out still wins.
+11. **"Why does the caller send an event type instead of a channel?"** So
+    preferences and compliance live in one service instead of leaking into every
+    caller.
+12. **"How do you control cost?"** SMS is ~$0.01 a message. Budget caps, anomaly
+    alerts, prefer push over SMS where the user allows it.
+13. **"Scheduled and recurring notifications?"** A scheduler writes due jobs into
+    the same queue; the send path doesn't change.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **One queue for everything.** Your OTP is now as slow as your slowest bulk
+  job.
+- **No timeout on the provider call.** Workers park, queue backs up, error rate
+  stays green.
+- **Retrying non-retryable errors.** Infinite retries on a bad phone number.
+- **Claiming exactly-once.** You can't have it through a third party; say so and
+  describe the window instead.
+- **Checking opt-out only at enqueue time.** A message queued before the
+  unsubscribe still goes out — and that's the one that becomes a complaint.
+- **Non-resumable fan-out.** A crash mid-campaign either skips millions of users
+  or re-sends to them.
+- **A dead-letter queue with no owner.** A slower way to drop messages.
+</Callout>
+
+### Where this connects
+
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — retries, circuit breakers, idempotency keys and DLQs are this whole design.
+- [8. Asynchronous processing and message queues](/system-design/8-asynchronous-processing-message-queues)
+  — the queue is the backbone here.
+- [14. Kafka](/system-design/14-kafka-and-event-streaming) — topics, partitions
+  and consumer lag as the health metric.
+- [Case 2: distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+  — self-throttling against provider quotas, and user-facing frequency caps.
+- [Case 4: chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  — this is the push path for its offline users.

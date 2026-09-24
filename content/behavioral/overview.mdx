@@ -1,0 +1,90 @@
+---
+title: "Overview"
+topic: "behavioral"
+order: 900
+difficulty: "easy"
+estimatedMinutes: 6
+tags: [behavioral, orientation, star, story-bank]
+format: "mdx"
+summary: "What this track contains, why the stories here are frameworks rather than scripts, and the order to work through the six lessons in."
+---
+
+## What this track is for
+
+Four of the six lessons here are built around a single behavioral question each.
+That is deliberate: the questions repeat across companies, and the difference
+between a candidate who has thought about them and one who is improvising is
+visible within thirty seconds.
+
+But the more important thing to understand before you start is what these lessons
+are *not*. They are not stories for you to memorise.
+
+## Why there are no ready-made stories here
+
+An earlier version of this track contained complete, polished STAR answers about
+production incidents and caching decisions. They read well. They were also
+invented, and using an invented story in an interview is one of the more
+dangerous things you can do.
+
+The reason is that behavioral interviewers drill. You give a four-minute answer
+about a latency problem and they ask what the actual error looked like, how you
+first noticed it, what you ruled out before you found it, what the fix was in
+code, and how you verified it. **A borrowed story survives the first question and
+collapses somewhere around the third**, and the collapse is worse than never
+having told the story — you have now demonstrated that you will assert things you
+cannot support, which contaminates everything else you said in the loop.
+
+So every story lesson here has the same shape:
+
+- **Why the question is asked** and what the interviewer is actually collecting.
+- **The structure that works** for that specific question type.
+- **A worked example built from the `url-shortener` project**, using real bugs
+  that genuinely exist in that codebase — so if you built it, the story is true.
+- **Fill-in prompts** for drafting your own version from your own work.
+- **The follow-up questions** an interviewer will ask, and what each one checks.
+- **A weak answer versus a strong one**, side by side.
+
+You are meant to finish each lesson with a page of notes about something you
+actually did. The worked example exists to show you what "specific enough" looks
+like, not to be recited.
+
+<Callout type="pitfall" title="The one rule for the worked examples">
+Only use a worked example if you actually did that work or actually found that
+bug. If you built the URL shortener but never investigated its caching behaviour,
+you can honestly say "I went back and profiled my own project and found this" —
+that is a real story, and a good one. What you cannot do is describe an
+investigation that did not happen.
+</Callout>
+
+## The order to work through it
+
+1. **[General behavioral tips](/behavioral/general-behavioral-tips)** — start
+   here. It is the anchor lesson: STAR with the right time proportions, the
+   story-bank approach, how to talk about failure, the red flags, and the
+   "why are you leaving?" pair. Everything else assumes it.
+2. **[Story 1 — a challenging bug](/behavioral/story-1-tell-me-about-a-challenging-bug-you-solved)** —
+   technical depth and debugging method.
+3. **[Story 2 — improving performance](/behavioral/story-2-describe-a-time-you-improved-performance)** —
+   measurement, tradeoffs and quantified results.
+4. **[Story 3 — code reviews](/behavioral/story-3-how-do-you-approach-code-reviews)** —
+   how you work with other people's code.
+5. **[Story 4 — disagreements](/behavioral/story-4-how-do-you-handle-disagreements-with-your-team)** —
+   conflict, influence and being wrong gracefully.
+6. **[Day-of interview checklist](/behavioral/day-of-interview-checklist)** —
+   read the week before, then again the morning of.
+
+Budget an evening for the anchor lesson and an hour per story, most of which
+should be spent writing and saying your own version rather than reading.
+
+## How much this round matters
+
+More than you probably think, and more as you get more senior. The behavioral
+round is frequently the deciding input when a hiring committee is looking at a
+candidate with adequate but unspectacular technical scores, and it is the round
+where "no signal" is treated as a negative rather than a neutral. See
+[how product-company hiring actually works](/roadmap/1-how-product-company-hiring-actually-works)
+for where it sits in the loop and who reads the write-up.
+
+The compensating factor is that it is the cheapest round to improve. Four evenings
+of honest preparation moves you further here than it will anywhere else on the
+loop.

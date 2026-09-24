@@ -1,0 +1,402 @@
+---
+title: "Pattern 9 — Heaps / Priority Queue"
+topic: "dsa"
+order: 111
+difficulty: "medium"
+estimatedMinutes: 28
+tags: [heap, priority-queue, top-k, two-heaps, streaming, quickselect]
+format: "mdx"
+summary: "Why a binary heap is an implicit array, why heapify is O(n), why the k-th largest wants a MIN-heap of size k, and the two-heap running median that is the canonical hard application."
+---
+
+## Layer 1 — When you reach for this
+
+A heap is the data structure you choose when you need **the best remaining
+element, repeatedly, and never anything else**. That restriction is the whole
+point. A sorted array gives you every element in order and charges you
+`O(n log n)` for the privilege. A heap gives you only the extreme — smallest or
+largest — but hands it over in `O(1)` and repairs itself in `O(log n)`.
+
+> If you find yourself thinking "I'll sort this and then look at the front,"
+> stop and ask whether you ever look past the front. **If you only ever need
+> the front, you are paying for order you never read, and a heap is the
+> structure that charges you for exactly what you use.**
+
+The phrases that should make you reach for a heap:
+
+- **"Top K"**, **"K-th largest"**, **"K closest"**, **"K most frequent"**. Any
+  time K is small relative to n, a heap of size K turns `O(n log n)` into
+  `O(n log k)`.
+- **"From a stream"**, **"as elements arrive"**, **"running median"**,
+  **"maintain the current best"**. A heap is inherently online: it accepts new
+  elements without reprocessing what it already holds.
+- **"Merge k sorted"** anything — lists, arrays, files. The heap holds one
+  candidate per source and always knows which source wins next.
+- **"Schedule by priority"**, **"process the earliest deadline"**, **"the room
+  that frees up soonest"**. Here the heap is literally modelling a priority.
+- Dijkstra and Prim. The heap is the frontier; the algorithm is "repeatedly
+  take the cheapest unexplored thing."
+
+The anti-signals matter just as much, because a heap is a tempting wrong answer:
+
+- **You need the full sorted order.** Then sort. Popping every element out of a
+  heap is `O(n log n)` with worse constants than `Arrays.sort`.
+- **You need to search for an arbitrary element, or delete one by value.** A
+  heap has no index; `contains` and `remove(Object)` are both `O(n)` on
+  `PriorityQueue`. If you need "the best" *and* "find by key", you want a
+  `TreeMap`, or a heap paired with a hash map of positions.
+- **You need the k-th largest once, offline, with no streaming.** Quickselect
+  does that in `O(n)` average. The heap earns its place only when you also want
+  the other `k - 1` elements, or when the data arrives over time.
+- **K is close to n.** A heap of size `k` where `k` is around `n` is a slow sort.
+- **You need range queries or a successor** — "the smallest element greater
+  than x". That is a balanced BST. A heap orders parents against children and
+  says nothing about siblings.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+A binary min-heap maintains exactly one property, and it is worth saying out
+loud because everything else follows from it:
+
+**Every node is less than or equal to both of its children.**
+
+That is all. Notice what it does *not* say: nothing about the relationship
+between siblings, nothing about the relationship between cousins, nothing about
+the order within a level. The heap is a *partial* order, and its cheapness
+comes from how little it promises. The one thing the invariant does guarantee,
+by transitivity along any root-to-node path, is that **the root is the minimum
+of the entire structure** — which is precisely the one question a heap answers.
+
+The second structural property is that the tree is **complete**: every level is
+full except possibly the last, which fills left to right. This is what keeps
+the height at `floor(log2 n)` and what makes the array representation possible.
+
+### The implicit array
+
+A heap needs no pointers and allocates no nodes. It lives in a flat array where
+the tree structure is arithmetic:
+
+- node at index `i` has children at `2i + 1` and `2i + 2`
+- node at index `i` has parent at `(i - 1) / 2` using integer division
+
+This is a consequence of completeness — with no gaps, level-order traversal and
+array order are the same thing. Two benefits follow. There is no per-node object
+header, no child references, no allocation per insert, so the footprint is
+roughly one machine word per element instead of four or five. And the whole
+structure is contiguous, so the upper levels — the ones every operation
+touches — stay resident in cache. **The array layout is why a heap beats a
+pointer-based balanced tree in practice even when the asymptotics match.**
+
+### Sift-up and sift-down
+
+Two operations restore the invariant after it is locally broken.
+
+**Sift-up** (used by insert): append the new element at the end of the array,
+which keeps completeness but may violate the ordering against its parent. Swap
+it with its parent while it is smaller. Each swap moves up one level, so this
+costs at most the height, `O(log n)`.
+
+**Sift-down** (used by extract-min): the root is removed, so move the last
+element into the root slot — completeness is preserved — and then swap it with
+its **smaller** child while it is larger than that child. Swapping with the
+smaller child is not an arbitrary choice: swapping with the larger one would
+place a value above its sibling that is bigger than it, breaking the invariant
+on the other branch. Again at most the height, `O(log n)`.
+
+### Why heapify is O(n), not O(n log n)
+
+Building a heap from an unordered array by inserting `n` elements one at a time
+costs `O(n log n)`. But Floyd's method — start at the last internal node,
+`n/2 - 1`, and sift-down every node walking backwards to the root — is `O(n)`,
+and interviewers like this because the naive analysis gives the wrong answer.
+
+The naive analysis says: `n` nodes, each sift-down is `O(log n)`, so
+`O(n log n)`. The correction is that **almost no node is at the top.** Sift-down
+from a node at height `h` costs `O(h)`, and in a complete tree there are at most
+`n / 2^(h+1)` nodes at height `h`. Half the nodes are leaves and cost nothing.
+A quarter are at height 1 and cost one swap. So the total is the sum over `h` of
+`h * n / 2^(h+1)`, and the series `h / 2^h` converges to 2. The total work is
+bounded by `2n`. **The cost is dominated by the cheap nodes because that is
+where nearly all the nodes are.**
+
+This is why heapsort's build phase is free, and why constructing a
+`PriorityQueue` from a collection is cheaper than offering elements one by one.
+
+### The canonical template
+
+```java
+// Top-K largest with a MIN-heap of size k.
+// PriorityQueue in Java is a MIN-heap by default.
+static int findKthLargest(int[] nums, int k) {
+    PriorityQueue<Integer> heap = new PriorityQueue<>();   // min-heap
+    for (int n : nums) {
+        heap.offer(n);                 // O(log k) — heap never exceeds k+1
+        if (heap.size() > k) {
+            heap.poll();               // evict the SMALLEST of the k+1 held
+        }
+    }
+    return heap.peek();                // the smallest survivor = k-th largest
+}
+```
+
+### Why the k-th *largest* uses a *min*-heap
+
+This is the single most counter-intuitive thing in the pattern, and being able
+to explain it cleanly is worth more than memorising the code.
+
+You are keeping a running set of "the k best I have seen." When a new element
+arrives and the set is full, you must throw one away — and the one to throw away
+is **the weakest member of the set**, because it is the one most likely to be
+displaced. To find the weakest of your k largest, you need the *minimum* of
+those k, so the structure holding them must be a min-heap. Its root is the
+current k-th largest, and it is also exactly the element you evict.
+
+A max-heap would give you the largest of your k largest, which is a number you
+never need and cannot act on. The mnemonic that survives interview pressure:
+**the heap's root is the bouncer at the door — it must be the weakest thing
+inside, so you know instantly whether the newcomer deserves to get in.**
+
+Symmetrically, k-th smallest uses a max-heap of size k.
+
+### Cost, and the alternatives
+
+The loop runs `n` times and each heap operation is `O(log k)` because the heap
+never holds more than `k + 1` elements. So **`O(n log k)` time and `O(k)`
+space**, versus `O(n log n)` and `O(n)` for a full sort. With `k` of 10 and `n`
+of a million, `log k` is about 3 against `log n` of 20 — and the space
+difference is usually the bigger win, because it is what lets you handle a
+stream at all.
+
+The third option is **quickselect**: partition around a pivot as in quicksort,
+but recurse into only the side containing position `k`. Expected `O(n)` because
+the work halves each time and `n + n/2 + n/4 + ...` is `2n`; worst case `O(n^2)`
+on adversarial pivots, fixed by a random pivot. Quickselect wins when the whole
+array is in memory and you need the answer once. It loses when the data streams,
+when you must not mutate the input, or when you need all k in order.
+
+### Variants of the template
+
+**A comparator instead of natural order.** For "K closest points to origin" you
+want to evict the *farthest* of your k closest, so the heap is a max-heap by
+distance:
+
+```java
+PriorityQueue<int[]> heap =
+    new PriorityQueue<>((a, b) -> dist(b) - dist(a));   // max-heap by distance
+```
+
+For plain reverse order, `new PriorityQueue<>(Comparator.reverseOrder())` is
+clearer than a lambda. When comparing by a numeric field, prefer
+`Comparator.comparingInt(...)` over `a - b` subtraction, which overflows if the
+values span the integer range.
+
+**Heap of entries for frequency problems.** Top K Frequent Elements is a
+`HashMap` count pass followed by a size-k min-heap keyed on the count:
+`O(n + m log k)` where `m` is the number of distinct values. Bucket sort is the
+`O(n)` follow-up — counts are bounded by `n`, so index an array of lists by
+frequency and read it from the back.
+
+**Heap over sources, for merging.** Merge K Sorted Lists seeds the heap with the
+head of each list, then repeatedly polls the minimum and pushes that node's
+successor. The heap stays at size `k`, so the cost is `O(N log k)` for `N` total
+nodes — better than the `O(N k)` of scanning all k heads each time, and better
+than concatenate-then-sort because it preserves the work the sorted inputs
+already did.
+
+**Two heaps, for a running median.** This is the hard application and it is
+asked often. Keep a max-heap `lo` holding the smaller half and a min-heap `hi`
+holding the larger half. The invariants are: every element in `lo` is at most
+every element in `hi`, and the sizes differ by at most one. Then the median is
+either the root of the larger heap or the average of the two roots. The trick in
+the insertion is to push through one heap into the other, which enforces the
+ordering invariant without any comparison logic:
+
+```java
+PriorityQueue<Integer> lo = new PriorityQueue<>(Comparator.reverseOrder()); // low half, max-heap
+PriorityQueue<Integer> hi = new PriorityQueue<>();                          // high half, min-heap
+
+void addNum(int num) {
+    lo.offer(num);            // always enter through the low side
+    hi.offer(lo.poll());      // hand the low side's largest to the high side
+    if (hi.size() > lo.size()) lo.offer(hi.poll());   // rebalance, favour lo
+}
+
+double findMedian() {
+    return lo.size() > hi.size() ? lo.peek() : (lo.peek() + hi.peek()) / 2.0;
+}
+```
+
+Insert is `O(log n)`, median is `O(1)`. The two-line insert is worth memorising
+because deriving it live under pressure is error-prone.
+
+### Worked example: Task Scheduler
+
+Given tasks labelled A–Z and a cooldown `n` between two runs of the same task,
+find the minimum number of intervals. The greedy insight is that **you should
+always run the task with the most remaining occurrences that is currently
+allowed**, because the most frequent task is the bottleneck and every idle slot
+you fill with it is a slot you do not waste later. That is a "best remaining"
+query, so it is a heap: build a max-heap of counts, then in each round pop up to
+`n + 1` distinct tasks, decrement them, and push back the ones that still have
+occurrences left. Cost is `O(total * log 26)`, effectively linear.
+
+The adaptation to notice: the heap holds *counts*, not tasks, and the cooldown
+is handled by holding popped tasks aside for one full round rather than by
+anything inside the heap.
+
+### Worked example: Meeting Rooms II
+
+Given intervals, find the minimum number of rooms. Sort by start time and keep a
+min-heap of **end times of the meetings currently running**. For each meeting in
+start order, if the earliest-ending running meeting has finished, poll it — that
+room is reused — then push the new end time. The answer is the maximum heap size
+reached, at `O(n log n)` dominated by the sort.
+
+The adaptation is the choice of what goes in the heap. You are not asked about
+end times; you are asked about rooms. But the only question you ever ask of the
+running set is "has the earliest one finished yet", and the heap answers that in
+`O(1)`. **Choosing what the heap holds is the actual design decision in every
+heap problem.** See [Pattern 14 — Intervals](/dsa/pattern-14-intervals) for the
+sweep-line alternative that solves the same problem without a heap.
+
+### Edge cases and traps
+
+- **Iteration order is not sorted.** `for (int x : pq)` walks the backing array,
+  which is heap order, not sorted order. The same applies to `toString()`,
+  `toArray()`, and streaming the queue. Only repeated `poll()` gives you sorted
+  output. This silently passes small tests and fails large ones.
+- **`remove(Object)` and `contains` are `O(n)`.** There is no lookup structure.
+  The standard fix for "decrease-key" style problems, including Dijkstra, is
+  **lazy deletion**: push the new entry, and when you poll, skip any entry whose
+  recorded value is stale.
+- **`peek()` and `poll()` return `null` on an empty queue**, they do not throw.
+  With `PriorityQueue<Integer>` that null unboxes into a
+  `NullPointerException` somewhere else entirely, which is a nasty debug.
+- **Comparator subtraction overflows.** `(a, b) -> a - b` is wrong whenever the
+  values can be far apart in sign. Use `Integer.compare(a, b)`.
+- **Mutating an element after it is in the heap** silently corrupts the
+  invariant, exactly as mutating a `HashMap` key does. Remove, mutate, re-insert.
+- **`PriorityQueue` is unbounded and grows**, so "top K" code that forgets the
+  eviction line still produces the right answer on small inputs while using
+  `O(n)` memory.
+- **Ties.** A binary heap is not stable, so equal priorities come out in an
+  arbitrary order. If the problem cares, put a sequence number in the comparator
+  as a tiebreaker.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why a min-heap for the k-th largest?"** Because you evict the weakest
+   member of your running best-k set, and the weakest of the k largest is their
+   minimum. The root is both the current answer and the eviction candidate.
+2. **"Complexity of your top-K?"** `O(n log k)` time, `O(k)` space. The heap
+   never exceeds `k + 1` elements, so each operation is `log k`, not `log n`.
+3. **"Can you do better than `O(n log k)`?"** Quickselect: expected `O(n)`,
+   worst case `O(n^2)`, mitigated by a random pivot. It needs the full array in
+   memory and it mutates it.
+4. **"What if the input is a stream you cannot store?"** That is exactly where
+   the heap wins and quickselect cannot compete — `O(k)` memory, and the answer
+   is correct after every single element.
+5. **"What if k is so large the heap does not fit in memory?"** Then it is not a
+   top-K problem any more. Use external merge sort, or an approximate sketch
+   such as Count-Min plus a small heap if the query is top-K by frequency.
+6. **"Why is heapify `O(n)`?"** Cost is proportional to height, and the node
+   count halves as height rises. The sum of `h / 2^h` converges to 2, so the
+   total is bounded by `2n`.
+7. **"How is a heap stored?"** A flat array, children of `i` at `2i + 1` and
+   `2i + 2`. No pointers, no per-node allocation, and the hot upper levels stay
+   in cache.
+8. **"Why does sift-down swap with the smaller child?"** Swapping with the
+   larger one would leave a value above its sibling that exceeds it, breaking
+   the invariant on the other branch.
+9. **"Heap or balanced BST?"** Heap if you only ever need the extreme; BST if
+   you need ordered traversal, range queries, or a successor. A heap says
+   nothing about siblings.
+10. **"Running median from a stream?"** Two heaps — max-heap for the low half,
+    min-heap for the high half. Push through one into the other, then rebalance.
+    `O(log n)` insert, `O(1)` query.
+11. **"Median with a sliding window instead of a stream?"** The two-heap version
+    needs deletion, so either use lazy deletion with a "to remove" count map, or
+    switch to a `TreeMap` of counts with a pointer to the middle.
+12. **"Merge k sorted lists — why a heap?"** It keeps one candidate per list and
+    finds the next output in `log k` instead of scanning all `k` heads.
+    `O(N log k)` for `N` total elements.
+13. **"How would you implement `PriorityQueue` yourself?"** Array plus sift-up
+    on insert and sift-down on extract. Write the parent and child index
+    arithmetic out; that is what they are checking.
+14. **"Is `PriorityQueue` thread-safe?"** No. `PriorityBlockingQueue` is the
+    concurrent version, and it is unbounded, which matters for back-pressure.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Iterating a `PriorityQueue` and expecting sorted output.** It is heap order.
+  Only `poll()` is sorted.
+- **Forgetting the eviction line** in the top-K loop. Correct answer, wrong
+  complexity, and reviewers miss it too.
+- **`a - b` comparators** overflowing on large or mixed-sign values.
+- **Using `remove(Object)` inside a loop**, turning an `O(n log n)` solution
+  into `O(n^2)`. Use lazy deletion instead.
+- **Unboxed `null`** from `poll()` on an empty queue.
+- **Building a heap with a loop of `offer`** when you have all the data —
+  `new PriorityQueue<>(collection)` heapifies in `O(n)`.
+- **Two-heap median where the sizes drift** because you rebalanced in only one
+  direction. Push through one heap, then rebalance once; that is the whole
+  invariant.
+- **Reaching for a heap when you need order statistics repeatedly by rank.**
+  That is an indexed tree or a BST with subtree sizes.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Kth Largest Element in a Stream** — the size-k min-heap in its purest form,
+  and it forces you to see the streaming case.
+- **Last Stone Weight** — a max-heap with re-insertion; good for getting
+  `Comparator.reverseOrder()` into your fingers.
+
+**Medium**
+
+- **Kth Largest Element in an Array** — the canonical one. Solve it with a heap,
+  then again with quickselect and be ready to compare.
+- **Top K Frequent Elements** — heap over a frequency map, plus the bucket-sort
+  `O(n)` follow-up.
+- **K Closest Points to Origin** — the heap direction is decided by what you
+  evict, not by what the question says.
+- **Task Scheduler** — the "most remaining first" greedy and why it is correct.
+- **Meeting Rooms II** — heap of end times; compare against the sweep line.
+- **Reorganize String** — the same greedy shape with an impossibility condition.
+- **Kth Smallest Element in a Sorted Matrix** — heap over rows, and the binary
+  search alternative that beats it.
+
+**Hard**
+
+- **Find Median from Data Stream** — the two-heap template; memorise the insert.
+- **Merge k Sorted Lists** — heap over sources, against divide-and-conquer
+  merging at the same complexity.
+- **Sliding Window Median** — two heaps plus deletion, where lazy removal earns
+  its keep.
+- **IPO** — two heaps together, one on capital and one on profit; a test of
+  whether you can choose what each heap holds.
+
+### Where this connects
+
+- [Pattern 14 — Intervals](/dsa/pattern-14-intervals) — Meeting Rooms II by heap
+  versus by sweep line, the same problem from two directions.
+- [Pattern 11 — Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) — Dijkstra
+  and Prim are heap-driven frontier algorithms, and lazy deletion is how you
+  implement them without decrease-key.
+- [Pattern 13 — Greedy](/dsa/pattern-13-greedy) — a heap is usually the
+  implementation of a greedy rule that says "take the best available now."
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — where
+  `O(n log k)` sits relative to `O(n)` and `O(n log n)`, and when the difference
+  is worth the code.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  `PriorityQueue`'s place among the Java collections and how it differs from
+  `TreeMap` for ordered access.

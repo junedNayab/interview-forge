@@ -1,0 +1,308 @@
+---
+title: "3. Distributed Systems Concepts"
+topic: "cs-fundamentals"
+order: 803
+difficulty: "hard"
+estimatedMinutes: 24
+tags: [distributed-systems, consensus, raft, quorum, 2pc, saga, time]
+format: "mdx"
+summary: "Why the impossibility of distinguishing a slow node from a dead one generates every hard problem in distributed systems — quorums, Raft, why 2PC blocks, sagas, and why you cannot trust a clock."
+---
+
+## Layer 1 — The mental model
+
+There is one fact underneath every distributed systems concept, and if you hold
+it, the rest are consequences rather than vocabulary:
+
+> **You send a request and get no reply. You cannot tell whether the other node
+> is dead, slow, or whether it did the work and the reply was lost.** There is
+> no way to distinguish these, ever, in an asynchronous network.
+
+That single uncertainty generates the entire field:
+
+| Consequence | The concept it becomes |
+|---|---|
+| You must retry, but it might have worked | **Idempotency** |
+| You must guess whether a node is dead | **Timeouts, heartbeats, failure detection** |
+| Guessing wrong means two leaders | **Consensus, fencing, split-brain** |
+| Nodes may disagree about what happened | **Consistency models** |
+| You can't wait for everyone | **Quorums** |
+| A transaction can't span machines atomically | **2PC, and then sagas** |
+| Clocks disagree, so "when" is unanswerable | **Logical clocks** |
+
+This is worth saying out loud in an interview, because it reframes a follow-up
+from trivia recall into reasoning: *"The core problem is that a timeout doesn't
+tell me whether the work happened, so I need the operation to be idempotent and
+I need to bound how wrong my failure detector can be."*
+
+The corollary, which is the practical advice: **do not build a distributed
+system if you can avoid it.** Every technique below is a way of paying for a
+choice. One machine with a replica is dramatically simpler than five machines
+running consensus, and most systems that "need" distribution needed a bigger
+machine and an index.
+
+---
+
+## Layer 2 — The mechanism
+
+### The eight fallacies, and why they still catch people
+
+The classic list, worth knowing because each one names a real production bug:
+the network is reliable; latency is zero; bandwidth is infinite; the network is
+secure; topology doesn't change; there is one administrator; transport cost is
+zero; the network is homogeneous.
+
+The two that cause the most damage: **"the network is reliable"** produces code
+with no timeout and no retry, and **"latency is zero"** produces the chatty
+service that makes forty sequential calls and is mysteriously slow. Every
+fallacy is an assumption that holds in development and fails in production,
+which is exactly why they're hard to catch.
+
+### Idempotency — the foundational defence
+
+Because a timeout tells you nothing, **every retryable operation must be safe to
+repeat.** Three ways to get there:
+
+- **Naturally idempotent operations.** `SET status = 'shipped'` can run twice.
+  `balance = balance + 10` cannot. Prefer the former when you have a choice.
+- **Idempotency keys.** The client generates an ID; the server records it with
+  the result and returns the original response on a repeat. This is how payment
+  APIs work, and it's the general answer.
+- **Deduplication with a version or sequence number**, so a stale message can be
+  recognised and dropped.
+
+The subtle part worth volunteering: **the key must be recorded atomically with
+the effect**, in the same transaction. If you record the key and then crash
+before doing the work, you've turned an at-least-once system into a
+lost-update system.
+
+### Consistency models, as a ladder
+
+From strongest and most expensive to weakest and cheapest:
+
+| Model | Guarantee | Cost |
+|---|---|---|
+| **Linearizable** | Every operation appears to happen instantly, in real-time order | Coordination on every op |
+| **Sequential** | All nodes see the same order, not necessarily real-time | Cheaper, still ordered |
+| **Causal** | Causally related events are ordered; concurrent ones may differ | No coordination for concurrent writes |
+| **Read-your-writes** | You see your own writes | Route the user to the leader briefly |
+| **Monotonic reads** | Time never goes backwards for one client | Pin the client to one replica |
+| **Eventual** | Given no new writes, replicas converge | Nearly free |
+
+The point to make is that these are **per-operation choices, not per-system
+ones.** A single application can reasonably want linearizability on "create
+username" (uniqueness must be real) and eventual consistency on "number of
+likes." A candidate who says "I'd use strong consistency" for a whole system has
+usually not thought about the cost. Depth in
+[CAP and consistency models](/system-design/7-cap-theorem-consistency-models).
+
+### Quorums
+
+Rather than waiting for every replica, wait for a majority.
+
+```
+N = replicas,  W = write acks required,  R = replicas read
+
+W + R > N   →  the read set and write set must overlap,
+               so a read always sees at least one current copy
+
+N=3, W=2, R=2  → tolerates one failure, strong-ish reads  (the usual choice)
+N=3, W=3, R=1  → fast reads, no write availability if any node is down
+N=3, W=1, R=1  → fast everything, eventual consistency
+```
+
+The overlap argument is the whole idea and is worth stating that way — it's why
+`W + R > N` isn't a magic formula but a pigeonhole observation.
+
+Two honest caveats, either of which is a strong follow-up answer. First, quorum
+reads give you *recency*, not linearizability — without extra work like a read
+repair or a leader lease you can still observe anomalies. Second, **a quorum
+does not prevent conflicting concurrent writes**; it only guarantees overlap, so
+leaderless systems still need last-write-wins, vector clocks or CRDTs to resolve
+them.
+
+### Consensus and Raft
+
+Consensus is getting nodes to agree on a value (usually "what is the next entry
+in the log?") despite failures. **FLP impossibility** says no deterministic
+algorithm can guarantee consensus in a fully asynchronous network with even one
+faulty node — so real systems use timeouts and accept that they may be
+temporarily unavailable rather than temporarily wrong.
+
+Raft in the form you should be able to explain:
+
+- **Leader election.** Each node has a randomised election timeout. On expiry it
+  becomes a candidate and requests votes; a majority makes it leader for a
+  *term*. The randomisation is what stops all nodes becoming candidates
+  simultaneously — the same jitter idea as everywhere else.
+- **Log replication.** All writes go to the leader, which appends and replicates.
+  Once a majority has acked, the entry is **committed** and applied.
+- **Safety.** A candidate can only win with a log at least as up to date as the
+  majority's, which guarantees a committed entry is never lost.
+
+Why a **majority** specifically: two majorities of the same set must overlap, so
+two leaders cannot both be elected in the same term. That's also why clusters
+are odd-sized — five nodes tolerate two failures, and six also tolerate only
+two, so the sixth node buys nothing.
+
+You almost never implement this. You use etcd, ZooKeeper or Consul for leader
+election, configuration and distributed locks — and the right interview answer
+is to name the tool and explain what it's doing.
+
+<Callout type="pitfall" title="Distributed locks and why fencing tokens exist">
+The obvious distributed lock — `SET lock:resource client-id NX EX 30` in Redis —
+has a hole that's worth knowing because it's a favourite senior question.
+
+Client A acquires the lock, then stalls: a long GC pause, or its process is
+descheduled. The 30-second TTL expires. Client B acquires the lock legitimately.
+Client A wakes up, *believes it still holds the lock*, and writes. **Two writers,
+no error anywhere.**
+
+A TTL cannot fix this, because the problem is that A's belief is stale, not that
+the lock was held too long. The fix is a **fencing token**: the lock service
+issues a monotonically increasing number with each grant, the client passes it
+to the storage system, and the storage system rejects any write carrying a token
+lower than the highest it has seen. A's stale write is refused.
+
+The broader lesson: **a lock alone cannot provide mutual exclusion across a
+network unless the resource itself participates.**
+</Callout>
+
+### Distributed transactions: 2PC, and why sagas replaced it
+
+**Two-phase commit.** A coordinator asks every participant to *prepare* (do the
+work, hold locks, promise you can commit), and if all agree, tells them to
+*commit*.
+
+```
+Phase 1  coordinator → "prepare?"  → all participants vote yes/no
+Phase 2  coordinator → "commit!"   → all apply
+```
+
+It gives real atomicity, and it has a failure mode that rules it out for most
+systems: **if the coordinator crashes after participants have voted yes, they
+are stuck.** They're holding locks, they've promised to commit, and they cannot
+unilaterally decide. They block — potentially until an operator intervenes. 2PC
+converts the availability of the whole group into the availability of the
+coordinator, which is the opposite of what distribution is for.
+
+**Sagas** give up atomicity to get availability. A business transaction becomes a
+sequence of local transactions, each with a **compensating action** that
+semantically undoes it.
+
+```
+reserve inventory → charge card → ship
+   if "ship" fails:  refund card, release inventory
+```
+
+The trade to be explicit about: **there is no isolation.** Intermediate states
+are visible — a customer can briefly see a charge for an order that is about to
+be cancelled — so compensations must be *semantic* (issue a refund) rather than
+a rollback, and they must themselves be idempotent and retryable. Sagas are
+orchestrated (a coordinator drives the steps) or choreographed (services react
+to each other's events). Full treatment in
+[microservice reliability patterns](/system-design/15-microservice-reliability-patterns).
+
+### Time: the thing you cannot trust
+
+Physical clocks on different machines disagree by milliseconds, and NTP can
+step a clock **backwards**. So:
+
+- **Never order events by wall-clock timestamp** across machines. This is why
+  [the chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  uses per-conversation sequence numbers.
+- **Last-write-wins is a data-loss policy**, not a conflict-resolution one — the
+  "later" write is decided by whichever machine's clock was ahead.
+- **Lamport clocks** give a counter that respects causality: if A caused B then
+  `L(A) < L(B)`. The converse doesn't hold, so they can't detect concurrency.
+- **Vector clocks** can: one counter per node makes concurrent updates
+  detectable, at the cost of size.
+- **Google's TrueTime** takes the other road — atomic clocks and GPS bound the
+  uncertainty, and Spanner simply *waits out* the interval before committing so
+  timestamps are meaningful. Buying certainty with hardware and latency.
+
+### Failure detection
+
+You can't know a node is dead, so you make a bounded guess: **heartbeats plus a
+timeout**. The tuning is a genuine trade — a short timeout detects failure fast
+and produces false positives that evict healthy nodes; a long one is stable and
+slow. **Phi-accrual** failure detectors (used by Cassandra and Akka) output a
+suspicion level based on the observed distribution of heartbeat intervals
+instead of a binary verdict, which adapts to a network rather than assuming one.
+
+Then the three patterns that follow, all of which appear in
+[reliability patterns](/system-design/15-microservice-reliability-patterns):
+**timeouts** on every call, **retries with exponential backoff and jitter** (the
+jitter is what stops every client retrying in lockstep after an outage), and
+**circuit breakers** so you stop calling a dependency that is clearly down.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What makes distributed systems hard?"** You cannot distinguish a slow
+   node from a dead one, or a lost request from a lost reply. Everything else
+   follows.
+2. **"Your request times out. What do you do?"** Retry — which is only safe if
+   the operation is idempotent, so design for that first.
+3. **"How do you make a write idempotent?"** A client-supplied key recorded
+   atomically with the effect, or an operation that is naturally repeatable.
+4. **"What does `W + R > N` give you?"** The read and write sets must overlap,
+   so a read sees at least one current copy. It's a pigeonhole argument, not a
+   formula.
+5. **"Does a quorum give linearizability?"** Not by itself, and it doesn't
+   prevent conflicting concurrent writes either.
+6. **"Explain Raft."** Randomised election timeouts elect a leader for a term;
+   the leader replicates a log; an entry commits once a majority acks.
+7. **"Why a majority, and why odd-sized clusters?"** Two majorities must
+   overlap, so there can't be two leaders. Six nodes tolerate the same two
+   failures as five.
+8. **"What's FLP impossibility?"** No deterministic consensus in a fully
+   asynchronous network with one faulty node — so real systems use timeouts and
+   choose temporary unavailability over incorrectness.
+9. **"What's wrong with a Redis distributed lock?"** A stalled client can hold a
+   stale belief past the TTL while another client holds the lock. Fix with
+   fencing tokens the storage layer enforces.
+10. **"Why isn't 2PC used in microservices?"** A coordinator crash leaves
+    participants blocked holding locks. It ties group availability to one node.
+11. **"2PC or saga?"** 2PC when you need atomicity within one trust boundary
+    and can tolerate blocking. Saga otherwise — availability at the cost of
+    isolation.
+12. **"What does a saga give up?"** Isolation. Intermediate states are visible,
+    so compensations are semantic and must be idempotent.
+13. **"Why can't you order events by timestamp?"** Clock skew, and NTP can move
+    a clock backwards. Use sequence numbers or logical clocks.
+14. **"Lamport vs vector clocks?"** Lamport preserves causality but can't detect
+    concurrency; vector clocks can, at the cost of size.
+15. **"How do you detect a failed node?"** Heartbeats and a timeout, accepting
+    the false-positive/detection-speed trade. Phi-accrual adapts instead of
+    using a fixed threshold.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Retrying a non-idempotent operation** after a timeout, creating duplicates.
+- **Last-write-wins on wall-clock timestamps**, which silently loses data.
+- **A distributed lock with a TTL and no fencing token.**
+- **An aggressive failure detector** that evicts healthy nodes and shifts their
+  load onto the survivors.
+- **No jitter on retries**, so recovery immediately re-breaks the dependency.
+- **2PC across services**, and the day the coordinator dies.
+- **A saga with non-idempotent compensations**, which fail halfway and leave
+  you worse off than before.
+- **Distributing a system that didn't need it.** A bigger machine and an index
+  is often the whole answer.
+</Callout>
+
+### Where this connects
+
+- [7. CAP and consistency models](/system-design/7-cap-theorem-consistency-models)
+  — the consistency ladder in full.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — idempotency keys, sagas, outbox, circuit breakers as implementations.
+- [6. Databases](/system-design/6-databases) — replication, failover and
+  split-brain in a concrete setting.
+- [Case 4: chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  — why ordering uses sequence numbers rather than clocks.
+- [OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency) — the
+  single-machine versions of locking, deadlock and failure.

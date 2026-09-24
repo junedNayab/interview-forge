@@ -1,0 +1,218 @@
+---
+title: "Story 2: \"Describe a time you improved performance\""
+topic: "behavioral"
+order: 902
+difficulty: "medium"
+estimatedMinutes: 16
+tags: [behavioral, star, performance, caching, url-shortener, measurement]
+format: "mdx"
+summary: "The measure-first structure for performance stories, worked from the cache-hit path in the url-shortener that still queries Postgres on every request, with prompts and the numbers you must be able to quote."
+---
+
+## What this question is really probing
+
+Performance stories are scored on **measurement discipline**, not on how clever
+the optimisation was. The interviewer is trying to find out whether you are the
+kind of engineer who profiles before changing things, or the kind who adds a
+cache because caches are fast.
+
+Specifically, they want to know:
+
+- **Did you measure before you changed anything?** If you cannot state a "before"
+  number, you did not.
+- **Did you find the actual bottleneck?** Or optimise the part you found most
+  interesting. These are different and the second one is extremely common.
+- **Did you verify the improvement?** With the same measurement, under comparable
+  load.
+- **What did it cost?** Every optimisation trades something — complexity,
+  consistency, memory, operational burden. A candidate who claims a free win has
+  not thought about it.
+
+There is a quiet fifth thing being assessed: whether you know when to stop. An
+engineer who spent three weeks getting p99 from 40 ms to 35 ms on an endpoint
+nobody complained about has demonstrated a judgement problem, not a skill.
+
+## The structure that works for this question
+
+```
+1. The trigger        what made this worth doing — a complaint, an alert, a bill
+2. The baseline       the number, at a named percentile, under a named load
+3. The investigation  how you found the bottleneck, and what it was NOT
+4. The bottleneck     stated precisely, with the evidence
+5. The options        at least two, with the tradeoff between them
+6. What you did       the change, in enough detail to be interrogated
+7. The after number   measured the same way
+8. The cost           what you traded away, and what you deliberately left alone
+```
+
+Steps 2 and 7 are non-negotiable — a performance story without numbers is not a
+performance story. **Step 5 is what separates mid-level from senior: doing the
+obvious optimisation is execution, choosing between two optimisations is
+engineering.** Step 8 is the one almost nobody includes, and it is disproportionately
+persuasive.
+
+## A worked example from the url-shortener
+
+There is a genuine and quite subtle performance bug in the `url-shortener`
+redirect path. It is a good example because the code looks correct, the cache
+appears to be working, and the hit rate metric would look excellent.
+
+`UrlService.resolve()` does cache-aside against Redis. On a hit it returns the
+long URL without touching Postgres — except that before returning, it calls
+`recordClick()`. And `recordClick()` calls `urlRepository.findByShortCode()` to
+load the entity, because it needs the foreign key for the `click_events` row.
+
+**So every cache hit still performs the exact database query the cache exists to
+avoid.** The cache is removing nothing from the database; it is only adding a
+Redis round trip in front of the same query. On top of that, `recordClick()` does
+a synchronous insert into `click_events` on the redirect hot path, and `resolve()`
+is annotated `@Transactional`, so even a pure cache hit borrows a pooled database
+connection for the whole request.
+
+Told as an answer:
+
+> **Trigger.** "I was load-testing my URL shortener before writing it up, and the
+> redirect endpoint was not getting anywhere near the throughput I expected given
+> that Redis was in front of it. The cache hit rate was above 95%, so on paper it
+> should have been almost free."
+>
+> **Baseline.** "Under a sustained load test, p99 on the redirect was about
+> 180 ms, and the service saturated at a few hundred requests per second. Redis
+> alone should be sub-millisecond, so the shape was wrong, not just the
+> magnitude." *(If your numbers are approximate, say so — see the note below.)*
+>
+> **Investigation.** "My first assumption was Redis latency or connection pool
+> contention on the Redis side. I checked `MONITOR` and the Redis round trip was
+> well under a millisecond. Then I turned on Hibernate SQL logging and hit the
+> endpoint once with a warm cache. I expected zero queries and got two — a select
+> on `urls` and an insert into `click_events`."
+>
+> **The bottleneck.** "The cache-hit path was still doing the database read. The
+> click-recording code needed the URL entity to get the foreign key, so it called
+> `findByShortCode` itself. The cache was in front of a query that was still
+> being executed every single request, just from a different call site. The
+> `@Transactional` on the resolve method meant every redirect also held a pooled
+> connection, so connection pool size was the real throughput ceiling."
+>
+> **The options.** "Three, roughly. One: cache the numeric ID alongside the URL
+> so the click insert doesn't need to load the entity — cheapest change, keeps
+> everything synchronous. Two: make click recording asynchronous, so the redirect
+> returns before the write happens — bigger win, but you can lose clicks on a
+> crash and the counts become eventually consistent. Three: drop the per-click
+> row entirely and use a Redis counter with periodic flushing — fastest, but you
+> lose per-click detail like referrer and timestamp, which was a product decision
+> I didn't want to make unilaterally."
+>
+> **What I did.** "Both one and two. I changed the cached value from a bare
+> string to a small object holding the URL, the ID and the expiry, which removed
+> the select. Then I moved the click insert onto an async path so the redirect no
+> longer waits for it. And I narrowed `@Transactional` — it came off the resolve
+> method entirely and went onto the write path only, so a cache hit doesn't take
+> a connection at all."
+>
+> **After.** "p99 went from about 180 ms to under 15 ms, and throughput went up
+> by roughly an order of magnitude on the same hardware — at which point the
+> bottleneck moved somewhere else, which is the point at which I stopped."
+>
+> **Cost.** "Click counts are now eventually consistent and can be lost if the
+> process dies with work queued, which is acceptable for analytics and would not
+> be for billing. And the cached object is now a structure rather than a string,
+> so there is a serialisation format to version. I deliberately did not do option
+> three, because losing per-click detail is a product tradeoff, not an
+> engineering one."
+>
+> **Learning.** "The thing I actually took from it: a high cache hit rate tells
+> you the cache is being hit, not that it is saving you anything. I now check the
+> query count per request directly rather than trusting the hit rate."
+
+That last line is the kind of sentence interviewers remember.
+
+<Callout type="tip" title="About the numbers">
+Use your real measurements. If you no longer have them, estimate and label it:
+"from memory it was around 180 ms and came down to roughly 15." Interviewers are
+fine with estimates and hostile to invented precision — and "180 ms" quoted
+confidently invites "what tool did you measure that with?", which you must be
+able to answer.
+
+If you have never load-tested this project, that is a two-evening job and it
+converts this from a story you cannot tell into one you can. Run it, write the
+numbers down, and you own the story permanently.
+</Callout>
+
+## Draft your own
+
+1. **The trigger.** Who or what told you there was a problem? A user complaint,
+   an alert, a timeout, a cloud bill, your own load test. "It felt slow" is
+   acceptable only if you then measured it.
+2. **The baseline number.** Latency at a named percentile, or throughput, or
+   query count, or cost. Say how you measured it and under what load.
+3. **Your first hypothesis, and whether it was right.** Being wrong here is good
+   material — it is evidence you measured rather than assumed.
+4. **How you found the real bottleneck.** The specific tool or technique:
+   SQL logging, `EXPLAIN`, a profiler, a flame graph, request timing breakdown,
+   metrics dashboard, adding timers by hand.
+5. **The bottleneck in one sentence,** with the evidence that proved it.
+6. **Two or three options you considered,** with the tradeoff for each. Include
+   at least one you rejected and say why.
+7. **What you changed.** Enough detail that someone can ask you about the code.
+8. **The after number,** measured the same way as the baseline.
+9. **What it cost.** Complexity, consistency, memory, an operational dependency,
+   a new failure mode. Name at least one.
+10. **Where the bottleneck moved to,** and why you stopped there.
+
+Point 10 is worth extra effort. "After that, the limit was the connection pool,
+and at our traffic that was fine, so I stopped" demonstrates that you understand
+optimisation as a sequence of moving constraints rather than a single fix.
+
+## The other performance material in this project
+
+- **The synchronous `click_events` insert on the redirect path** can be its own
+  story if you want to talk about separating the hot path from the analytics
+  path, and about the durability tradeoff that comes with it.
+- **`@Transactional` on a read path that often touches no data** is a smaller but
+  very interview-friendly story about connection pool exhaustion, and it connects
+  directly to
+  [transaction management](/java/5-transaction-management-transactional)
+  if the interviewer wants to go deeper on Spring.
+- The design-round version of all of this lives in
+  [Case 1 — design a URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one).
+  The behavioral answer and the design answer should be consistent with each
+  other, because the same interviewer may hear both.
+
+## Follow-ups you will get
+
+| Follow-up | What they are checking |
+|---|---|
+| "How did you measure that?" | Whether the numbers are real. Name the tool. |
+| "What was the p50 versus p99?" | Whether you understand that averages hide the problem. |
+| "Why did you pick that option over the others?" | Tradeoff reasoning — the main event. |
+| "What did the change cost you?" | Whether you see optimisations as free. |
+| "What was the bottleneck after your fix?" | Depth. Strong candidates always know. |
+| "How did you know it was safe to make click counts eventual?" | Whether you thought about correctness, not just speed. |
+| "Would you do the same thing at 100x the traffic?" | Scaling judgement; a bridge into system design. |
+| "Did you consider just not caching?" | Whether you can defend the architecture, not only the patch. |
+
+## Weak versus strong
+
+<Callout type="pitfall" title="What a weak answer sounds like">
+"Our API was slow, so I added Redis caching and it became much faster. We saw a
+big improvement in response times and the users were happy."
+
+Three sentences, no numbers, no investigation, no tradeoff, and — worst of all —
+the optimisation is asserted rather than justified. This is also the answer that
+the url-shortener bug above makes fun of: adding a cache does not guarantee
+anything if the query still runs.
+</Callout>
+
+<Callout type="interview" title="What a strong answer sounds like">
+A trigger with a source. A baseline number at a named percentile with the tool
+that produced it. A wrong first hypothesis, eliminated with evidence. A precisely
+stated bottleneck. Two or three options with their tradeoffs and a justified
+choice. The change in enough detail to be interrogated. An after number measured
+the same way. An honest cost. And the sentence that says where the bottleneck
+moved to and why you stopped.
+</Callout>
+
+Next: [Story 3 — how do you approach code reviews](/behavioral/story-3-how-do-you-approach-code-reviews),
+which is a different animal — less a story than a stated philosophy backed by
+examples.

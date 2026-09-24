@@ -1,0 +1,275 @@
+---
+title: "10. Other building blocks to know"
+topic: "system-design"
+order: 210
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 23
+tags: [cdn, api-design, bloom-filter, unique-ids, microservices, observability]
+format: "mdx"
+summary: "The components that show up in every design but rarely get a lesson — CDNs and what they can't cache, pagination that survives scale, Bloom filters, Snowflake IDs, the monolith-first argument, and observability as the answer to 'how would you know?'"
+---
+
+## Layer 1 — The mental model
+
+These are the pieces you'll reach for in almost every design but that don't get
+a chapter of their own. What they have in common is that **each one exists
+because a simpler thing failed at scale**, and knowing the failure is what lets
+you justify the component instead of name-dropping it.
+
+| Building block | The failure it answers |
+|---|---|
+| CDN | Every user pays the distance to your origin |
+| Cursor pagination | `OFFSET 1000000` makes the database count a million rows |
+| Idempotency keys | A timed-out POST retried becomes a duplicate order |
+| Bloom filter | Lookups for things that don't exist hit the disk anyway |
+| Snowflake IDs | Auto-increment needs one coordinator; UUIDs destroy index locality |
+| Monolith-first | Microservices bought distribution before it was needed |
+| Observability | You can't fix what you can't see, and "it's slow" isn't a symptom |
+
+Two of these deserve flagging as interview signals in their own right. **"Start
+with a monolith"** is a trap question — leading with microservices is one of the
+most common ways to lose credibility. And **observability** is what separates
+candidates who have operated a system from those who have only drawn one:
+finishing a design with "here's how I'd know it was healthy" is consistently
+underused and consistently well received.
+
+---
+
+## Layer 2 — The mechanism
+
+### CDN
+
+A CDN is a fleet of caching servers near users. A request goes to the nearest
+edge; on a hit it's served from there, and on a miss the edge fetches from your
+origin and caches it.
+
+The value is mostly **latency** — you cannot beat the speed of light, so the
+only way to reduce a 150 ms transcontinental round trip is to move the bytes
+closer. The secondary value is **origin offload**, which for a static-heavy site
+is most of your traffic.
+
+What matters beyond the definition:
+
+- **Cache key and `Cache-Control`.** The edge caches by URL plus whatever you
+  vary on. A `Vary: Cookie` header, or a session cookie in the key, fragments
+  the cache per user and quietly destroys the hit rate.
+- **Invalidation is the hard part**, exactly as with any cache. The practical
+  answer is **content-hashed filenames** (`app.4f3a9c.js`), which makes every
+  deploy a new URL and means you never invalidate anything — the old object just
+  ages out. Explicit purge exists but is slow and rate-limited.
+- **You can cache dynamic content**, with a short TTL, if you're willing to
+  serve slightly stale data. A personalised page usually can't be cached, but
+  its shell often can.
+- **`stale-while-revalidate`** serves the cached copy while refreshing in the
+  background — a cheap latency win and a good detail to mention.
+
+### API design that survives scale
+
+**Pagination** is where naive APIs break, and the reason is mechanical:
+
+```sql
+-- OFFSET pagination: the database must COUNT AND DISCARD 1,000,000 rows
+SELECT * FROM events ORDER BY id LIMIT 20 OFFSET 1000000;   -- slow, and
+                                                            -- gets slower
+
+-- Cursor (keyset) pagination: an index seek, constant time at any depth
+SELECT * FROM events WHERE id > :last_seen_id ORDER BY id LIMIT 20;
+```
+
+**`OFFSET n` is O(n)** — the database has to produce and throw away every
+skipped row. Page 50,000 of an offset-paginated API is a table scan. Cursor
+pagination is an index seek regardless of depth, and it has a second advantage:
+it's **stable under concurrent inserts**, whereas offset pagination shows you
+duplicates or skips rows when the underlying data shifts between pages. The cost
+is that you lose random access to "page 500," which almost nothing actually
+needs.
+
+**Idempotency keys.** A client sends `Idempotency-Key: <uuid>` with a POST; the
+server records it with the response. A retry returns the original result instead
+of creating a second charge. This is the pattern that makes retries safe in a
+world where a timeout tells you nothing about whether the work happened, and it
+shows up in [notifications](/system-design/case-5-design-a-notification-system-email-sms-push),
+[chat](/system-design/case-4-design-a-chat-system-whatsapp-messenger) and
+[reliability patterns](/system-design/15-microservice-reliability-patterns).
+
+**Versioning.** URL path (`/v1/`) is explicit and cache-friendly; header-based
+is cleaner and harder to debug. The real lesson is that the best versioning is
+**additive change** — add optional fields, never remove or repurpose one — so
+you rarely need a v2 at all.
+
+**API gateway.** One entry point handling auth, rate limiting, routing, and TLS
+termination, so every service doesn't reimplement them. The caveat worth saying:
+it's a single point of failure and a deployment bottleneck if it accumulates
+business logic.
+
+### Bloom filters
+
+A probabilistic set that answers membership with a specific asymmetry:
+**"definitely not present" or "possibly present."** Never a false negative,
+sometimes a false positive.
+
+```
+Insert:  hash the key with k functions, set those k bits
+Query:   hash, check those k bits
+         any bit is 0  → DEFINITELY not present   (exact)
+         all bits are 1 → probably present        (might be a false positive)
+```
+
+The point is size. A Bloom filter for a billion items with a 1% false-positive
+rate is about 1.2 GB, versus hundreds of gigabytes for the keys themselves. That
+fits in memory when the real data does not.
+
+Where it actually pays: **guarding an expensive lookup**. Cassandra puts one in
+front of each SSTable so a read can skip files that definitely don't contain the
+key. A URL shortener can use one to answer "is this code taken?" without a
+database round trip — a false positive just means you generate another code,
+which is harmless. That harmlessness is the test for whether a Bloom filter
+fits: **a false positive must be merely wasteful, not incorrect.**
+
+The limitation: standard Bloom filters **cannot delete** (clearing bits would
+break other keys). Counting Bloom filters and cuckoo filters fix that at a cost.
+
+### Unique ID generation
+
+| Approach | Sortable | Coordination | Problem |
+|---|---|---|---|
+| DB auto-increment | Yes | **One writer** | Doesn't shard; a bottleneck and a SPOF |
+| UUIDv4 | **No** | None | 128 bits, and random order **destroys B-tree locality** |
+| UUIDv7 / ULID | Yes | None | 128 bits, but time-ordered — usually the easy answer now |
+| Snowflake | Yes | Machine ID only | 64 bits, needs clock and ID coordination |
+
+The non-obvious cost is the index one. **A random UUID as a primary key means
+every insert lands in a random page of the B-tree**, so the working set becomes
+the whole index instead of the tail, page splits multiply, and write throughput
+falls. This is severe in MySQL/InnoDB, where the primary key *is* the table.
+Time-ordered IDs append to the end of the index, which is the cheap case.
+
+Snowflake's 64 bits:
+
+```
+| 1 unused | 41 bits timestamp (ms) | 10 bits machine | 12 bits sequence |
+   → ~69 years of milliseconds, 1,024 machines, 4,096 IDs per ms per machine
+```
+
+Sortable by time, generated locally with no coordination per ID, and half the
+size of a UUID. The failure mode to know: **clock skew going backwards** — an
+NTP correction can make a node issue duplicate IDs, so implementations refuse to
+issue any until the clock catches up.
+
+### Monolith versus microservices
+
+The interview-correct answer, and it happens to also be right:
+
+> **Start with a monolith. Split when a specific pain justifies it.**
+
+Microservices don't buy technical scale — a monolith scales horizontally
+perfectly well if it's stateless. What they buy is **organisational** scale:
+independent deploys, independent teams, independent failure and independent
+technology choices. If you have one team, you're paying the cost and buying
+nothing.
+
+And the cost is large: every in-process call becomes a network call that can
+fail; a transaction that spanned two tables becomes a
+[saga](/system-design/15-microservice-reliability-patterns); debugging needs
+distributed tracing; and you now operate N deployment pipelines. The **modular
+monolith** — strong internal boundaries, one deployable — gets most of the
+design benefit with none of the distribution cost, and naming it shows you've
+thought past the dichotomy.
+
+Split along boundaries that **change independently or scale differently**, not
+along technical layers. A separate "database service" is the classic wrong cut.
+
+### Observability
+
+The section that ends a design well, because interviewers ask "how would you
+know it was working?" and most candidates have nothing.
+
+**The three pillars, and what each is for:**
+
+- **Metrics** — cheap, aggregated, good for alerting and trends. Bounded
+  cardinality, so you can't put a user ID in a label.
+- **Logs** — expensive, detailed, good for investigating one request. Structured
+  JSON with a correlation ID, not free text.
+- **Traces** — one request's path across services with timing per hop. The only
+  way to answer "which of these twelve services made it slow."
+
+**What to measure:** the RED method for services (Rate, Errors, Duration) and
+USE for resources (Utilization, Saturation, Errors). And **always percentiles,
+never averages** — an average hides the tail entirely, and the tail is what
+users experience. p99 is the number that matters; if 1% of requests are
+terrible and a page makes 100 requests, most page loads contain one.
+
+**What to alert on:** symptoms, not causes. Alert on "checkout error rate is
+above 1%" and "p99 latency exceeds 2 seconds," because those are things users
+feel. Alerting on high CPU pages someone for a machine that's doing its job. And
+per the queue and load-balancing lessons, **alert on saturation signals** — queue
+depth, consumer lag, pool utilisation — because those catch the failure where
+everything is slow and nothing errors.
+
+**Correlation IDs** thread a request through every service and into every log
+line. Cheap to add, and the difference between a five-minute investigation and a
+five-hour one.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why a CDN?"** Latency, primarily — you can't beat the speed of light, so
+   move the bytes closer. Origin offload is the bonus.
+2. **"How do you invalidate CDN content?"** Prefer not to: content-hash the
+   filename so every deploy is a new URL. Purge is slow and rate-limited.
+3. **"Why is `OFFSET` pagination slow?"** The database produces and discards
+   every skipped row, so it's O(offset). Cursor pagination is an index seek at
+   any depth.
+4. **"What else does cursor pagination fix?"** Stability — offset pagination
+   duplicates or skips rows when data is inserted between requests.
+5. **"How do you make a POST safe to retry?"** A client-supplied idempotency
+   key, stored with the response, returned on a repeat.
+6. **"What's a Bloom filter for?"** Skipping an expensive lookup for keys that
+   definitely aren't there. No false negatives, occasional false positives.
+7. **"When is a Bloom filter inappropriate?"** When a false positive would be
+   *incorrect* rather than merely wasteful — and when you need deletions.
+8. **"Why not UUIDv4 as a primary key?"** Random order destroys B-tree
+   locality, so inserts scatter across the index. Use UUIDv7/ULID or Snowflake.
+9. **"How does Snowflake work?"** Timestamp, machine ID and a per-millisecond
+   sequence in 64 bits — sortable, no per-ID coordination.
+10. **"What breaks Snowflake?"** The clock moving backwards. Implementations
+    stall rather than risk duplicates.
+11. **"Monolith or microservices?"** Monolith first. Microservices buy
+    organisational scale, not technical scale, and you pay in network calls,
+    sagas and operations.
+12. **"Where would you split?"** Along boundaries that change or scale
+    independently — never along technical layers.
+13. **"How would you know the system is healthy?"** RED metrics at p99, traces
+    for cross-service latency, structured logs with a correlation ID, and alerts
+    on user-visible symptoms plus saturation signals.
+14. **"Why percentiles and not averages?"** An average hides the tail. If 1% of
+    requests are terrible and a page makes 100, most page loads hit one.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **A CDN cache key that includes a session cookie**, which drops the hit rate
+  to nothing.
+- **Offset pagination on a large table**, which degrades as users go deeper.
+- **Random UUID primary keys** at write-heavy scale.
+- **Leading with microservices** in a design interview.
+- **Splitting services by layer** rather than by axis of change.
+- **Averages on dashboards**, hiding every tail problem you have.
+- **Alerting on causes (CPU) instead of symptoms (error rate, latency).**
+- **No correlation ID**, which makes a multi-service investigation guesswork.
+</Callout>
+
+### Where this connects
+
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — the building
+  block that earned its own lesson.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — idempotency keys, sagas, and what distribution really costs.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — a CDN is a cache, with the same invalidation problem.
+- [6. Databases](/system-design/6-databases) — why index locality makes ID
+  choice a performance decision.
+- [11. A reference architecture](/system-design/11-a-reference-architecture-how-the-pieces-fit)
+  — where all of these sit relative to each other.

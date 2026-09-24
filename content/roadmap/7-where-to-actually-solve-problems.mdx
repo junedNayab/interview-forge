@@ -1,0 +1,198 @@
+---
+title: "7. Where to actually solve problems"
+topic: "roadmap"
+order: 7
+difficulty: "easy"
+estimatedMinutes: 14
+tags: [roadmap, resources, leetcode, books, mocks, practice]
+format: "mdx"
+summary: "The external resources worth using per track — what each is actually good for, how to use it well, how many hours to give it, and which ones are commonly over-invested in."
+---
+
+## How to think about external resources
+
+The lessons on this site are a map. They tell you what to learn and in what
+order, and they compress a lot of material into a readable form. What they
+cannot do is give you volume and they cannot give you another human being. That
+is what the outside resources are for.
+
+Two failure modes to avoid. The first is collecting resources: buying three
+books, bookmarking four courses, subscribing to two platforms, and using none of
+them past chapter two. The second is finishing a resource for its own sake —
+working through all 150 problems on a list because it is a list, when the last
+sixty added nothing.
+
+**Pick one primary resource per track, use it until it stops teaching you, and
+then stop.** The time budgets below are rough guidance for the fifteen-week plan.
+
+## DSA
+
+### LeetCode — the primary, roughly 60 to 80 hours
+
+There is no real alternative for volume, and the problems overlap heavily with
+what companies actually ask. You already have several hundred solved, so your
+use of it is different from a beginner's: you are maintaining and patching, not
+building.
+
+How to use it well at your stage:
+
+- **Solve by pattern, not by list position.** Pick a weak pattern from
+  [the DSA track](/dsa), then filter LeetCode by the corresponding tag and do
+  six to eight in a row. Consecutive problems in one pattern build recognition
+  in a way that shuffled problems do not.
+- **Always set a timer.** Twenty-five minutes for a medium, and stop when it
+  goes off whether or not you are done. Untimed practice trains a skill you
+  will not be allowed to use.
+- **Talk out loud.** This feels ridiculous alone at a desk and it is the single
+  highest-value modification you can make, because verbalising while thinking is
+  the actual bottleneck in a live round.
+- **Use the company filter in the last three weeks,** once you have loops
+  scheduled. Before that it is a distraction.
+- **Re-solve rather than accumulate.** A problem you solved two months ago and
+  can re-solve in fifteen minutes is worth more than a new one.
+
+What it is bad for: it teaches nothing about communication, it rewards a
+puzzle-solving style that is only loosely related to engineering, and the
+discussion sections will happily give you an optimal solution before you have
+struggled enough to learn anything.
+
+### Neetcode — the pattern structure, roughly 10 hours
+
+Neetcode's curated lists (the 150, and the roadmap view) are the best freely
+available *organisation* of LeetCode problems, and the videos are good at
+explaining the intuition behind a pattern rather than just the solution.
+
+Use it as a problem *selector* rather than a curriculum: when you have
+identified a weak pattern, its list for that pattern is a better-ordered set
+than what you would assemble yourself. Watch a video only after a genuine
+attempt, not before.
+
+Do not work through all 150 top to bottom. At your level most of them are
+revision you do not need, and the completionist impulse will eat time that phase
+2 needs.
+
+## System design
+
+### "System Design Interview" Volumes 1 and 2, Alex Xu — roughly 25 hours
+
+The best match to the format of the interview itself. Each chapter is a case
+study worked in the same four-step structure, which is exactly what you need
+when you are learning to *drive* the round rather than to be an architect.
+
+Use it after the building-block lessons here, and use it the way
+[how to practice](/system-design/12-how-to-practice-do-this-dont-just-read)
+describes: attempt the case with a 45-minute timer, out loud, *then* read the
+chapter and diff. Reading it first is pleasant and produces the illusion that
+you could have done it.
+
+Volume 1 is the higher priority. Volume 2 is broader and less essential.
+
+### "Designing Data-Intensive Applications", Kleppmann — roughly 20 hours, selectively
+
+DDIA is the best book in this space and it is not an interview book. It will
+make you genuinely understand replication, partitioning, consistency and
+consensus at a depth no interview requires, and it will take you sixty hours to
+read properly.
+
+**Read chapters 5, 6, 7 and 9 — replication, partitioning, transactions and
+consistency and consensus.** Those four map directly onto the questions
+interviewers push on, and they are where your intuition will be weakest coming
+from a single-database background. Chapter 1 to 4 are worth skimming; the
+stream-processing chapters are excellent and not interview-critical.
+
+Read it during phase 2 in parallel with the case studies, not instead of them.
+It deepens answers; it does not teach you to produce one in forty-five minutes.
+
+### ByteByteGo and the system-design-primer repository — as reference, a few hours
+
+ByteByteGo's diagrams are good for revision and the newsletter is a reasonable
+way to keep the vocabulary warm. The `system-design-primer` GitHub repository is
+a large free compendium, best used for looking things up rather than reading
+linearly.
+
+Neither should be a primary. They are both broad and shallow relative to the
+case-study work that actually moves the score.
+
+## Java
+
+### "Effective Java", Bloch — roughly 15 hours, selectively
+
+The reference for how experienced Java engineers think, and it reads as a set of
+short independent items, which makes it easy to use in twenty-minute chunks. For
+interviews, the highest-value chapters are the ones on object methods
+(`equals`, `hashCode`, `toString`), generics, enums, and lambdas and streams.
+
+It pairs directly with [OOP and design principles](/java/5-oop-design-principles)
+and with the LLD track, because the vocabulary it gives you is what makes design
+answers sound senior rather than merely correct.
+
+### "Java Concurrency in Practice", Goetz — roughly 12 hours, chapters 1 to 5 and 10
+
+Old, still the best thing written on the subject, and concurrency is where a
+backend candidate most often gets separated from the pack. The first five
+chapters cover thread safety, sharing objects, composing objects and the
+building blocks, which is essentially the whole interview surface. Chapter 10 on
+deadlock is worth adding.
+
+Read it alongside [concurrency](/java/3-concurrency-senior-must-have) and write
+the code. Concurrency is not a reading subject — the understanding arrives when
+you have written a race condition and watched it happen.
+
+## Mocks — the one most people skip
+
+### Pramp and interviewing.io — roughly 15 to 20 hours
+
+**This is the most under-used resource on the list and it is the one with the
+clearest effect on outcomes.** Every other item here improves what you know.
+Mocks improve what you can produce while a stranger watches, which is the thing
+actually being measured.
+
+**Pramp** is free peer-to-peer. You interview someone and they interview you.
+The quality varies with who you draw, and half the value comes from the side
+where you are the interviewer — watching someone go silent for four minutes
+teaches you more about why silence is penalised than any amount of advice.
+
+**interviewing.io** has professional interviewers, including engineers from the
+companies you are targeting, and the feedback is substantially better. It costs
+money and it is worth it for two or three sessions, particularly for system
+design, where self-assessment is least reliable.
+
+How to use them: start earlier than feels comfortable — week 6 or 7, not week
+13. Your first mock will be bad, and it is far better for that to happen in week
+6 with a stranger you will never meet again. Do two a week through phase 4, and
+alternate round types rather than doing only the one you are best at.
+
+If neither is practical, a colleague or friend with a problem statement and a
+timer captures most of the benefit. The essential ingredient is another human
+being, not the platform.
+
+## Rough allocation
+
+| Resource | Track | Hours | When |
+|---|---|---|---|
+| LeetCode | DSA | 60–80 | Throughout, as secondary |
+| Neetcode lists | DSA | 10 | Phase 0–1, for pattern selection |
+| Alex Xu Vol 1 | System design | 20 | Phase 2, after each attempt |
+| DDIA (ch. 5–7, 9) | System design | 20 | Phase 2, in parallel |
+| Effective Java | Java / LLD | 15 | Phase 1 and 3 |
+| Java Concurrency in Practice | Java | 12 | Phase 1 |
+| Pramp / interviewing.io | All | 15–20 | Week 6 onwards |
+| ByteByteGo, primer repo | System design | 5 | Reference only |
+
+That is roughly 160 hours of external work against the 250 to 300 in
+[the plan](/roadmap/3-the-integrated-plan-everything-sequenced-your-chart) —
+the rest being the lessons here and, more importantly, the practice attempts
+that no resource can do for you.
+
+## What to skip
+
+- **Paid interview-prep courses that repackage the same material.** You have the
+  map already; what you need is repetition, and repetition is free.
+- **Certifications.** They do not affect hiring at these companies.
+- **Building a second portfolio project.** Going deeper on the URL shortener —
+  load testing it, fixing its real bugs, writing up the tradeoffs — produces far
+  more interview material per hour than starting something new, because depth is
+  what gets interrogated and breadth is not.
+- **Reading a fourth system design resource.** If you have Alex Xu, DDIA and the
+  case studies here and you still cannot drive a design round, the missing
+  ingredient is timed spoken attempts, and no book supplies those.

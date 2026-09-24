@@ -1,0 +1,305 @@
+---
+title: "3. The integrated plan — everything, sequenced (your chart)"
+topic: "roadmap"
+order: 3
+difficulty: "medium"
+estimatedMinutes: 18
+tags: [roadmap, plan, schedule, phases, system-design, milestones]
+format: "mdx"
+summary: "A fifteen-week sequence with one primary track per phase, weighted toward system design, with a concrete definition of done for each phase and the week to start applying."
+---
+
+## The premise
+
+Four tracks, a full-time job, and roughly fifteen to twenty hours a week. That
+adds up if you sequence it and does not if you swarm it. Trying to make progress
+on Java, SQL, DSA, HLD, LLD, CS fundamentals and behavioral simultaneously
+produces seven shallow tracks and the distinct feeling of working hard while
+nothing improves.
+
+Three rules make it fit:
+
+**One primary track per phase.** Each phase has a single thing you go deep on —
+ninety to a hundred and twenty minutes a day. Everything else is thirty to
+forty-five minutes of maintenance, not deep work.
+
+**Let things double-count.** Learning `@Transactional` properly is Java track
+work, it is also material for the project deep dive, and it is also the
+explanation for a bug in your URL shortener that becomes a behavioral story. The
+plan is built to exploit these overlaps rather than treating each track as
+separate hours.
+
+**The gap gets the most time.** System design is roughly six of the fifteen
+weeks, because you are starting from zero on it and because it is the slowest
+track to improve. Everything else is either maintenance or a build you can do
+quickly.
+
+## The shape at a glance
+
+| Phase | Weeks | Primary (90–120 min/day) | Secondary (30–45 min) | Running in background |
+|---|---|---|---|---|
+| **0. Setup** | 0 | Resume, diagnosis, environment | — | — |
+| **1. Backend depth** | 1–3 | Java internals, Spring/JPA, SQL refresh | DSA weak patterns | Resume out to 5 companies |
+| **2. System design (HLD)** | 4–9 | HLD building blocks, then case studies | DSA maintenance | Behavioral drafting, 1 evening/week |
+| **3. LLD and machine coding** | 10–12 | OOP, SOLID, patterns, timed builds | DSA maintenance | Applications, CS rapid-fire |
+| **4. Integration** | 13–15 | Mocks across all round types | Weak-area patching | Live loops |
+
+Total: roughly 250 to 300 hours. If you have more time per week, compress
+proportionally — full-time, this is eight to ten weeks. What does not compress is
+phase 2, because design skill accumulates through repeated spoken attempts and
+you cannot do twelve of those in a weekend.
+
+---
+
+## Phase 0 — Setup (week 0, about six hours)
+
+The point of this phase is to get the slow-moving things started before you need
+them, and to find out where you actually are rather than where you assume.
+
+**Do these, in this order:**
+
+1. **Rewrite the resume.** Follow
+   [resume guidance](/roadmap/6-resume-guidance-projects-skills-sections).
+   This comes first because the application pipeline has a four-to-six-week
+   delay built into it, and because writing honest project bullets forces you to
+   notice what you cannot defend.
+2. **Run the DSA diagnostic.** Skim the fifteen pattern lessons and, without
+   solving anything, mark the ones whose template you could not write from
+   memory. Then solve one timed medium in two different patterns to calibrate
+   how rusty you actually are.
+3. **Read [the framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+   once.** Not to learn it — to see the shape of what you are about to spend six
+   weeks on.
+4. **Set up the tracker.** See
+   [progress tracking](/roadmap/5-progress-tracking). A spreadsheet is fine.
+5. **Fix the hardcoded credentials in your project.** The JWT signing secret and
+   the database username and password in `application.yml` should come from
+   environment variables, and the committed values should be treated as
+   compromised and rotated. Do this now, because you are about to start showing
+   this repository to people and it is the first thing a senior engineer will
+   notice.
+
+**Done looks like:** a resume you would send today, a marked-up list of weak DSA
+patterns, a tracker with rows in it, and a project you are not embarrassed to
+link.
+
+---
+
+## Phase 1 — Backend depth (weeks 1 to 3)
+
+**Why first.** It is the fastest track to move, it is the foundation for LLD
+(OOP and SOLID), it is what the project deep dive tests, and it produces the raw
+material for two or three behavioral stories. Three weeks here makes the next
+twelve more productive.
+
+### Week 1 — Core Java
+
+[Collections deep dive](/java/2-collections-framework-deep-dive), then
+[concurrency](/java/3-concurrency-senior-must-have) — which is the one to slow
+down on, and the one to do by writing code rather than reading. Work
+[producer-consumer](/java/practice-producer-consumer) and
+[the thread-safe singleton](/java/practice-thread-safe-singleton) by hand.
+Finish with [Java 8+ features](/java/4-java-8-features).
+
+Secondary: two weak DSA patterns, one problem each per day, timed and narrated.
+
+### Week 2 — Spring, JPA and your project
+
+[Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate), then
+[the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question),
+then [transaction management](/java/5-transaction-management-transactional) and
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies).
+
+Then apply it: go through the URL shortener and write down, for each decision,
+why it is that way and what you would change. You will find the `@Transactional`
+on the redirect path, the synchronous click insert, and the database query that
+still runs on every cache hit. **Write these down — they are the substance of
+your project deep dive and of two behavioral stories.**
+
+Secondary: two more weak DSA patterns.
+
+### Week 3 — SQL and OOP
+
+[Indexing and performance](/sql/3-indexing-performance),
+[query optimization](/sql/5-query-optimization-checklist),
+[window functions](/sql/2-window-functions-the-senior-differentiator), and
+[practice problems](/sql/practice-sql-problems) until they are automatic.
+Then [OOP and design principles](/java/5-oop-design-principles), which is the
+bridge into phase 3.
+
+Secondary: remaining weak DSA patterns. Send the resume to five companies at the
+end of this week — not your top choices.
+
+**Phase 1 done looks like:**
+
+- You can explain, out loud and without notes, how HashMap handles collisions,
+  what `volatile` guarantees, what the persistence context does between two
+  repository calls, and why a self-invoked `@Transactional` method does nothing.
+- You can write the N+1 problem on a whiteboard and give three fixes with their
+  tradeoffs.
+- You have a written page of "here is what is wrong with my project and why",
+  covering at least four issues.
+- Every DSA pattern template is writable from memory.
+
+---
+
+## Phase 2 — System design (weeks 4 to 9)
+
+**Six weeks, the longest phase, because it is the gap.** Resist the urge to
+shorten it. This is also the phase where the temptation to substitute reading for
+practice is strongest, and where doing so is most costly.
+
+### Weeks 4 and 5 — The building blocks
+
+Two lessons every three days, in order:
+[the framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+again (properly this time),
+[estimation](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize),
+[scaling](/system-design/3-scaling-vertical-vs-horizontal),
+[load balancing](/system-design/4-load-balancing),
+[caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis),
+[databases](/system-design/6-databases),
+[CAP and consistency](/system-design/7-cap-theorem-consistency-models),
+[queues](/system-design/8-asynchronous-processing-message-queues),
+[rate limiting](/system-design/9-rate-limiting-you-already-have-a-basic-version).
+
+The estimation numbers are rote. Memorise them in week 4 and use them in every
+subsequent session; they are the difference between an estimate that sounds like
+engineering and one that sounds like arithmetic anxiety.
+
+### Week 6 — The second layer and the synthesis
+
+[Other building blocks](/system-design/10-other-building-blocks-to-know),
+[consistent hashing](/system-design/13-consistent-hashing),
+[Kafka](/system-design/14-kafka-and-event-streaming),
+[microservice reliability patterns](/system-design/15-microservice-reliability-patterns),
+and then
+[the reference architecture](/system-design/11-a-reference-architecture-how-the-pieces-fit),
+which is where the components stop being a list and become a system.
+
+From this week, add **one behavioral evening per week**: read
+[general behavioral tips](/behavioral/general-behavioral-tips), then draft one
+story a week. By the end of phase 3 you will have six or seven without ever
+having spent a whole session on it.
+
+### Weeks 7 to 9 — Case studies, done out loud
+
+Read [how to practice](/system-design/12-how-to-practice-do-this-dont-just-read)
+first, and then follow it literally. Each case study is one full session with a
+45-minute timer, standing, talking, before you read the answer:
+
+- Week 7: [URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  and [distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter) —
+  both of which you have partially built, which makes them the right place to
+  start.
+- Week 8: [news feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline)
+  and [chat](/system-design/case-4-design-a-chat-system-whatsapp-messenger).
+- Week 9: [notifications](/system-design/case-5-design-a-notification-system-email-sms-push),
+  then a second pass on whichever two went worst, then
+  [self-grade](/system-design/how-to-self-grade-your-practice) all of them.
+
+Do each case twice, a week apart. The second attempt is where the improvement
+actually happens, and the gap between them is the clearest measurement you will
+get of whether this is working.
+
+**Phase 2 done looks like:**
+
+- You can drive forty-five minutes on an unfamiliar design problem without being
+  prompted, hitting all six phases, with time left for self-critique.
+- You produce a capacity estimate in under five minutes and draw an explicit
+  conclusion from it.
+- For caching you can discuss eviction policy, TTL strategy, cache-aside versus
+  write-through, stampede protection and hot keys — not just "add Redis".
+- You can name the single points of failure in your own design before being
+  asked.
+- All five case studies attempted twice, recorded, self-graded.
+
+At the end of week 8, **widen the application pipeline** to fifteen or twenty
+companies. Loops will land in weeks 12 to 16, which is when you want them.
+
+---
+
+## Phase 3 — LLD and machine coding (weeks 10 to 12)
+
+**Week 10 — Foundations.**
+[HLD versus LLD](/lld/hld-vs-lld-get-this-clear-first) first so the two rounds
+stop blurring, then
+[OOP applied](/lld/part-1-the-foundation-oop-the-4-pillars-applied) and
+[SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview). Do the
+refactoring exercises rather than reading about them.
+
+**Week 11 — Vocabulary and method.**
+[Design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) — know eight or
+ten genuinely, rather than twenty-three by name. Then
+[the method](/lld/part-4-how-to-drive-an-lld-interview-the-method) and the
+[worked parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical),
+which you should attempt yourself before reading.
+
+**Week 12 — Timed builds.**
+Three or four problems from
+[the practice set](/lld/part-6-practice-problems-beginner-advanced), each under a
+real ninety-minute timer with working code at the end. Then
+[machine coding survival tips](/lld/part-8-machine-coding-round-survival-tips).
+[The four-week plan](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build)
+is the expanded version if this phase needs to be longer.
+
+Background this phase: CS fundamentals on low-energy days — one lesson from
+[CS fundamentals](/cs-fundamentals) per week, then
+[the rapid-fire self-test](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud)
+answered out loud.
+
+**Phase 3 done looks like:**
+
+- You can take a problem statement to a class diagram with clear responsibilities
+  in fifteen minutes.
+- You can name the SOLID principle a piece of code violates and show the fix.
+- You have built three machine-coding problems inside ninety minutes with code
+  that compiles and runs.
+- You have a default starting structure you reach for under time pressure rather
+  than designing from scratch.
+
+---
+
+## Phase 4 — Integration (weeks 13 to 15)
+
+The content phase is over. This phase is entirely about performance under
+pressure, and the failure mode is going back to reading because reading is
+comfortable.
+
+- **Two mocks a week minimum**, ideally with a person. Pramp and interviewing.io
+  are the usual routes; see
+  [where to actually solve problems](/roadmap/7-where-to-actually-solve-problems).
+  Alternate round types.
+- **Behavioral finished.** Six to eight stories written, rehearsed out loud,
+  timed at four minutes, each surviving eight follow-ups.
+- **Project defence rehearsed.** Forty-five minutes of someone asking why you
+  built the URL shortener the way you did.
+- **One or two timed mediums a day**, still narrated.
+- **Patch weak areas** identified by the mocks, and nothing else. Resist starting
+  a new topic in week 14.
+- **Live loops running.** The first one will be your worst; schedule it
+  accordingly.
+- Before each onsite, work
+  [the day-of checklist](/behavioral/day-of-interview-checklist).
+
+**Phase 4 done looks like:** you are getting through onsites and the feedback,
+where you get it, is about specific gaps rather than about structure or
+communication.
+
+---
+
+## If you have less time than this
+
+Compressions in order of least damage:
+
+1. **Cut DSA maintenance to three days a week.** You are strong there; the
+   returns are the lowest of anything in the plan.
+2. **Cut phase 1 to two weeks** by doing only collections, concurrency, JPA and
+   transactions, and skipping JVM internals and generics.
+3. **Cut phase 3 to two weeks** if the companies you are targeting weight HLD
+   over machine coding — ask the recruiter, because this varies a lot.
+4. **Do not cut phase 2.** Six weeks of system design is the reason the plan
+   exists. Cutting it returns you to the position you are trying to leave.
+
+And if you fall behind, do not restart the plan. Move the phase boundary and
+carry on; the sequence matters much more than the dates.

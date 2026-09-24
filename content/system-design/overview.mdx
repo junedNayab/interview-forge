@@ -1,0 +1,168 @@
+---
+title: "Overview"
+topic: "system-design"
+order: 300
+group: "Case Studies"
+difficulty: "medium"
+estimatedMinutes: 10
+tags: [overview, system-design, reading-order, study-plan, practice]
+format: "mdx"
+summary: "Why the design round scores your process rather than your architecture, the order to work through the 22 lessons when you are starting from zero, and the concrete self-check that says you are interview-ready."
+---
+
+## What this track is assessed on
+
+The design round decides your level, and it is where the mismatch between what candidates
+prepare and what interviewers score is widest.
+
+What people assume they are scored on is knowing the right architecture: they study
+diagrams, memorise that news feeds use fan-out-on-write and URL shorteners use base62, and
+arrive ready to produce the answer.
+
+What is actually scored is **whether you can take an underspecified problem, narrow it
+down, justify every decision with a number, and criticise your own design before the
+interviewer has to.** There is no answer key — two candidates can produce entirely
+different diagrams and both score well, or both badly. The diagram is evidence; the
+reasoning is the product.
+
+You can see this in how the round fails. Candidates rarely fail for choosing Cassandra over
+Postgres. They fail because they started drawing boxes in minute two without asking
+anything, added Kafka without naming the bottleneck it solves, never did the arithmetic
+that would have shown one database was enough, or spent twenty minutes on authentication
+and never reached what the interviewer cared about. Every one is a process failure.
+
+The corollary is worth internalising early: **a simpler design you drive confidently and
+critique honestly outscores a sophisticated one you cannot defend.**
+
+## Where you stand, and what to prioritise
+
+Your stated gap is no system design background at all. That changes the plan in three ways.
+
+**You cannot skip the fundamentals in favour of case studies.** Starting with "design
+Twitter" before you have a feel for what 10,000 requests per second means is how people end
+up memorising solutions rather than acquiring a method.
+
+**Your existing strengths transfer more than you think.** You know SQL properly, so the
+database, indexing and sharding conversations are closer to home than they look — sharding
+is partitioning, and a hot shard is a skewed key distribution. You have used Redis, which is
+most of the caching lesson. And your DSA background makes consistent hashing and
+rate-limiting algorithms just data structures. The genuinely new material is narrower than
+"all of system design": estimation, the vocabulary of distributed failure, and the interview
+method itself.
+
+**The method is learnable faster than the content and worth more.** Someone who runs a
+disciplined 45 minutes with a modest design beats someone with broader knowledge and no
+structure, which is why the framework lesson comes first and you return to it before every
+practice attempt.
+
+Priority order for you: the framework, estimation, databases, caching, then consistency.
+Those five carry most of the round.
+
+## The order to work through it
+
+The fundamentals, roughly in the order the concepts depend on each other.
+
+1. [1. The framework — how to drive a 45-minute design interview](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+   — read this first and re-read it before every practice attempt. It is the only
+   lesson that is about the interview rather than about systems.
+2. [2. Back-of-the-envelope estimation (numbers to memorize)](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize)
+   — second, because estimation is what turns every later decision from an
+   opinion into a justification.
+3. [3. Scaling: vertical vs horizontal](/system-design/3-scaling-vertical-vs-horizontal)
+   — the basic axis every other component sits on, including why stateless
+   services are the precondition for horizontal scaling.
+4. [4. Load balancing](/system-design/4-load-balancing) — the first component you
+   add, and the first place a single point of failure appears.
+5. [5. Caching (your strongest topic — you already use Redis)](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+   — early, because you have real experience here and it builds confidence before
+   the harder material.
+6. [6. Databases](/system-design/6-databases) — replication, partitioning and the
+   SQL-versus-NoSQL decision framed as a requirements question rather than a
+   preference.
+7. [7. CAP theorem & consistency models](/system-design/7-cap-theorem-consistency-models)
+   — after databases, because CAP is meaningless until you have a replicated
+   system to apply it to.
+8. [8. Asynchronous processing & message queues](/system-design/8-asynchronous-processing-message-queues)
+   — the single most reusable move in design interviews: take work off the
+   request path.
+9. [9. Rate limiting (you already have a basic version!)](/system-design/9-rate-limiting-you-already-have-a-basic-version)
+   — short, and it connects to something you have already built.
+10. [10. Other building blocks to know](/system-design/10-other-building-blocks-to-know)
+    — CDNs, blob storage, search, service discovery: breadth so that no component
+    name is unfamiliar mid-interview.
+11. [13. Consistent hashing](/system-design/13-consistent-hashing) — the one
+    algorithm in this track that gets asked as an algorithm; your DSA background
+    makes it cheap.
+12. [14. Kafka & event streaming](/system-design/14-kafka-and-event-streaming) —
+    the depth version of lesson 8, and increasingly assumed knowledge for backend
+    roles.
+13. [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+    — timeouts, retries, circuit breakers, idempotency: the vocabulary for the
+    "what happens when this dependency is down?" follow-up, which is asked every
+    time.
+14. [11. A reference architecture (how the pieces fit)](/system-design/11-a-reference-architecture-how-the-pieces-fit)
+    — the assembly lesson. Read it once the parts are familiar and it becomes a
+    mental template you can start any design from.
+15. [12. How to practice (do this, don't just read)](/system-design/12-how-to-practice-do-this-dont-just-read)
+    — the practice method, including how to run a timed solo mock. Move to this
+    the moment the fundamentals are done; do not keep reading.
+
+Then the case studies, which are practice material. Attempt each one on a timer
+before reading it.
+
+16. [Case 1 — Design a URL Shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+    — first, because it is your own project, so you can defend every decision
+    from real experience rather than from theory.
+17. [Case 2 — Design a Distributed Rate Limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+    — extends something you have built into a distributed problem, which is the
+    cheapest possible introduction to distributed state.
+18. [Case 3 — Design a News Feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline)
+    — the canonical fan-out trade-off, and the most commonly asked design
+    question in the industry.
+19. [Case 4 — Design a Chat System](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+    — stateful connections and delivery guarantees, which is a different shape of
+    problem from the first three.
+20. [Case 5 — Design a Notification System](/system-design/case-5-design-a-notification-system-email-sms-push)
+    — third-party integration, retries and idempotency at scale.
+21. [How to self-grade your practice](/system-design/how-to-self-grade-your-practice)
+    — the rubric. Use it on a recording of yourself after every attempt; this is
+    the mechanism that converts practice into improvement.
+
+Once the cases are done, the breadth follow-ups inside design rounds come from
+the [CS fundamentals track](/cs-fundamentals), and object-level design questions
+come from [low-level design](/lld).
+
+## What "ready" looks like
+
+The self-check here is a performance, not a recall test. Set a 45-minute timer,
+pick a problem you have not attempted, record yourself, and check all of the
+following were true.
+
+- You asked at least three clarifying questions before drawing anything, and
+  stated what was out of scope out loud.
+- You produced a QPS number and a storage-per-year number, and drew an explicit
+  conclusion from each — something of the form "that is one machine, so I will
+  not shard".
+- Your first diagram was simple, and every later component was preceded by naming
+  the bottleneck it solved.
+- You stated at least three trade-offs, naming the option you rejected and why.
+- You identified a single point of failure and a hot-spot risk unprompted.
+- You were still on the core problem at minute 40, not on authentication.
+- You went two levels deep on one component when pushed.
+
+An external bar: if you can drive Cases 1 through 3 end to end on a whiteboard unaided and
+your recording satisfies the rubric, you are at the design level expected of a senior backend
+engineer at most product companies. Case 1 should be flawless, because it is your project and
+interviewers open with "tell me about a system you built".
+
+## How long this track takes
+
+About 50,000 words across 22 lessons, most fundamentals above 2,000 words and every case
+study above 2,500. This is the longest track on the site and the one with least overlap with
+what you know: roughly ten to twelve hours of reading plus at least ten hours of timed
+practice, over five to six weeks.
+
+The split matters more than the total. **Spend at most 40 percent of your time reading.** Two
+weeks on the fundamentals, then one case study per week attempted cold on a timer and graded
+against the rubric. People who invert that ratio can describe every component and still fail,
+because the thing being scored is a skill.

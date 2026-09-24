@@ -1,0 +1,140 @@
+---
+title: "Overview"
+topic: "sql"
+order: 700
+group: "Advanced SQL"
+difficulty: "easy"
+estimatedMinutes: 8
+tags: [overview, sql, indexing, isolation, reading-order]
+format: "mdx"
+summary: "Why the SQL round scores explain plans and isolation rather than query-writing, the order to work through the eight lessons, and the out-loud self-check that says you are done."
+---
+
+## What this track is assessed on
+
+If you already write SQL comfortably, the risk in this round is not that you
+cannot produce the query. It is that you produce the query, the interviewer says
+"this table has 200 million rows, what happens?", and the conversation ends.
+
+**A SQL interview at a product company is a database-reasoning interview wearing
+a query-writing costume.** Writing the correct `JOIN` takes two minutes and
+proves you are not a fraud. The remaining forty minutes are spent on four things
+that have nothing to do with syntax: which index the planner will choose and why,
+what the query does as the table grows, what two concurrent transactions do to
+each other, and what you would change if this ran a thousand times a second.
+
+Concretely, the questions that separate candidates are:
+
+- "Show me the execution plan you expect, and where it would go wrong."
+- "You have a composite index on `(a, b, c)`. Which of these five queries use it?"
+- "Two users click 'buy' on the last item at the same time. Walk me through what
+  the database does at your isolation level."
+- "This endpoint is `LIMIT 20 OFFSET 200000` and it is slow. Why, and what do
+  you replace it with?"
+
+None of those are answerable by knowing more SQL. They are answerable by knowing
+what the storage engine and the planner do, which is what this track is about.
+
+A second thing is assessed more quietly: whether you express intent declaratively
+rather than procedurally. Reaching for a correlated subquery, or a loop in
+application code, where a window function would do marks you as someone who will
+write slow systems. That is why window functions get a whole lesson and why they
+are the clearest differentiator in this round.
+
+## Where you stand, and what to prioritise
+
+You know SQL and DSA well, which means the joins lesson is mostly confirmation
+and the problem-solving lessons will feel comfortable. Do not skip them, but read
+them quickly.
+
+Your real gap is the boundary between SQL and the database as a running system.
+Two specific areas:
+
+**Indexing and the planner.** Knowing that indexes make things faster is where
+most people stop. The interview lives one level down: B-tree structure, why the
+leftmost-prefix rule is a consequence of the sort order rather than an arbitrary
+restriction, what a covering index buys, why an index on a low-cardinality column
+is often ignored, and why adding an index can make writes measurably worse.
+
+**Isolation and concurrency.** Where strong SQL developers most reliably lose
+points, because you can write correct queries for years without needing to name a
+phantom read. It also has the highest crossover value: `@Transactional`
+propagation in the [Java track](/java/5-transaction-management-transactional),
+consistency models in the
+[system design track](/system-design/7-cap-theorem-consistency-models), and the
+lost-update question asked in all three.
+
+Everything else here is either already comfortable for you or reference material.
+
+## The order to work through it
+
+1. [1. JOINs — Know Them Cold](/sql/1-joins-know-them-cold) — read it fast as a
+   confirmation pass, but do stop at the `NULL` semantics and the difference
+   between filtering in `ON` and filtering in `WHERE` on an outer join, which is
+   the one part of joins that trips experienced people.
+2. [3. Indexing & Performance](/sql/3-indexing-performance) — out of numeric
+   order deliberately. This is the highest-value lesson in the track and
+   everything after it reads better once you can picture a B-tree. It is also
+   the longest, at nearly 4,000 words.
+3. [2. Window Functions — The Senior Differentiator](/sql/2-window-functions-the-senior-differentiator)
+   — after indexing, because the interesting question about a window function is
+   usually how it is executed, not what it returns.
+4. [4. Transactions & Isolation Levels](/sql/4-transactions-isolation-levels) —
+   your biggest gap. Read this one the way you would read the concurrency
+   lesson in Java: slowly, and with the anomaly examples drawn out on paper.
+5. [5. Query Optimization Checklist](/sql/5-query-optimization-checklist) — the
+   synthesis lesson. It only works once you have the previous three, because
+   optimisation is just applying them in a fixed order.
+6. [6. Common Interview SQL Problems (Quick Reference)](/sql/6-common-interview-sql-problems-quick-reference)
+   — the recognisable question shapes: second-highest salary, gaps and islands,
+   running totals, duplicate detection, top-N per group.
+7. [Practice: SQL Problems](/sql/practice-sql-problems) — do these with the
+   answers covered and a timer, not as reading.
+8. [Quick Reference: What Seniors Say](/sql/quick-reference-what-seniors-say) —
+   a junior-answer versus senior-answer comparison across the whole track. Read
+   it last, as a diagnostic: every row where the junior answer is the one you
+   would have given points at a lesson to revisit.
+
+## What "ready" looks like
+
+Say these out loud, unprompted, in complete sentences. This is the actual bar,
+not a feeling of familiarity.
+
+- Draw a B-tree index on paper and use it to explain why
+  `WHERE name LIKE '%smith'` cannot use an index but `WHERE name LIKE 'smith%'`
+  can.
+- Given a composite index on `(tenant_id, created_at, status)`, classify five
+  queries as using the index fully, partially, or not at all — and say why for
+  each.
+- Name the four standard isolation levels, the anomaly each one permits, and
+  then state what the default is in PostgreSQL and MySQL. Add the sentence most
+  candidates miss: a lost update is still possible at Read Committed, and
+  preventing it needs either `SELECT ... FOR UPDATE` or an optimistic version
+  column.
+- Explain what `EXPLAIN ANALYZE` tells you that `EXPLAIN` does not, and name the
+  three things you look at first in a plan.
+- Rewrite an `OFFSET`-based pagination query as keyset pagination and explain
+  exactly which part of the work `OFFSET` was doing that keyset avoids.
+- Take a top-N-per-group problem and solve it twice: once with a window
+  function, once with a correlated subquery, and say which you would ship.
+- Explain why adding a fifth index to a hot write table is a decision that needs
+  justification rather than an obvious improvement.
+
+If you can also say *when the index you designed will be ignored by the
+planner*, you are past the bar for most loops.
+
+## How long this track takes
+
+About 22,000 words across eight lessons, with indexing, isolation and
+optimisation each running well past 3,000. Budget four to five hours of reading
+plus two to three hours on the practice problems, over one to two weeks. Because
+your baseline here is strong, the returns are concentrated: if you only have one
+evening, spend it on
+[indexing](/sql/3-indexing-performance) and
+[isolation levels](/sql/4-transactions-isolation-levels) and skip everything
+else.
+
+One habit worth building alongside the reading. Take a query from your own
+project, run `EXPLAIN ANALYZE` on it against a table with real data volume, and
+narrate the plan out loud. Reading about plans and reading a plan are different
+skills, and only the second one gets tested.

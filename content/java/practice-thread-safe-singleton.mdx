@@ -1,0 +1,386 @@
+---
+title: "Practice: Thread-Safe Singleton"
+topic: "java"
+order: 903
+group: "Practice Problems"
+difficulty: "medium"
+estimatedMinutes: 19
+tags: [practice, singleton, volatile, double-checked-locking, class-initialization, enum, spring]
+format: "mdx"
+summary: "Five singleton approaches with the correctness and performance trade of each, the actual reordering mechanism that makes volatile mandatory in double-checked locking, why the holder idiom needs no lock, and the honest case that singletons are usually an anti-pattern."
+---
+
+## Why this problem is asked
+
+Singleton looks like a question about a design pattern. It is not. **It is a question
+about safe publication — how one thread hands a fully constructed object to another — and
+it is the most convenient small problem for asking it.**
+
+That is why the interesting answer is never "make `getInstance` synchronized". The
+interviewer wants to know whether you understand that object construction is not atomic,
+that the compiler and processor may reorder the writes inside it, and that `volatile` is
+what constrains them. Those facts govern every lazily initialised shared field you will
+ever write.
+
+There is a second, quieter test: a strong candidate volunteers that singletons make code
+hard to test and that in Spring the container already gives one instance per bean.
+Producing a correct implementation while questioning whether you would use it is the
+senior shape of this answer.
+
+## The problem
+
+One instance across the application. Concurrent calls to `getInstance()` return the
+same instance. Created lazily, only when first needed.
+
+## The naive attempt, and why it fails
+
+```java
+// Broken under concurrency
+static class LazySingleton {
+    private static LazySingleton instance;
+
+    private LazySingleton() {}
+
+    public static LazySingleton getInstance() {
+        if (instance == null) {                 // two threads can both see null
+            instance = new LazySingleton();     // and both construct
+        }
+        return instance;
+    }
+}
+```
+
+Two threads can evaluate `instance == null` as true before either assigns, so two objects
+exist and two callers hold different instances. If the singleton owns a connection pool or
+a counter that is a real bug, and an intermittent one — the window is nanoseconds wide, so
+this passes every test and fails in production under load.
+
+The subtler failure survives even when only one object is created: with no synchronisation
+there is no happens-before edge between the constructing thread's writes and the reader's
+read, so a second thread can see a non-null reference whose fields are still at their
+defaults. That is what the `volatile` discussion below is about.
+
+## The five approaches
+
+### 1. Eager initialisation
+
+```java
+static class EagerSingleton {
+    private static final EagerSingleton INSTANCE = new EagerSingleton();
+
+    private EagerSingleton() {}
+
+    public static EagerSingleton getInstance() {
+        return INSTANCE;
+    }
+    // Pros: Thread-safe (class loading is synchronized by JVM).
+    // Cons: Instance created at class load time even if never used.
+    // Verdict: Fine if the singleton is always needed and cheap to create.
+}
+```
+
+### 2. Synchronized method
+
+```java
+static class SynchronizedSingleton {
+    private static SynchronizedSingleton instance;
+
+    private SynchronizedSingleton() {}
+
+    public static synchronized SynchronizedSingleton getInstance() {
+        if (instance == null) {
+            instance = new SynchronizedSingleton();
+        }
+        return instance;
+    }
+    // Pros: Lazy, thread-safe.
+    // Cons: EVERY call to getInstance() acquires a lock, even after
+    //       instance is created. Bottleneck under high concurrency.
+    // Verdict: Correct but poor performance. Don't use in production.
+}
+```
+
+The cost is not the lock itself, which is cheap uncontended. It is that the lock
+serialises every call for the life of the application to protect a one-time event, and
+under contention the threads that fail to acquire it are parked and rescheduled at a cost
+of microseconds each.
+
+### 3. Double-checked locking
+
+```java
+static class DCLSingleton {
+    private static volatile DCLSingleton instance; // volatile is REQUIRED!
+
+    private DCLSingleton() {}
+
+    public static DCLSingleton getInstance() {
+        if (instance == null) {             // 1st check (no lock)
+            synchronized (DCLSingleton.class) {
+                if (instance == null) {     // 2nd check (with lock)
+                    instance = new DCLSingleton();
+                }
+            }
+        }
+        return instance;
+    }
+}
+```
+
+The first check is the fast path: once the instance exists, every subsequent call reads
+a field and returns, with no lock. The second check is the correctness path: two
+threads can both pass the first check, and only one of them may construct.
+
+### 4. Initialisation-on-demand holder (Bill Pugh)
+
+```java
+static class BillPughSingleton {
+    private BillPughSingleton() {}
+
+    private static class Holder {
+        private static final BillPughSingleton INSTANCE = new BillPughSingleton();
+    }
+
+    public static BillPughSingleton getInstance() {
+        return Holder.INSTANCE;
+    }
+    // Lazy, thread-safe, no synchronization overhead, clean.
+    // Cannot pass constructor parameters.
+}
+```
+
+### 5. Enum (Bloch's recommendation)
+
+```java
+enum EnumSingleton {
+    INSTANCE;
+
+    private int counter = 0;
+
+    public int incrementAndGet() {
+        return ++counter;
+    }
+
+    public int getCount() {
+        return counter;
+    }
+}
+```
+
+Note that the counter here is not thread-safe — enum guarantees one instance, not that
+mutating its state is safe. Worth volunteering, because it is the same confusion people
+have about Spring singletons.
+
+## Comparing them
+
+| Approach | Lazy | Thread-safe | Cost per call | Serialization-safe | Reflection-safe |
+|---|---|---|---|---|---|
+| Eager | No | Yes | None | No, needs `readResolve` | No |
+| Synchronized method | Yes | Yes | A lock acquisition, always | No | No |
+| Double-checked locking | Yes | Yes, only with `volatile` | A volatile read | No | No |
+| Holder idiom | Yes | Yes | None after first call | No | No |
+| Enum | No, on class load | Yes | None | Yes | Yes |
+
+## Why double-checked locking requires `volatile`
+
+This is the question, and a vague answer about "visibility" does not survive one
+follow-up. `instance = new DCLSingleton()` is not one operation; the compiler emits
+roughly three:
+
+```
+1. allocate memory for the object
+2. run the constructor, initialising the fields
+3. publish the reference: store the address into `instance`
+```
+
+**Nothing in the Java memory model requires steps 2 and 3 to be observed in that order by
+another thread.** Both the JIT and the processor may reorder them, because within the
+constructing thread the reordering is undetectable — a thread always sees its own writes
+in program order. So this execution is legal:
+
+```
+1. allocate memory
+3. publish the reference     ← `instance` is now non-null
+2. run the constructor       ← fields are still 0 / null
+```
+
+Now consider a second thread arriving between steps 3 and 2. It reads `instance`, finds it
+non-null, skips the `synchronized` block entirely — the whole point of the fast path — and
+returns a **partially constructed object**. The caller reads fields still at their
+defaults: no exception, no crash, just a null or a zero where a configured value should be,
+under load, impossible to reproduce.
+
+`volatile` fixes this through two guarantees acting together. A volatile write may not be
+reordered with any write preceding it in program order, so the constructor's field writes
+cannot move after the publication. And a volatile write establishes a happens-before edge
+with every later volatile read of that field, so a thread seeing the non-null reference
+sees everything written before publication. **`volatile` turns the assignment into a safe
+publication point, so seeing the reference implies seeing a fully constructed object.**
+
+Two details that earn extra credit. This was genuinely broken before Java 5, whose memory
+model could not express the required ordering, which is where the pattern's bad reputation
+comes from. And the local-variable variant exists for a reason:
+
+```java
+public static DCLSingleton getInstance() {
+    DCLSingleton result = instance;          // one volatile read
+    if (result == null) {
+        synchronized (DCLSingleton.class) {
+            result = instance;
+            if (result == null) {
+                instance = result = new DCLSingleton();
+            }
+        }
+    }
+    return result;
+}
+```
+
+The original reads the volatile field twice on the fast path. Reading it once into a local
+is measurably faster and is the form used inside the JDK.
+
+## Why the holder idiom needs no synchronisation
+
+It looks racy — a static field initialised with no lock in sight — and it is completely
+safe, because the JVM does the locking somewhere you did not write it.
+
+Class initialisation is specified to be thread-safe. The JVM associates an initialisation
+lock with every class: the first thread to trigger initialisation acquires it and runs the
+static initialiser, and any other thread that arrives blocks until initialisation
+completes, exactly once. So `Holder.INSTANCE` is constructed by one thread and every reader
+is guaranteed to see the finished object.
+
+Laziness comes from a nested class not being initialised when its outer class is. `Holder`
+is initialised on first active use, which is the first evaluation of `Holder.INSTANCE`
+inside `getInstance()`.
+
+The result is lazy, thread-safe, and **zero synchronisation cost on every call after the
+first**, because once a class is initialised the JVM elides the check entirely: no volatile
+read, no lock, no branch. That is why the holder idiom, not double-checked locking, is the
+right answer when you need laziness. Its one real limitation is that you cannot pass a
+constructor parameter, and a singleton that needs configuration wants dependency injection
+instead.
+
+## Why enum is Bloch's recommendation
+
+*Effective Java* recommends a single-element enum, and the argument is not brevity. Enum
+is the only approach that closes the two back doors the others leave open.
+
+**Serialization.** Deserialising an ordinary object creates a new instance, so a
+singleton implementing `Serializable` stops being one after a round trip. The manual
+defence is a `readResolve` returning the canonical instance, which people forget. Enum
+constants are serialised by name and resolved back to the existing constant, so the
+guarantee is structural.
+
+**Reflection.** A private constructor is not a barrier:
+`constructor.setAccessible(true)` then `newInstance()` produces a second object from any
+of the first four approaches, and the defence — a guard in the constructor — is ugly and
+still racy. For enums the JVM refuses outright: `Constructor.newInstance` throws
+`IllegalArgumentException` for an enum type.
+
+Enum also gives correct `equals`, `hashCode` and `toString` for free. Its limitations are
+real: enums cannot extend another class, and initialisation happens on class load rather
+than first use — though for most singletons that distinction is theoretical, since the
+class is loaded when something first references it anyway.
+
+## The honest answer: singleton is usually the wrong tool
+
+Volunteer this; it changes how the rest of the conversation goes.
+
+A singleton is global mutable state with a respectable name. **The concrete cost is
+testing:** a class that calls `Registry.getInstance()` internally has a dependency
+invisible in its signature and unreplaceable in a test, so either you skip that path or you
+add a static setter and reintroduce the mutable global you were avoiding. Worse, the
+instance outlives each test in the same JVM, so state leaks between tests and order starts
+to matter, which is how a suite becomes flaky in a way that takes a day to diagnose.
+
+**The practical resolution: in a Spring application you almost never write this code,
+because the default bean scope is already singleton.** The container creates one instance
+per bean definition and injects it through the constructor, so you get the single-instance
+property *and* an explicit, replaceable dependency, plus lifecycle management.
+
+The same caveat as the enum counter applies: **Spring guarantees one instance, not that the
+instance is safe.** A singleton bean with a mutable field is a shared-state bug, and one of
+the most common in Spring codebases.
+
+A hand-written singleton is still legitimate for a stateless utility holder, an immutable
+registry of constants, or code with no container at all. There, use the enum, or the holder
+idiom if you need laziness.
+
+## Verifying it
+
+```java
+public static void main(String[] args) throws InterruptedException {
+    System.out.println("=== Eager Singleton ===");
+    System.out.println(EagerSingleton.getInstance() == EagerSingleton.getInstance()); // true
+
+    System.out.println("=== Double-Checked Locking ===");
+    System.out.println(DCLSingleton.getInstance() == DCLSingleton.getInstance());
+
+    System.out.println("=== Bill Pugh (Holder) ===");
+    System.out.println(BillPughSingleton.getInstance() == BillPughSingleton.getInstance());
+
+    System.out.println("=== Enum Singleton (BEST) ===");
+    EnumSingleton.INSTANCE.incrementAndGet();
+    EnumSingleton.INSTANCE.incrementAndGet();
+    System.out.println("Count: " + EnumSingleton.INSTANCE.getCount()); // 2
+
+    // Thread-safety test: 100 threads all get same instance
+    System.out.println("\n=== Thread Safety Test (DCL) ===");
+    java.util.Set<Integer> identityHashes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    Thread[] threads = new Thread[100];
+    for (int i = 0; i < 100; i++) {
+        threads[i] = new Thread(() ->
+                identityHashes.add(System.identityHashCode(DCLSingleton.getInstance())));
+        threads[i].start();
+    }
+    for (Thread t : threads) t.join();
+    System.out.println("Unique instances: " + identityHashes.size()); // must be 1
+    System.out.println(identityHashes.size() == 1 ? "PASS" : "FAIL");
+}
+```
+
+Be honest about what this proves. It reliably catches the duplicate-instance bug, because
+a hundred threads racing on a cold class usually produce more than one object if
+construction is unguarded. It does **not** catch the missing-`volatile` bug: remove
+`volatile` and this still passes, because the reordering it permits is rare,
+hardware-dependent and invisible to an instance count. Testing cannot demonstrate the
+absence of a memory-model violation — only reasoning can, which is exactly why you are
+being asked to reason about it.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **Why is the naive lazy version broken?** Two threads can both see null before either
+   assigns; and even with one instance there is no happens-before edge, so a reader can
+   see uninitialised fields.
+2. **Why is a synchronized `getInstance` poor?** It serialises every call for the life of
+   the application to protect a one-time event.
+3. **Why does double-checked locking need `volatile`?** Publishing the reference can be
+   reordered before the constructor finishes, so another thread takes the fast path and
+   returns a partially constructed object.
+4. **What exactly does `volatile` guarantee?** No reordering of preceding writes past the
+   volatile write, plus a happens-before edge to every later read.
+5. **Was it ever actually broken?** Yes, before Java 5, whose memory model could not
+   express the required ordering.
+6. **Why does the holder idiom need no lock?** Class initialisation is thread-safe and
+   runs exactly once by specification, and a nested class initialises on first use.
+7. **Holder or DCL after warm-up?** Holder. DCL pays a volatile read per call; an
+   initialised class costs nothing.
+8. **Why does Bloch recommend enum?** It is the only approach that is serialization- and
+   reflection-safe structurally rather than by remembering to defend it.
+9. **How would reflection break the other four?** `setAccessible(true)` then
+   `newInstance()`. The JVM refuses this for enums.
+10. **When can you not use enum?** When you need to extend a class, or genuinely need
+    laziness — then the holder idiom.
+11. **Is a singleton a good idea?** Usually not: global mutable state, hidden
+    dependencies, and tests that become order-dependent because instances outlive them.
+12. **What do you use in Spring?** Nothing — the default bean scope is already singleton,
+    and constructor injection makes the dependency explicit. Spring guarantees one
+    instance, not that its state is safe.
+</Callout>
+
+### Where this connects
+
+- [3. Concurrency — Senior Must-Have](/java/3-concurrency-senior-must-have) — the memory model, happens-before, and safe publication in general rather than just for this pattern.
+- [1. JVM Internals](/java/1-jvm-internals) — class loading and initialisation, which is the guarantee the holder idiom rests on.
+- [8. Spring internals — the container, bean lifecycle & AOP proxies](/java/8-spring-internals-ioc-beans-and-aop-proxies) — how the container provides singleton scope, and why a mutable field on a singleton bean is a bug.
+- [Part 3 — Design patterns: the LLD vocabulary](/lld/part-3-design-patterns-the-lld-vocabulary) — where singleton sits among the creational patterns, and the alternatives.
+- [5. OOP & Design Principles](/java/5-oop-design-principles) — dependency inversion, which is the actual answer to the testability problem above.

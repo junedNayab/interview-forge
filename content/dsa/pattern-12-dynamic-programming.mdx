@@ -1,0 +1,455 @@
+---
+title: "Pattern 12 — Dynamic Programming"
+topic: "dsa"
+order: 114
+difficulty: "hard"
+estimatedMinutes: 30
+tags: [dynamic-programming, memoization, tabulation, knapsack, lcs, bitmask-dp, space-optimization]
+format: "mdx"
+summary: "The two conditions that make DP applicable and how to test for them, the five-step method for deriving any DP, the classic recurrence families including why the knapsack inner loop direction differs, and how to recover the solution rather than just its cost."
+---
+
+## Layer 1 — When you reach for this
+
+> Dynamic programming applies when a problem has **optimal substructure** — the
+> best answer is built from the best answers to smaller versions of itself — and
+> **overlapping subproblems** — those smaller versions recur. Miss the first and
+> DP is wrong. Miss the second and DP is merely pointless, because plain
+> recursion or divide-and-conquer already suffices.
+
+Checking those two conditions *is* the recognition step, and it is a thing you
+can do in under a minute.
+
+**Testing for optimal substructure:** assume you have made the first decision.
+Is what remains the same kind of problem, smaller? For coin change, after using
+one coin of value `c` the remaining task is "make amount minus `c` from the same
+coins" — same problem, smaller. For longest path in a general graph, after
+taking one edge the remaining task is "longest path from here **avoiding what I
+have already used**", which is not the same problem, and that is exactly why
+longest-path is NP-hard while longest-path-in-a-DAG is easy DP.
+
+**Testing for overlapping subproblems:** sketch two levels of the recursion tree
+and look for a repeated label. Merge sort's tree never repeats a subarray, so
+it is divide and conquer, not DP. Fibonacci's tree repeats almost everything.
+
+Here is the tree for plain recursive Fibonacci — the same labels keep reappearing
+across branches, and each repeat is work you already did:
+
+<Visualizer algo="recursion-tree" n={5} />
+
+The phrases that signal DP:
+
+- **"Number of ways"**, **"how many distinct"**, **"count the paths"**. If the
+  count is large and the problem mentions a modulus, that is a DP tell so strong
+  it is almost a giveaway.
+- **"Minimum cost"**, **"maximum profit"**, **"longest"**, **"shortest"** over a
+  sequence of choices — especially when a greedy rule fails on an example you can
+  construct. See [Pattern 13 — Greedy](/dsa/pattern-13-greedy) for how to run
+  that test deliberately.
+- **"Can you reach / partition / make exactly"** — the feasibility flavour, the
+  same table with booleans instead of numbers.
+- **Two sequences compared** — edit distance, common subsequence, interleaving,
+  regular expression matching. Two sequences almost always means a 2-D table
+  indexed by a prefix of each.
+- **A grid with movement restricted to right and down.** That restriction is
+  what makes the subproblem graph acyclic and therefore tabulable.
+
+The anti-signals:
+
+- **"Find all the actual arrangements."** The outputs are all distinct, so there
+  is nothing to reuse. That is
+  [backtracking](/dsa/pattern-10-backtracking).
+- **A provably safe local rule exists.** Interval scheduling by end time and
+  Dijkstra are both greedy; wrapping them in a table costs a dimension for
+  nothing.
+- **Subproblems that do not overlap.** Binary search and merge sort look
+  recursive and are not DP.
+- **A state that must include the whole path so far.** If `dp` has to be keyed on
+  "the set of nodes visited" and `n` is large, DP will not fit — though if `n` is
+  around 20, that is precisely bitmask DP and it is fine.
+
+---
+
+## Layer 2 — The mechanism
+
+### The method: five steps, always the same
+
+The reason DP feels hard is that people try to recall solutions. The people who
+find it easy are running a procedure. Run this one out loud in the interview;
+the interviewer is grading the procedure at least as much as the answer.
+
+**1. Define the state, in words, before writing any code.** Not
+"`dp[i]` is the answer at `i`" — that says nothing. Say
+"`dp[i]` is the maximum money robbable from the first `i` houses" or
+"`dp[i][j]` is the edit distance between the first `i` characters of `a` and the
+first `j` characters of `b`". **If you cannot say the meaning in one English
+sentence, you do not have a state yet, and every subsequent step will be
+guesswork.** Most DP bugs are a state whose definition quietly changed
+mid-derivation.
+
+**2. Write the recurrence.** Take the last decision, not the first — "what were
+the possible final moves that could have produced this state?" — because the
+answer is then a maximum or a sum over a small set of predecessors. For house
+robber the last house is either robbed or not, giving
+`dp[i] = max(dp[i-1], dp[i-2] + nums[i])`.
+
+**3. Identify the base cases.** These are the states with no predecessors.
+Getting `dp[0]` right is where the empty-input semantics live: the edit distance
+between an empty string and a prefix of length `j` is `j`, which is why the LCS
+and edit distance tables are sized `(m+1) x (n+1)` rather than `m x n`.
+
+**4. Decide the iteration order.** Every state must be computed after all the
+states it depends on. If `dp[i]` reads `dp[i-1]`, iterate forwards. If a 2-D
+state reads the row above and the column to the left, iterate top-to-bottom and
+left-to-right. If it reads a shorter interval, iterate by increasing length. This
+step is exactly a topological sort of the subproblem graph, which is why
+[DP on a DAG](/dsa/pattern-11-graphs-bfs-dfs-union-find) is not a coincidence but
+the general case.
+
+**5. Optimise space, last.** Only after it is correct.
+
+### Memoisation and tabulation are the same recurrence
+
+Memoising turns every repeated box in the tree above into a cache hit, which is
+what collapses an exponential tree into a linear walk. Bottom-up DP is the same
+idea with the recursion unrolled into a loop, visiting the states in an order
+that guarantees dependencies are ready.
+
+<ComplexityTable
+  rows={[
+    { label: "Naive recursion", time: "O(2^n)", space: "O(n)", note: "One node per call — the tree above" },
+    { label: "Top-down + memo", time: "O(n)", space: "O(n)", note: "Each distinct subproblem solved once" },
+    { label: "Bottom-up table", time: "O(n)", space: "O(n)", note: "No recursion stack" },
+    { label: "Bottom-up, rolling", time: "O(n)", space: "O(1)", note: "Keep only the last two values" },
+  ]}
+/>
+
+**The complexity of any DP is the number of distinct states multiplied by the
+work done per state.** That one sentence answers the complexity follow-up for
+every problem in this lesson. LCS has `m * n` states and `O(1)` work each, so
+`O(mn)`. Longest Increasing Subsequence in its simple form has `n` states and
+scans `O(n)` predecessors each, so `O(n^2)`. Bitmask DP over subsets has
+`2^n * n` states and `O(n)` work, so `O(2^n * n^2)`.
+
+**When to choose which:**
+
+| | Memoisation (top-down) | Tabulation (bottom-up) |
+|---|---|---|
+| Visits | Only reachable states | Every state in the table |
+| Order | Derived automatically by recursion | You must get it right |
+| Stack | Depth-bounded recursion, can overflow | None |
+| Constants | Hash lookups or array plus a sentinel | Tight array loops, cache-friendly |
+| Space optimisation | Hard | Easy — roll the array |
+| Writing it under pressure | Easier: it is the brute force plus a cache | Needs the order worked out first |
+
+The practical advice: **derive the recursion, memoise it to prove correctness,
+then convert to bottom-up if you need the space optimisation or the constant
+factor.** Saying that plan out loud before you write anything is itself worth
+marks. Memoisation genuinely wins when the reachable state space is far smaller
+than the full table — coin change with large amounts and few coins is the usual
+example.
+
+### Family 1: linear DP, one dimension
+
+The state is an index into a sequence and the recurrence looks back a constant
+number of positions.
+
+```java
+// House Robber — dp[i] = most money from houses 0..i-1
+// "Rob house i-1 and add dp[i-2], or skip it and keep dp[i-1]."
+int rob(int[] nums) {
+    int prev2 = 0, prev1 = 0;                  // dp[i-2], dp[i-1]
+    for (int x : nums) {
+        int cur = Math.max(prev1, prev2 + x);  // the recurrence
+        prev2 = prev1;
+        prev1 = cur;
+    }
+    return prev1;                              // O(n) time, O(1) space
+}
+```
+
+Climbing Stairs is the same shape with `+` instead of `max`; it is literally
+Fibonacci. Decode Ways is the same shape with the transitions guarded by
+validity checks — one character decodes if it is not `'0'`, two characters decode
+if they form a value from 10 to 26 — and the `'0'` handling is where every
+implementation of it goes wrong first. House Robber II wraps the array, and the
+trick is to run the linear solution twice, once excluding the first house and
+once excluding the last, because the first and last cannot both be taken.
+
+**Longest Increasing Subsequence** has two solutions and interviewers ask for
+both. The `O(n^2)` DP defines `dp[i]` as the length of the longest increasing
+subsequence *ending at* `i` — note "ending at", not "within the first i", which
+is a different and weaker state — computed by scanning all `j` before `i` where
+`nums[j] < nums[i]`. The `O(n log n)` version keeps a list `tails` where
+`tails[k]` is the smallest possible tail of an increasing subsequence of length
+`k + 1`, and binary searches for each element's insertion point. That list is
+not the answer subsequence, only its length, which is the usual follow-up.
+
+### Family 2: knapsack, and why the loop direction differs
+
+This is the highest-value thing in the lesson, because the two knapsacks look
+identical and differ by one loop direction.
+
+**0/1 knapsack** — each item may be used at most once. `dp[w]` is the best value
+achievable with capacity `w`.
+
+```java
+for (int i = 0; i < n; i++)
+    for (int w = cap; w >= weight[i]; w--)             // DESCENDING
+        dp[w] = Math.max(dp[w], dp[w - weight[i]] + value[i]);
+```
+
+**Unbounded knapsack** — each item may be used any number of times. Identical,
+except:
+
+```java
+for (int i = 0; i < n; i++)
+    for (int w = weight[i]; w <= cap; w++)             // ASCENDING
+        dp[w] = Math.max(dp[w], dp[w - weight[i]] + value[i]);
+```
+
+The reason is entirely about what `dp[w - weight[i]]` means at the moment you
+read it. The honest 2-D form is
+`dp[i][w] = max(dp[i-1][w], dp[i-1][w - weight[i]] + value[i])` for 0/1: the
+second term reads the **previous row**, meaning a state in which item `i` has not
+yet been considered. When you collapse to one dimension, the array holds row
+`i-1` at the start of the iteration and row `i` where you have already written.
+Iterating `w` **downwards** means `dp[w - weight[i]]`, a lower index, is still
+untouched this round — still row `i-1` — so item `i` is used at most once.
+Iterating **upwards** means the lower index has already been updated this round,
+so it may already include item `i`, and reading it lets you take the item again.
+**The loop direction is not a trick; it is a statement about whether you are
+reading the old row or the new one.**
+
+Recognising the family matters more than the code. Coin Change (minimum coins)
+and Coin Change II (number of combinations) are unbounded. Partition Equal Subset
+Sum and Target Sum are 0/1 over a boolean or counting table. In Coin Change II
+there is a further subtlety: **loop coins outside and amounts inside to count
+combinations; swap them and you count permutations**, because the outer loop
+fixes the order in which coin types may be introduced.
+
+### Family 3: two sequences, 2-D DP
+
+`dp[i][j]` is the answer for the first `i` characters of `a` against the first
+`j` of `b`. The recurrence always splits on whether the last characters match.
+
+```java
+// Longest Common Subsequence — O(m*n) time, O(m*n) space
+int[][] dp = new int[m + 1][n + 1];                      // row/col 0 = empty prefix
+for (int i = 1; i <= m; i++)
+    for (int j = 1; j <= n; j++)
+        dp[i][j] = a.charAt(i-1) == b.charAt(j-1)
+            ? dp[i-1][j-1] + 1                           // match: consume both
+            : Math.max(dp[i-1][j], dp[i][j-1]);          // else drop one char
+return dp[m][n];
+```
+
+**Edit distance** is the same skeleton with three predecessors instead of two —
+`dp[i-1][j] + 1` for a delete, `dp[i][j-1] + 1` for an insert, and
+`dp[i-1][j-1] + 1` for a replace, with the replace costing 0 when the characters
+match. The base cases are `dp[i][0] = i` and `dp[0][j] = j`, which say that
+turning a prefix into nothing costs one deletion per character. Once you see LCS
+and edit distance as the same table with a different cost function, Distinct
+Subsequences, Interleaving String, and Regular Expression Matching all become
+variations on the same six lines.
+
+### Family 4: grids, intervals, and bitmasks
+
+**Grid paths.** `dp[i][j] = dp[i-1][j] + dp[i][j-1]` for counting, or
+`min(...) + cost[i][j]` for minimum path sum. The right-and-down restriction is
+what makes the dependency graph acyclic. Allow all four directions and it is no
+longer DP — it is Dijkstra.
+
+**Interval DP.** The state is a range, `dp[i][j]`, and the recurrence tries every
+split point inside it. Iterate by **increasing interval length**, because
+`dp[i][j]` depends on strictly shorter intervals. Burst Balloons and Matrix Chain
+Multiplication are the canonical ones, both `O(n^3)`: `n^2` states and `O(n)`
+split points each.
+
+**Bitmask DP.** When `n` is at most about 20, a subset fits in an `int` and can
+be a state: `dp[mask][i]` means "the best cost having visited exactly the set
+`mask`, currently at `i`". Travelling Salesman in `O(2^n * n^2)` is the textbook
+case. The bound is not arbitrary — `2^20` is a million states, and times `n^2`
+that is the edge of a second. See
+[Pattern 15](/dsa/pattern-15-bit-manipulation-math) for the bit operations.
+
+### Space optimisation by rolling array
+
+**You can drop a dimension whenever the recurrence reads only a bounded number of
+previous rows.** The table is `n` rows long only because you wrote it that way;
+if `dp[i]` depends solely on `dp[i-1]` and `dp[i-2]`, then at any moment you need
+two numbers, not `n` of them. The House Robber code above is this, and LCS drops
+from `O(mn)` to `O(min(m, n))` by keeping one row plus a saved diagonal value.
+
+Two warnings. The overwrite order becomes load-bearing — that is the entire
+knapsack direction issue — so when you collapse a dimension, re-check which cells
+have been written this round. And **rolling the array destroys your ability to
+reconstruct the solution**, because the intermediate rows are gone. If the
+question asks for the actual subsequence rather than its length, keep the full
+table. This trade is a good thing to name aloud: "I can get this to `O(n)` space,
+but then I can only report the length, not the sequence — which do you want?"
+
+### Recovering the solution, not just its cost
+
+The table holds the costs; the *choices* are recoverable by walking backwards
+through it and asking, at each cell, which predecessor produced this value.
+
+```java
+// Reconstruct the LCS string from a completed dp table.
+StringBuilder sb = new StringBuilder();
+int i = m, j = n;
+while (i > 0 && j > 0) {
+    if (a.charAt(i-1) == b.charAt(j-1)) { sb.append(a.charAt(i-1)); i--; j--; }
+    else if (dp[i-1][j] >= dp[i][j-1]) i--;    // came from above
+    else j--;                                   // came from the left
+}
+return sb.reverse().toString();                 // O(m + n) after the O(m*n) fill
+```
+
+The general rule: **the reconstruction walk mirrors the recurrence, running
+backwards, choosing the branch whose stored value is consistent with the value
+you are standing on.** You can also store a parent pointer per cell during the
+fill, which uses more memory but makes the walk trivial and is worth doing when
+the recurrence has many branches. Either way, the reconstruction is linear in the
+path length, so it never changes the asymptotic cost.
+
+### Edge cases and traps
+
+- **A state definition that drifts.** "Longest subsequence ending at `i`" and
+  "longest subsequence within `0..i`" are different states with different
+  recurrences. Write the definition as a comment above the array.
+- **Off-by-one between the table index and the string index.** With a table of
+  size `m + 1`, row `i` is character `i - 1`. Pick the convention once.
+- **Base cases for the empty input.** There is exactly one way to make amount 0,
+  so `dp[0] = 1` when counting and `dp[0] = 0` when minimising.
+- **Using `Integer.MAX_VALUE` as infinity and then adding to it**, which
+  overflows negative and silently becomes the minimum. Use a sentinel such as
+  `amount + 1`.
+- **Iterating in an order where a dependency is not yet computed.** The symptom
+  is a table full of zeros or base values.
+- **Recursion depth in memoisation.** A chain of `10^5` states overflows the
+  default stack; convert to bottom-up.
+- **Memoising on an incomplete key.** Caching on one of two parameters gives
+  wrong answers that pass small tests.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How did you know this was DP?"** Optimal substructure — after the first
+   choice, the rest is the same problem smaller — and overlapping subproblems,
+   which I can see in the recursion tree.
+2. **"What does `dp[i]` mean?"** Answer in one English sentence. If you cannot,
+   the state is wrong and everything after it will be too.
+3. **"What is the complexity?"** Number of states multiplied by the work per
+   state. Say both factors separately.
+4. **"Top-down or bottom-up, and why?"** Top-down is the brute force plus a
+   cache and visits only reachable states; bottom-up has no stack and rolls into
+   `O(1)` space. Derive top-down, convert if space matters.
+5. **"Can you reduce the space?"** Yes whenever the recurrence reads a bounded
+   number of previous rows. Note that it costs you the reconstruction.
+6. **"Give me the actual subsequence, not the length."** Walk the completed
+   table backwards, at each cell choosing the predecessor consistent with the
+   stored value. `O(m + n)` extra, but it needs the full table.
+7. **"Why does the 0/1 knapsack loop go downwards?"** Because the collapsed
+   array holds the previous row at lower indices only if you have not overwritten
+   them yet. Downwards preserves the old row, so the item is used once; upwards
+   reads the new row, which permits reuse.
+8. **"Combinations or permutations in coin change?"** Coins in the outer loop
+   counts combinations; amounts in the outer loop counts permutations, because
+   the outer loop fixes the order in which coin types may appear.
+9. **"Your recursion stack overflows on the real input."** Convert to bottom-up,
+   which has no stack, or process the states in explicit topological order.
+10. **"The input is a stream and you cannot hold the table."** If the recurrence
+    has a bounded look-back the rolling form already handles it — you keep two
+    numbers and consume elements as they arrive, which is what the House Robber
+    code does. If the state depends on arbitrary earlier positions, you cannot
+    stream it, and the honest answer is to window the input or accept an
+    approximation.
+11. **"The table does not fit in memory."** Roll the dimension you can, process
+    the table in blocks against disk, or use Hirschberg's divide-and-conquer,
+    which computes an LCS alignment in `O(min(m, n))` space at twice the time.
+12. **"How would you parallelise this?"** Cells on the same anti-diagonal of a
+    2-D table are independent, so you can fill diagonal by diagonal. The
+    dependency structure is the constraint, not the arithmetic.
+13. **"What if the values were huge, or negative?"** Watch for overflow — use
+    `long` for counting problems, and note the modulus if the statement gives
+    one. Negative values break any assumption that adding an item never helps,
+    which matters for pruning, not for the recurrence itself.
+14. **"Is this greedy-able?"** Try to construct a counterexample to the obvious
+    greedy rule. Coin change with coins 1, 3 and 4 for amount 6 is the standard
+    one: greedy takes 4 then 1 then 1, three coins, when 3 plus 3 is two.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Starting to code before stating the state in words.** Nearly every wrong DP
+  traces back to this.
+- **Mixing up `dp[i]` meaning "ending at i" and "up to i"** halfway through.
+- **Table size `n` when you need `n + 1`**, so there is nowhere to put the empty
+  prefix.
+- **`Integer.MAX_VALUE` as infinity, then adding a cost to it.**
+- **Forgetting the modulus** in counting problems, then overflowing `int`.
+- **Space-optimising a solution that still has a bug.**
+- **Assuming a 2-D problem needs a 2-D array.** Many collapse to one row, and
+  saying so unprompted is a good signal.
+- **Memoising with a `HashMap` keyed on a concatenated string.** It works and it
+  is slow; an array or a composite integer key is usually available.
+- **Treating longest path in a general graph as DP.** It has no optimal
+  substructure because the used-vertex set is part of the state.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Climbing Stairs** — Fibonacci in disguise; practise saying the state aloud.
+- **Min Cost Climbing Stairs** — the same recurrence with a cost, which forces
+  the base cases to be right.
+- **Best Time to Buy and Sell Stock** — one-pass DP with two state variables.
+
+**Medium**
+
+- **House Robber** and **House Robber II** — the rolling array and the circular
+  wrap trick.
+- **Coin Change** and **Coin Change II** — unbounded knapsack for minimum and for
+  count, and the loop-order distinction between them.
+- **Longest Increasing Subsequence** — the `O(n^2)` DP and the `O(n log n)`
+  patience version.
+- **Word Break** — boolean DP over prefixes; the feasibility flavour.
+- **Unique Paths** and **Minimum Path Sum** — grid DP and the collapse to one row.
+- **Partition Equal Subset Sum** — 0/1 knapsack recognised from a statement that
+  never mentions knapsacks.
+- **Longest Palindromic Substring** — interval DP, plus the expand-around-centre
+  alternative with better constants.
+- **Decode Ways** — where the `'0'` handling exposes a shaky state definition.
+- **Longest Common Subsequence** — the 2-D template everything else varies.
+
+**Hard**
+
+- **Edit Distance** — three predecessors, and the reconstruction follow-up.
+- **Burst Balloons** — interval DP where the trick is choosing the *last* balloon
+  burst rather than the first.
+- **Regular Expression Matching** — precision in the state definition is the
+  whole problem.
+- **Best Time to Buy and Sell Stock IV** — state machine DP with a transaction
+  dimension.
+- **Travelling Salesman via bitmask** — the `n` at most 20 signal made concrete.
+
+### Where this connects
+
+- [Pattern 10 — Backtracking](/dsa/pattern-10-backtracking) — the same decision
+  tree, enumerated rather than collapsed; memoising a backtracking solution is
+  often the whole optimisation.
+- [Pattern 13 — Greedy](/dsa/pattern-13-greedy) — the decision of whether to
+  commit or to explore, and the exchange argument that decides it.
+- [Pattern 11 — Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) — DP is
+  relaxation in topological order over the subproblem DAG, and the iteration
+  order in step 4 is that topological sort.
+- [Pattern 15 — Bit Manipulation](/dsa/pattern-15-bit-manipulation-math) — the
+  bit operations that make a subset a usable DP state.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — reading
+  the constraint bound to decide whether `O(n^2)`, `O(n log n)` or `O(2^n * n)`
+  is the intended shape.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  why an array memo beats a `HashMap` memo in practice, and by how much.

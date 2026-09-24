@@ -1,0 +1,400 @@
+---
+title: "Pattern 13 — Greedy"
+topic: "dsa"
+order: 115
+difficulty: "medium"
+estimatedMinutes: 27
+tags: [greedy, exchange-argument, interval-scheduling, kadane, huffman, proof]
+format: "mdx"
+summary: "How to tell whether a greedy rule is actually correct using the exchange argument, the classic greedies that work and exactly why, and the classic ones that fail with concrete counterexamples."
+---
+
+## Layer 1 — When you reach for this
+
+> Greedy is the easiest pattern to code and the hardest to justify. The
+> algorithm is usually "sort by the right key, then one pass" — five lines. The
+> difficulty is entirely in the word *right*. **A wrong greedy passes the sample
+> inputs, because the sample inputs are small and friendly, and then fails on a
+> test you never see.**
+
+So the recognition question for greedy is not "does a greedy rule exist?" — one
+always exists, you can always invent a rule. It is "is this greedy rule
+*provably* optimal?"
+
+Signals that greedy is worth trying:
+
+- **The problem asks for a maximum or minimum count of something**, and the items
+  have an obvious ordering key — deadlines, end times, sizes, ratios,
+  frequencies.
+- **Scheduling and interval questions.** Maximum non-overlapping meetings,
+  minimum rooms, minimum removals; see
+  [Pattern 14 — Intervals](/dsa/pattern-14-intervals).
+- **The structure is a matroid-like "independent set" problem** — if a selection
+  is valid, every subset of it is valid, and any smaller valid selection can be
+  extended. Minimum spanning tree is the archetype, which is why both Kruskal
+  and Prim are greedy and both are correct.
+- **Reachability and coverage questions**: can you reach the end, what is the
+  minimum number of jumps, the fewest arrows.
+- **Each decision is genuinely local** — the choice you make now does not change
+  what the remaining problem looks like beyond removing the item you took.
+
+Signals that greedy is wrong and you need
+[dynamic programming](/dsa/pattern-12-dynamic-programming):
+
+- **Taking the best item now can lock you out of a better combination later.**
+  That is the 0/1 knapsack signature: a single heavy, valuable item may block
+  two lighter ones that together beat it.
+- **The problem has a capacity, budget, or exact-target constraint** that couples
+  the choices together.
+- **You can construct a counterexample in thirty seconds.** This is the test, and
+  it is the most useful habit in this entire pattern.
+
+**The framing to carry into the interview: greedy commits, DP explores.** A
+greedy algorithm makes one choice at each step and never revisits it, which is
+why it is fast and why it needs a proof. DP considers every choice at each step
+and keeps the best, which is why it is slower and why it needs no proof beyond
+the recurrence being right. If you cannot prove the commit is safe, do not
+commit.
+
+---
+
+## Layer 2 — The mechanism
+
+### The exchange argument
+
+There is one proof technique for greedy, and naming it out loud in an interview
+immediately changes how the conversation goes.
+
+**The exchange argument: take any optimal solution, and show that it can be
+transformed step by step into the greedy solution without ever getting worse.
+It follows that the greedy solution is itself optimal.**
+
+The shape of the argument is always the same. Suppose the optimal solution `OPT`
+and the greedy solution `G` first differ at position `k`. Greedy chose `g`; the
+optimal chose `o`. Show that you can swap `o` for `g` in `OPT` and still have a
+valid solution that is at least as good. Now `OPT` agrees with `G` in one more
+position. Repeat. After finitely many swaps `OPT` has become `G` and has never
+got worse, so `G` is optimal.
+
+A related and sometimes easier variant is the **"greedy stays ahead"** argument:
+show by induction that after each step, the greedy partial solution is at least
+as good as any other partial solution by some measure — it has scheduled at least
+as many meetings, or it has finished no later.
+
+### Worked proof: interval scheduling, and why end time is the key
+
+**Problem:** given intervals, select the maximum number that do not overlap.
+
+The greedy rule is **sort by end time, and repeatedly take the earliest-ending
+interval compatible with what you have already taken.**
+
+Why end time? Because the only thing a chosen interval costs you is the part of
+the timeline it consumes going forward. **Among all intervals available right
+now, the one that ends earliest leaves the largest possible remaining timeline,
+and a larger remaining timeline can never admit fewer future intervals.** That
+sentence is the intuition; here is the exchange argument that makes it a proof.
+
+Let `G = g1, g2, ...` be the greedy selection in order and `O = o1, o2, ...` any
+optimal selection in order. Suppose they agree on the first `k - 1` choices and
+differ at `k`. Greedy picked `gk`, the compatible interval with the smallest end
+time, so `end(gk) <= end(ok)`. Replace `ok` with `gk` in `O`. The result is still
+valid: `gk` starts after `g(k-1)` ends, because greedy only considers compatible
+intervals, and everything after `ok` in `O` starts after `end(ok)`, which is at
+or after `end(gk)`. The count is unchanged. So `O` with the swap is still optimal
+and agrees with `G` one step further. Induct.
+
+Now the two tempting alternatives, and why they fail — being able to produce
+these counterexamples on demand is the real skill:
+
+- **Sort by start time.** Counterexample: one interval `[0, 100]` and two
+  intervals `[1, 2]` and `[3, 4]`. Earliest start takes the long one and gets 1;
+  the answer is 2.
+- **Sort by duration, shortest first.** Counterexample: `[0, 10]`, `[9, 11]`,
+  `[10, 20]`. The shortest is `[9, 11]`, which conflicts with both of the others,
+  so you get 1; the answer is 2.
+- **Sort by fewest conflicts.** This is more subtle and still wrong; there are
+  standard constructions where it loses by one. Mentioning that you know it fails
+  is enough.
+
+Only end time survives, and the reason survives with it.
+
+```java
+// Maximum non-overlapping intervals.
+Arrays.sort(iv, (a, b) -> Integer.compare(a[1], b[1]));   // by END time
+int count = 0, lastEnd = Integer.MIN_VALUE;
+for (int[] x : iv) {
+    if (x[0] >= lastEnd) {        // compatible with everything chosen so far
+        count++;
+        lastEnd = x[1];           // commit — never reconsidered
+    }
+}
+```
+
+Non-overlapping Intervals — "minimum removals to make the rest disjoint" — is
+this same algorithm, reported as `n - count`.
+
+### Worked example: Jump Game, and the invariant
+
+**Problem:** each `nums[i]` is the maximum jump length from index `i`. Can you
+reach the last index?
+
+```java
+int reach = 0;                         // furthest index reachable so far
+for (int i = 0; i < nums.length; i++) {
+    if (i > reach) return false;       // a gap we can never cross
+    reach = Math.max(reach, i + nums[i]);
+}
+return true;                           // O(n) time, O(1) space
+```
+
+**The invariant: after processing index `i`, `reach` is the furthest index
+reachable using only positions `0` through `i`.** The correctness argument is
+that reachability here is an interval — if you can reach index `j`, you can reach
+every index below it, since you can always jump shorter. So the reachable set is
+always a prefix, and a single number describes it completely. That is why no
+search is needed and why there is nothing to backtrack over.
+
+Jump Game II, asking for the *minimum* number of jumps, extends the same idea
+with a level structure: track the end of the current jump's range, and when `i`
+reaches it, increment the jump count and extend the range to the furthest point
+seen. **That is breadth-first search on the reachability intervals, with each
+"level" being one jump** — which is why the answer is a shortest path and why
+greedy gets it right.
+
+### Worked example: Gas Station, and why the reset works
+
+**Problem:** given `gas[i]` and `cost[i]` around a circle, find the unique start
+index from which you can complete the circuit, or `-1`.
+
+```java
+int total = 0, tank = 0, start = 0;
+for (int i = 0; i < n; i++) {
+    int gain = gas[i] - cost[i];
+    total += gain;
+    tank  += gain;
+    if (tank < 0) { start = i + 1; tank = 0; }    // reset
+}
+return total >= 0 ? start : -1;
+```
+
+Two separate claims, and you should state them separately.
+
+**A solution exists if and only if the total gain is non-negative.** If the total
+is negative you run out of fuel somewhere no matter where you start, because the
+sum around the whole loop is fixed. If it is non-negative, a valid start exists.
+
+**If the tank goes negative somewhere between `start` and `i`, then no index in
+`start..i` can be a valid start.** This is the part people recite without
+understanding. Suppose some `j` strictly between `start` and `i` worked. Starting
+at `start`, the tank was non-negative at every point up to `j` — otherwise we
+would have reset earlier — so arriving at `j` from `start` we had at least as
+much fuel as starting fresh at `j` with zero. Therefore if we failed by `i`
+starting from `start`, we would also fail by `i` starting from `j`, with less
+fuel. So every candidate in the failed prefix is eliminated at once, which is why
+one linear pass suffices rather than `n` simulations.
+
+Notice the shape: **the greedy is fast because one failure eliminates a whole
+block of candidates, not because one candidate is obviously best.** That is a
+different flavour of greedy argument and it is worth having in your vocabulary.
+
+### The other classic correct greedies
+
+**Kadane's algorithm** for maximum subarray. At each index the running sum either
+extends the previous subarray or restarts at the current element, `cur =
+max(nums[i], cur + nums[i])`. The greedy commit is the restart: **a prefix with a
+negative sum can never help any extension, so discard it immediately.** That is a
+one-line exchange argument. It is also legitimately DP with a one-variable state,
+which is a nice thing to point out.
+
+**Huffman coding.** Repeatedly merge the two least-frequent symbols into one node
+and push it back — a heap-driven greedy. The exchange argument: in any optimal
+prefix code, the two least-frequent symbols can be swapped down to be siblings at
+the deepest level without increasing the encoded length, because moving a less
+frequent symbol deeper and a more frequent one shallower can only help. So some
+optimal solution contains the greedy's first merge, and induction finishes it.
+
+**Minimum spanning tree.** Kruskal adds the globally cheapest edge that does not
+form a cycle; Prim grows a tree by its cheapest outgoing edge. Both rest on the
+**cut property**: for any partition of the vertices into two sets, the cheapest
+edge crossing the partition is in some MST. That is an exchange argument —
+inserting the cheapest crossing edge into any spanning tree creates a cycle, and
+removing any other crossing edge from that cycle leaves a spanning tree no more
+expensive. See [Pattern 11](/dsa/pattern-11-graphs-bfs-dfs-union-find) for the
+union-find that implements Kruskal.
+
+### The classic greedy failures
+
+Knowing these cold is what stops you committing to a wrong greedy.
+
+**0/1 knapsack.** The natural greedy is "take items in decreasing order of
+value per unit weight." It is correct for the *fractional* knapsack, where you
+may take a piece of an item, and provably so by an exchange argument: any
+solution not using the best ratio first can be improved by swapping in a sliver
+of it. It is wrong for 0/1. Capacity 10, and items `(weight 6, value 12)` with
+ratio 2, `(weight 5, value 9)` with ratio 1.8, and `(weight 5, value 9)`. Greedy
+takes the first for 12 and cannot fit anything else. The optimum is the two
+smaller items for 18. **Indivisibility is what breaks the exchange argument,
+because you cannot swap in a fraction.**
+
+**Coin change with arbitrary denominations.** With coins 1, 3 and 4 and an
+amount of 6, greedy takes 4, then 1, then 1 — three coins. The optimum is 3 plus
+3, two coins. Greedy is correct for *canonical* coin systems, which include real
+currencies like `1, 5, 10, 25`, and that is exactly why the wrong intuition is so
+durable: it works every day at the till. Determining whether an arbitrary system
+is canonical is itself a hard problem, so in an interview the answer is always
+DP. **This is the single best counterexample to have memorised, because it is
+short and it refutes the most confident wrong answer in the pattern.**
+
+**Longest path, travelling salesman, graph colouring, set cover.** All NP-hard,
+all with plausible greedies that are merely approximations. Set cover's greedy is
+worth knowing positively: picking the set covering the most uncovered elements is
+within a `ln n` factor of optimal, and that bound is tight.
+
+### The interview habit
+
+When a greedy rule occurs to you, say this out loud: **"Let me check whether
+greedy is safe here — I'll try to build a counterexample first."** Then actually
+try, for thirty seconds, with three or four small items and a tight capacity. One
+of two things happens. You find a counterexample, and you have saved yourself
+from a wrong solution while demonstrating exactly the judgement being tested. Or
+you fail to find one, and you can then articulate why — usually "taking the
+earliest-ending item leaves the most room", or "a negative prefix can never
+help" — which is the exchange argument in informal dress. That sentence
+distinguishes a candidate who knows greedy algorithms from one who knows *when*
+to use them.
+
+### Edge cases and traps
+
+- **Sorting by the wrong key.** Start time instead of end time is the most
+  common, and it produces plausible wrong answers.
+- **Comparator overflow.** `(a, b) -> a[1] - b[1]` breaks on large or
+  mixed-sign values; use `Integer.compare`.
+- **Ties in the sort key** where the tie-break matters.
+- **Touching boundaries.** Whether `[1,2]` and `[2,3]` overlap changes the
+  comparison from `>` to `>=`. Ask.
+- **Assuming the greedy answer is unique.** Often many selections achieve the
+  optimum; if the problem wants a specific one, it needs a tie-break rule.
+- **Greedy plus a heap without realising it is greedy.** Meeting Rooms II and
+  Task Scheduler are greedy rules implemented with a
+  [heap](/dsa/pattern-9-heaps-priority-queue); the heap is the data structure,
+  not the justification.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How do you know greedy is correct here?"** The exchange argument: any
+   optimal solution can be converted into the greedy one, one swap at a time,
+   without getting worse.
+2. **"Why sort by end time and not start time?"** The earliest-ending compatible
+   interval leaves the most remaining timeline, and more room never admits fewer
+   future intervals. Sorting by start fails on one long interval covering two
+   short ones.
+3. **"Why not sort by duration?"** Counterexample: `[0,10]`, `[9,11]`,
+   `[10,20]`. The shortest interval conflicts with both others.
+4. **"When is greedy wrong?"** When a local commitment can block a better
+   combination — capacity constraints, exact targets, indivisible items.
+5. **"Give me a coin system where greedy fails."** Coins 1, 3, 4 and amount 6.
+   Greedy gives three coins, the optimum is two.
+6. **"Fractional versus 0/1 knapsack?"** Fractional is greedy by value density
+   and provably optimal, because you can swap in a fraction. 0/1 is DP, because
+   you cannot.
+7. **"Greedy or DP — how do you decide?"** Try a counterexample for thirty
+   seconds. If one exists, DP. If not, state the exchange argument informally and
+   commit.
+8. **"Complexity of your greedy?"** Almost always `O(n log n)` dominated by the
+   sort, with `O(1)` or `O(n)` extra space. If the input arrives sorted, it drops
+   to `O(n)`.
+9. **"What if the input were a stream?"** Rules that need a global sort cannot
+   stream. Rules with a running invariant can: Kadane and Jump Game both work on
+   a stream in `O(1)` space, which is a strong point to volunteer.
+10. **"What if the data is too big to sort in memory?"** External merge sort
+    first, then the single pass — the pass itself needs only constant state, so
+    the sort is the only memory pressure. For interval scheduling specifically
+    you can also process in end-time order straight off a sorted file.
+11. **"Prove Kadane's."** A prefix with a negative sum can only reduce any
+    extension, so discarding it is always safe. Equivalently it is DP with the
+    state "best subarray ending here".
+12. **"Why does Gas Station's reset skip the whole prefix?"** Arriving at any
+    intermediate index from the earlier start, you had at least as much fuel as
+    starting there fresh. If the earlier start failed by index `i`, so would any
+    of them.
+13. **"Is Dijkstra greedy?"** Yes — it commits to the smallest tentative distance
+    and never revisits. The proof is the same finality argument, and it is
+    exactly why negative edges break it.
+14. **"Can you always convert a greedy into a DP?"** Yes, and the DP will be
+    correct whether or not the greedy was; it just costs more. That is a
+    reasonable safety move when you cannot settle the proof under time pressure.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Committing to a greedy because it passes the two sample cases.** The samples
+  are chosen to be readable, not adversarial.
+- **Sorting by start when you meant end**, which is a one-character bug that
+  produces a plausible wrong number.
+- **Subtraction comparators overflowing.**
+- **Forgetting that "minimum removals" is "total minus maximum kept"** and
+  writing a whole second algorithm.
+- **Mishandling touching endpoints** because you never asked whether they count
+  as overlapping.
+- **Mutating the input array by sorting it** when the caller needed the original
+  order. Say it aloud, or copy.
+- **Confusing "a heap is involved" with "this is a heap problem".** The heap
+  implements the greedy rule; the rule still needs its own justification.
+- **Asserting a greedy proof you cannot actually give.** Interviewers push on
+  this exact point, and "I would verify it with a DP" is a far better answer than
+  a hand-wave.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Assign Cookies** — two-pointer greedy after sorting both arrays; the
+  smallest possible exchange argument.
+- **Best Time to Buy and Sell Stock II** — take every upward step, and be able
+  to say why summing all the rises is optimal.
+- **Lemonade Change** — greedy on which bills to give back, and why the larger
+  denomination goes first.
+
+**Medium**
+
+- **Jump Game** and **Jump Game II** — the reachability invariant and the
+  level-based minimum.
+- **Gas Station** — the reset argument, the most interesting proof in this list.
+- **Maximum Subarray** — Kadane's, and the DP framing of it.
+- **Non-overlapping Intervals** — interval scheduling restated as removals.
+- **Minimum Number of Arrows to Burst Balloons** — the same algorithm again, so
+  you can recognise it in disguise.
+- **Partition Labels** — greedy over last-occurrence positions, where the sort
+  key is not obvious.
+- **Task Scheduler** — greedy with a heap, and the closed-form alternative.
+- **Hand of Straights** — greedy from the smallest remaining card, with a
+  `TreeMap` of counts.
+- **Queue Reconstruction by Height** — sorting on two keys, where most people's
+  greedy intuition breaks down.
+
+**Hard**
+
+- **Candy** — two passes in opposite directions, because one greedy pass cannot
+  satisfy both neighbour constraints.
+- **Minimum Number of Refueling Stops** — greedy with a max-heap of skipped
+  stations, against the DP alternative.
+- **Course Schedule III** — take everything, then greedily drop the longest
+  course when a deadline is violated. The "undo" flavour of greedy.
+- **IPO** — two heaps implementing a greedy that is correct only because capital
+  requirements are monotone.
+
+### Where this connects
+
+- [Pattern 14 — Intervals](/dsa/pattern-14-intervals) — where most correct
+  greedies actually live, and the sort-key decision in detail.
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) — what
+  to fall back to when the exchange argument fails.
+- [Pattern 9 — Heaps](/dsa/pattern-9-heaps-priority-queue) — the structure that
+  implements "best available now" when the set changes as you go.
+- [Pattern 11 — Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) — Dijkstra,
+  Kruskal and Prim are all greedy, and each has a named property that proves it.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — why
+  greedy's `O(n log n)` matters when DP's `O(n * target)` will not fit.

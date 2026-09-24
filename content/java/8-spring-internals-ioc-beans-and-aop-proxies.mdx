@@ -1,0 +1,369 @@
+---
+title: "8. Spring internals — the container, bean lifecycle & AOP proxies"
+topic: "java"
+order: 550
+group: "Spring Core"
+difficulty: "hard"
+estimatedMinutes: 18
+tags: [spring, ioc, dependency-injection, aop, proxy, bean-lifecycle]
+format: "mdx"
+summary: "Why the bean in the container isn't the object your constructor made — and how that single fact explains @Transactional, @Async, @Cacheable and every 'why is my annotation ignored?' bug."
+---
+
+## Layer 1 — The mental model
+
+Spring does two things to your objects, and almost every confusing Spring
+behaviour comes from the second one:
+
+1. **The container constructs and wires them** (IoC / dependency injection).
+   This part is well understood and rarely the source of bugs.
+2. **The container may replace them with a proxy** — an object Spring generated
+   that wraps yours, intercepts calls, does something extra, then delegates.
+
+The single most useful sentence in this lesson:
+
+> **The bean in the container is not necessarily the object your constructor
+> created. When another bean injects it, they get the proxy.**
+
+`@Transactional`, `@Async`, `@Cacheable`, `@Retryable`, `@PreAuthorize` are all
+implemented this way. They are not language features — they're *interception*,
+and interception only happens on calls that actually pass through the proxy.
+
+```
+    Other bean                proxy (Spring-generated)        your object
+  orderService.save()  ──►  ┌──────────────────────┐  ──►  OrderService
+                            │ begin transaction    │        .save()
+                            │   target.save()  ────┼──►     (your code)
+                            │ commit / rollback    │
+                            └──────────────────────┘
+
+  But a call from INSIDE your object:  this.save()  ──►  straight to your code.
+                                       The proxy is never involved.
+```
+
+That diagram is the answer to a large fraction of Spring interview questions.
+Hold onto it.
+
+---
+
+## Layer 2 — The mechanism
+
+### The bean lifecycle, in order
+
+Knowing the sequence matters because **where** the proxy is created determines
+what you can and can't do:
+
+1. **Bean definitions loaded.** Component scan, `@Bean` methods, imports. At this
+   point Spring has *metadata*, not objects.
+2. **`BeanFactoryPostProcessor`s run** and may modify those definitions — this is
+   how `${...}` placeholders get resolved, before anything is instantiated.
+3. **Instantiation.** The constructor runs. Constructor-injected dependencies are
+   resolved and passed here.
+4. **Population.** Field and setter injection happens now — *after* the
+   constructor. This is why a field-injected dependency is `null` inside your
+   constructor.
+5. **`Aware` callbacks.** `BeanNameAware`, `ApplicationContextAware`, etc.
+6. **`BeanPostProcessor.postProcessBeforeInitialization`.**
+7. **Initialisation callbacks**, in this order: `@PostConstruct`, then
+   `InitializingBean.afterPropertiesSet()`, then a custom `initMethod`.
+8. **`BeanPostProcessor.postProcessAfterInitialization`** — **this is where AOP
+   proxies are created.** `AbstractAutoProxyCreator` is itself a
+   `BeanPostProcessor`; it takes your fully-initialised object and returns a
+   proxy wrapping it. The proxy is what goes into the container.
+9. **Bean is ready.**
+10. **Shutdown:** `@PreDestroy`, then `DisposableBean.destroy()`, then a custom
+    `destroyMethod`. Prototype-scoped beans get *none* of this — Spring hands
+    them over and forgets them.
+
+<Callout type="interview" title="The consequence of step 8">
+Because the proxy is created **after** initialisation, `@Transactional` and
+friends **do not work inside `@PostConstruct`**. At that moment your object
+exists but its proxy does not, so a self-call — or any call at all from within
+the initialisation path — is unadvised.
+
+The related trap: injecting a `@Transactional` bean and calling it from
+`@PostConstruct` *can* work, but only if that bean was fully created first.
+Ordering during startup is not something to rely on. If you need transactional
+work at startup, use an `ApplicationRunner` or an
+`ApplicationReadyEvent` listener, both of which run after the context is fully
+built.
+</Callout>
+
+### Dependency injection: three styles, one right default
+
+```java
+// Constructor injection — the default you should use.
+@Service
+public class OrderService {
+    private final PaymentClient payments;          // final: truly immutable
+    private final OrderRepository orders;
+
+    public OrderService(PaymentClient payments, OrderRepository orders) {
+        this.payments = payments;
+        this.orders = orders;
+    }
+}
+```
+
+Since Spring 4.3, a single constructor needs no `@Autowired`. Why it's the right
+default:
+
+- Dependencies can be `final`, so the object is immutable and safe to publish
+  across threads.
+- The object is **impossible to construct in an invalid state**, which also makes
+  it trivially testable with `new` — no reflection, no Spring context.
+- Required dependencies are visible in the signature. A constructor with nine
+  parameters is *telling you* the class does too much; field injection hides that
+  smell.
+- Circular dependencies **fail at startup** rather than silently working.
+
+**Field injection** (`@Autowired` on a field) can't be `final`, hides
+dependencies, and needs reflection to test. **Setter injection** is for genuinely
+optional dependencies, which are rare.
+
+### Circular dependencies, and why they sometimes "work"
+
+With constructor injection, A needing B needing A is unsatisfiable — Spring
+throws `BeanCurrentlyInCreationException` at startup. With field or setter
+injection it often works, via the container's **three-level cache**:
+
+```
+singletonObjects      fully initialised beans
+earlySingletonObjects raw instances exposed early (constructed, not yet populated)
+singletonFactories    factories that can produce an early reference
+```
+
+Spring constructs A, exposes a reference to the half-built A, then builds B
+(which gets that early reference), then finishes A. It works because field
+injection happens after construction, so a partially built object is enough.
+
+Two things to know about this:
+
+- **Spring Boot 2.6+ disallows it by default.** You must set
+  `spring.main.allow-circular-references=true` to restore it, which is a strong
+  hint about what the framework authors think of the pattern.
+- **It interacts badly with AOP.** The early reference is the *raw* object; if A
+  is later proxied, B may be holding the unproxied instance — so B's calls to A
+  silently skip transactions. Spring detects the common cases and throws, but
+  this is a genuinely nasty class of bug.
+
+The real fix is almost never a configuration flag. A cycle means the
+responsibilities are wrong: extract the shared logic into a third bean, or invert
+one direction with an event.
+
+### Scopes
+
+`singleton` is the default: **one instance per `ApplicationContext`** — not one
+per JVM, and not the Singleton design pattern. Two contexts in one JVM means two
+instances.
+
+The practical consequence: **singleton beans must be stateless or thread-safe.**
+A mutable field on a `@Service` is shared by every concurrent request, which is a
+race condition that passes every single-user test.
+
+`prototype` creates a new instance per lookup. The classic trap:
+
+```java
+@Service
+public class Consumer {
+    private final Task task;             // prototype — but injected ONCE
+    Consumer(Task task) { this.task = task; }   // you get one instance, forever
+}
+```
+
+Injecting a prototype into a singleton gives you exactly one instance, because
+injection happens once at startup. Use `ObjectProvider<Task>` (or `@Lookup`) and
+call `getObject()` per use when you genuinely need a fresh one.
+
+`request` and `session` scopes exist for web apps and are injected as
+scoped proxies that resolve to the current request's instance on each call.
+
+### AOP: how the proxy is actually built
+
+Two mechanisms:
+
+**JDK dynamic proxies** — only work if your class implements an interface. The
+proxy implements the same interface and delegates. This is why, historically,
+Spring code was full of `FooService` / `FooServiceImpl` pairs.
+
+**CGLIB** — generates a **subclass** at runtime and overrides your methods.
+Needs no interface. **Spring Boot has defaulted to CGLIB since 2.0**
+(`proxyTargetClass=true`), so the interface-for-everything habit is obsolete.
+
+What CGLIB's subclassing implies, and these are all real bugs people ship:
+
+| Situation | Result |
+|---|---|
+| `final` class | Cannot be subclassed — proxy creation fails |
+| `final` method | Cannot be overridden — **silently unadvised** |
+| `private` method | Not visible to the subclass — **silently unadvised** |
+| `static` method | Not virtual — never intercepted |
+| Self-invocation | Never reaches the proxy — **silently unadvised** |
+
+Note how many of those say *silently*. The annotation is right there in the
+source, so the code reads as if it works. This is why understanding the mechanism
+matters more than memorising the rules.
+
+### Self-invocation, properly explained
+
+```java
+@Service
+public class OrderService {
+
+    public void processAll(List<Order> orders) {
+        for (Order o : orders) {
+            save(o);            // ← plain `this.save(o)`. NOT transactional.
+        }
+    }
+
+    @Transactional
+    public void save(Order o) { ... }
+}
+```
+
+`save(o)` compiles to `this.save(o)`, and inside your object `this` is the
+**target**, not the proxy. The call is an ordinary virtual dispatch that never
+crosses the proxy boundary, so nothing intercepts it. The annotation isn't
+ignored, exactly — it's never consulted, because the interceptor isn't on the
+call path.
+
+Fixes, roughly best to worst:
+
+```java
+// 1. BEST — move it to another bean. The call now crosses a proxy boundary,
+//    and it usually reflects a real responsibility split anyway.
+@Service
+public class OrderService {
+    private final OrderWriter writer;
+    public void processAll(List<Order> os) { os.forEach(writer::save); }
+}
+
+// 2. Self-injection. Works, but the @Lazy is required to break the cycle,
+//    and it's a confession that the design is off.
+@Service
+public class OrderService {
+    private final OrderService self;
+    OrderService(@Lazy OrderService self) { this.self = self; }
+    public void processAll(List<Order> os) { os.forEach(self::save); }
+}
+
+// 3. Programmatic — no proxy involved at all, so no ambiguity.
+private final TransactionTemplate tx;
+public void processAll(List<Order> os) {
+    os.forEach(o -> tx.execute(status -> { save(o); return null; }));
+}
+```
+
+`AopContext.currentProxy()` also works but requires `exposeProxy=true` and ties
+your code to Spring's AOP internals. **AspectJ load-time weaving** is the one
+approach that genuinely fixes self-invocation, because it rewrites the bytecode
+rather than wrapping the object — no proxy, so no boundary to miss. It's rarely
+worth the build complexity.
+
+<Callout type="pitfall" title="One rule, many symptoms">
+Every proxy-based annotation inherits these limitations. If you can explain
+self-invocation once, you have simultaneously explained:
+
+- `@Transactional` not opening a transaction
+- `@Async` running synchronously on the caller's thread
+- `@Cacheable` executing the method every time
+- `@Retryable` not retrying
+- `@PreAuthorize` not checking anything — **a security hole**, and the reason
+  this is worth understanding rather than memorising
+
+When someone says "my annotation doesn't work", the first two questions are
+always: *is the call coming from inside the same object?* and *is the method
+`public` and non-`final`?*
+</Callout>
+
+### `@Configuration` vs `@Component` for `@Bean` methods
+
+A genuinely good deep-dive question, and the answer is again CGLIB:
+
+```java
+@Configuration          // CGLIB-enhanced: inter-bean calls are intercepted
+public class AppConfig {
+    @Bean public A a() { return new A(b()); }   // b() returns the SINGLETON
+    @Bean public B b() { return new B(); }      // called twice, one instance
+}
+
+@Component              // "lite mode": NO enhancement
+public class LiteConfig {
+    @Bean public A a() { return new A(b()); }   // b() is a PLAIN method call
+    @Bean public B b() { return new B(); }      // → TWO different B instances
+}
+```
+
+`@Configuration` classes are proxied so that a call to another `@Bean` method
+returns the container's singleton instead of executing the method again.
+`@Component` gives you "lite mode" with no proxy, so you silently get duplicate
+objects — and since `B` probably looks fine, the bug shows up much later as
+inconsistent state. (`proxyBeanMethods=false` opts out deliberately, for startup
+speed, when your `@Bean` methods don't call each other.)
+
+### Stereotypes
+
+`@Component` is the base. `@Service`, `@Repository` and `@Controller` are
+specialisations that are **mostly documentation** — with one functional
+exception: **`@Repository` enables persistence exception translation**, turning
+vendor-specific `SQLException`s and Hibernate exceptions into Spring's
+`DataAccessException` hierarchy. That's an actual behaviour difference worth
+knowing.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why doesn't `@Transactional` work when I call the method from the same
+   class?"** `this.method()` never crosses the proxy boundary. Explain target vs
+   proxy, then give the fixes.
+2. **"Where in the lifecycle is the proxy created?"** In
+   `postProcessAfterInitialization`, after `@PostConstruct` — which is why
+   annotations don't work inside `@PostConstruct`.
+3. **"JDK proxy or CGLIB?"** JDK needs an interface; CGLIB subclasses. Boot
+   defaults to CGLIB, so `final` classes and methods can't be advised.
+4. **"Why does `@Transactional` on a private method do nothing?"** A subclass
+   can't override a private method, so there's nothing to intercept. No error,
+   no advice.
+5. **"Constructor or field injection?"** Constructor: `final` fields,
+   immutability, testable without Spring, required deps explicit, cycles fail
+   fast.
+6. **"How do circular dependencies work with field injection?"** The three-level
+   cache exposes an early reference to a half-built bean. Disallowed by default
+   since Boot 2.6, and it can inject the unproxied object.
+7. **"Is a singleton bean thread-safe?"** The bean is shared, so *your* code must
+   be. One instance per context serves all concurrent requests.
+8. **"You inject a prototype into a singleton. How many instances?"** One —
+   injection happens once. Use `ObjectProvider` for a fresh one per call.
+9. **"Difference between `@Component` and `@Configuration` for `@Bean`
+   methods?"** `@Configuration` is CGLIB-enhanced so inter-bean calls return
+   singletons; `@Component` lite mode creates duplicates.
+10. **"Is `@Service` different from `@Component`?"** Semantically only —
+    except `@Repository`, which adds exception translation.
+11. **"`@PostConstruct` vs `InitializingBean` vs `initMethod`?"** All three run,
+    in that order. `@PostConstruct` is the standard choice (JSR-250, no Spring
+    coupling).
+12. **"How would you intercept a self-invocation properly?"** You can't with
+    proxies — that's AspectJ load-time weaving, which rewrites bytecode.
+</Callout>
+
+<Callout type="tip" title="The framing that makes you sound senior">
+Lead with the mechanism, not the rule. "Spring AOP is proxy-based, so advice only
+applies to calls that cross the proxy boundary — which means self-invocation,
+private methods and final methods are all unadvised, and it's silent in every
+case." That one sentence answers half a dozen separate interview questions, and
+it's obviously different from having memorised "don't call `@Transactional`
+methods from the same class."
+</Callout>
+
+### Where this connects
+
+- [Transaction management with @Transactional](/java/5-transaction-management-transactional)
+  — the most-used consequence of everything above.
+- [Spring Data JPA & Hibernate](/java/2-spring-data-jpa-hibernate) — repository
+  interfaces are themselves proxies, generated at runtime.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — why a mutable field
+  on a singleton bean is a data race.
+- [OOP & design principles](/java/5-oop-design-principles) — dependency inversion
+  is what the container exists to serve.

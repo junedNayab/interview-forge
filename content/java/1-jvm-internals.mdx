@@ -1,0 +1,324 @@
+---
+title: "1. JVM Internals"
+topic: "java"
+order: 501
+group: "Core Java"
+difficulty: "hard"
+estimatedMinutes: 25
+tags: [jvm, garbage-collection, memory, g1, zgc, jit, troubleshooting]
+format: "mdx"
+summary: "Why generational GC works at all, what G1 and ZGC actually do differently, how to read a GC log, and how to diagnose an OutOfMemoryError instead of raising -Xmx."
+---
+
+## Layer 1 — The mental model
+
+Most candidates can recite the heap diagram. Very few can answer "your service
+pauses for 4 seconds every 20 minutes — what's happening?" That gap is what this
+lesson is for.
+
+The one insight everything else hangs off is the **weak generational
+hypothesis**:
+
+> **Almost all objects die young.** In a typical application, well over 90% of
+> allocated objects become garbage almost immediately — the `StringBuilder` in a
+> method, the DTO you mapped and discarded, the lambda's captured state.
+
+That's an empirical observation about how people write programs, and it has a
+powerful consequence. If most objects die young, then **a collector that only
+looks at young objects does almost all the useful work for almost none of the
+cost**. And because it copies out the few survivors rather than deleting the
+many dead ones, the cost is proportional to what *lives*, not to what you
+allocated.
+
+That's why allocation in Java is nearly free — it's a pointer bump in Eden —
+and why a minor GC of a 2 GB young generation can take 10 milliseconds. You
+aren't collecting garbage, you're evacuating survivors and declaring the rest of
+the space empty.
+
+Everything else — generations, survivor spaces, promotion, G1's regions —
+is machinery built to exploit that one observation.
+
+---
+
+## Layer 2 — The mechanism
+
+### Memory architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                      JVM Memory                      │
+├──────────────────────┬──────────────────────────────┤
+│        HEAP          │         NON-HEAP             │
+│  ┌───────────────┐   │  ┌────────────────────────┐  │
+│  │  Young Gen    │   │  │  Metaspace (Java 8+)   │  │
+│  │  ┌──────────┐ │   │  │  class metadata —      │  │
+│  │  │  Eden    │ │   │  │  NATIVE memory         │  │
+│  │  ├──────────┤ │   │  └────────────────────────┘  │
+│  │  │ S0 (from)│ │   │  ┌────────────────────────┐  │
+│  │  ├──────────┤ │   │  │  Thread Stacks         │  │
+│  │  │ S1 (to)  │ │   │  │  ~1 MB each, per thread│  │
+│  │  └──────────┘ │   │  └────────────────────────┘  │
+│  ├───────────────┤   │  ┌────────────────────────┐  │
+│  │  Old Gen      │   │  │  Code Cache (JIT)      │  │
+│  │  (tenured)    │   │  └────────────────────────┘  │
+│  └───────────────┘   │  ┌────────────────────────┐  │
+│                      │  │  Direct ByteBuffers    │  │
+└──────────────────────┴──┴────────────────────────┴──┘
+        -Xmx covers THIS only ──┘  … and not any of this
+```
+
+The detail that catches people out in containers: **`-Xmx` bounds the heap, not
+the process.** Thread stacks, Metaspace, the code cache, direct byte buffers and
+the JVM's own structures are all outside it. A container with a 1 GB limit and
+`-Xmx1g` will be OOM-killed by the kernel, and you'll see no Java exception at
+all — just exit code 137. Budget roughly 25% headroom, or let the JVM do it with
+`-XX:MaxRAMPercentage=75`.
+
+**Shared vs per-thread.** Heap and Metaspace are shared by all threads; the
+stack, the program counter and native method stack are per-thread. That's the
+structural reason local variables and method parameters are inherently
+thread-safe while fields are not — and it's a cleaner answer to "why is this
+variable thread-safe?" than "because it's local."
+
+**Metaspace replaced PermGen in Java 8.** It lives in native memory and grows
+dynamically, which fixed the classic `OutOfMemoryError: PermGen space` on
+redeploy — but it can still leak if an application server keeps loading classes
+with fresh classloaders and something holds a reference to them.
+
+### The object lifecycle
+
+```
+new Object()  →  Eden (pointer bump; allocation is ~10 ns)
+                    │  minor GC: mark live, COPY survivors out
+                    ▼
+                 Survivor S0 ⇄ S1   (age++ on each minor GC)
+                    │  age > MaxTenuringThreshold (default 15)
+                    ▼
+                 Old Gen           (collected by major/mixed GC — expensive)
+```
+
+Two mechanisms worth knowing because they explain real pathologies:
+
+**Premature promotion.** If the survivor space is too small for the survivors of
+one minor GC, objects are promoted to Old Gen immediately regardless of age.
+Now short-lived garbage is sitting in the expensive generation, and you get
+frequent old-gen collections. Symptom: old gen growing steadily in a service
+that should be in steady state.
+
+**Large objects bypass the young generation.** An allocation bigger than half a
+G1 region (a "humongous object" — often a big byte array or a fat `ArrayList`
+resize) goes straight to old gen. Lots of these hurt, because they're collected
+only by the expensive path.
+
+**Escape analysis** is the JIT optimisation people forget: if the compiler can
+prove an object never escapes its method, it can allocate it on the stack — or
+eliminate it entirely via scalar replacement. So "Java allocates everything on
+the heap" is not quite true in compiled code.
+
+### What "stop the world" actually means
+
+Every collector, including ZGC, has stop-the-world pauses. During one, **all
+application threads are halted** — they cannot run, and your p99 latency
+absorbs the pause directly.
+
+Threads don't stop instantly; they stop at **safepoints**, which are polled
+locations the JIT inserts (method returns, loop back-edges). A thread in a long
+counted loop with no safepoint poll can delay the *entire* pause while every
+other thread waits — the "time to safepoint" problem, and a good detail to know
+because it explains pauses that GC logs blame on nothing.
+
+The three collectors you should be able to compare, and the trade each makes:
+
+| Collector | Pause | Throughput | Best for |
+|---|---|---|---|
+| **Parallel** | Long (seconds on big heaps) | **Highest** | Batch jobs, where only total time matters |
+| **G1** (default since 9) | ~100–200 ms, targeted | Good | **Almost every service** |
+| **ZGC** / Shenandoah | **< 1 ms**, heap-size independent | ~10–15% lower | Latency-critical, large heaps |
+| **Serial** | Long | Low | Tiny heaps, single-core containers |
+
+The rule underneath the table: **you are trading throughput for pause time.**
+Concurrent collectors do their work while your application runs, which means
+competing with it for CPU and doing extra bookkeeping. There is no free
+low-pause collector.
+
+### G1 — why it's the default
+
+G1 divides the heap into ~2,048 equal regions, each dynamically labelled Eden,
+Survivor, Old or Humongous. Generations are no longer contiguous address ranges;
+they're just sets of regions.
+
+That buys G1 the thing it's named for: it collects **garbage first**. Concurrent
+marking tells it how much garbage each region holds, so it can pick the regions
+with the best payoff and collect only those — enough of them to fit your
+`-XX:MaxGCPauseMillis` budget. Pause time becomes a tunable input rather than an
+emergent property of heap size, which is exactly what a service wants.
+
+The cost is bookkeeping: **remembered sets** track cross-region references so a
+region can be collected without scanning the whole heap, and **write barriers**
+maintain them on every reference store. That's real overhead on every pointer
+write, and it's the honest answer to "why isn't G1 as fast as Parallel?"
+
+<Callout type="note" title="ZGC in one paragraph: coloured pointers">
+ZGC stores metadata *inside the pointer itself* — spare bits in a 64-bit address
+mark whether the object has been relocated or marked. A **load barrier** runs on
+every reference read: it checks those bits and, if the object has moved, fixes
+the reference on the spot and continues.
+
+That's what makes relocation concurrent. The collector can move objects while
+your threads run, because any thread that reads a stale pointer repairs it
+itself. Pauses no longer scale with heap size — they're sub-millisecond on a
+16 GB heap and sub-millisecond on a 16 TB one.
+
+The price is a load barrier on essentially every object read, costing roughly
+10–15% throughput. Choose ZGC when tail latency matters more than total work,
+and note it's 64-bit only for the obvious reason.
+</Callout>
+
+### Reading a GC log
+
+```
+-Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=10M
+```
+
+What to look for, and what each finding means:
+
+- **Pause frequency and duration.** Minor GCs every few seconds at ~10 ms is
+  healthy. Every 200 ms is an allocation problem.
+- **Old gen after each full GC.** If it climbs monotonically, **you have a
+  memory leak**, not a tuning problem. This single line is the most useful
+  diagnostic in the log.
+- **`to-space exhausted` / evacuation failure** — G1 couldn't fit the survivors
+  and had to fall back. Expensive, and a sign the heap is too small or
+  allocation is too bursty.
+- **`Full GC (Allocation Failure)`** on G1 — the emergency single-threaded
+  fallback. It should essentially never happen.
+- **GC overhead percentage.** Above ~10% of wall time in GC means something is
+  wrong upstream of the collector.
+
+### Diagnosing OutOfMemoryError
+
+The reflex is `-Xmx8g`. The professional answer is to find out which OOM it is,
+because they have different causes:
+
+| Message | Means | Usual cause |
+|---|---|---|
+| `Java heap space` | Heap genuinely full | Leak, or heap too small for the working set |
+| `GC overhead limit exceeded` | Over 98% of time in GC, under 2% reclaimed | A leak, caught slightly earlier |
+| `Metaspace` | Class metadata exhausted | Classloader leak — repeated redeploys, dynamic proxies |
+| `unable to create native thread` | OS thread limit or memory | Unbounded thread creation |
+| `Direct buffer memory` | Off-heap NIO buffers | Netty/NIO buffers not released |
+| exit code 137, no exception | **Kernel OOM-killed the process** | Container limit < heap + non-heap |
+
+The workflow to describe:
+
+```
+-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/log/app/
+```
+
+Always have that on in production — a heap dump at the moment of failure is
+worth more than any amount of after-the-fact speculation. Then open the dump in
+**Eclipse MAT**, run the Leak Suspects report, and look at the dominator tree:
+it shows which objects are keeping the most memory alive, which is the actual
+question. `jcmd <pid> GC.heap_info`, `jcmd <pid> Thread.print` and async-profiler
+cover the live cases.
+
+The leaks that actually occur, so you can name one: a static `Map` used as a
+cache with no eviction; `ThreadLocal`s not removed on a pooled thread (the
+thread outlives the request, so the value never becomes unreachable);
+listeners registered and never deregistered; and an unbounded queue in front of
+a consumer that can't keep up.
+
+### Class loading and JIT, briefly
+
+**Class loading** is Bootstrap → Platform → Application, with **parent-first
+delegation**: a loader asks its parent before loading a class itself. That's
+what guarantees nobody can substitute their own `java.lang.String`. Tomcat
+deliberately inverts this per webapp for isolation, which is also why webapps
+can leak classloaders.
+
+Worth knowing: **class identity is (fully-qualified name, classloader)**. The
+same class loaded by two loaders produces two distinct types, which is the
+source of the baffling `ClassCastException: com.foo.Bar cannot be cast to
+com.foo.Bar`.
+
+**JIT.** Bytecode is interpreted, then HotSpot notices hot methods and compiles
+them natively — C1 compiles fast with modest optimisation, C2 compiles slowly
+with aggressive optimisation (inlining, loop unrolling, escape analysis), and
+tiered compilation uses C1 first then promotes to C2. Two consequences that
+matter: **the JVM is slow for the first seconds** (hence warm-up before
+benchmarking, and hence AOT/CRaC for serverless), and **the JIT can
+deoptimise** when a speculative assumption is invalidated — for example when a
+monomorphic call site suddenly sees a second implementation.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why does the JVM have generations?"** The weak generational hypothesis —
+   most objects die young — so collecting only the young generation gets most of
+   the benefit for a fraction of the cost.
+2. **"Why is allocation so cheap in Java?"** A pointer bump in Eden. Copying
+   collection means cost scales with what survives, not with what you
+   allocated.
+3. **"What happens on a minor GC?"** Live objects in Eden and one survivor space
+   are copied to the other, ages increment, and the rest of the space is
+   declared free.
+4. **"When does an object reach old gen?"** After surviving the tenuring
+   threshold, or immediately if the survivor space can't hold it, or if it's
+   too large to begin with.
+5. **"Which collector and why?"** G1 by default. Parallel for batch throughput.
+   ZGC when tail latency matters more than 10–15% throughput.
+6. **"What makes G1 different?"** Regions instead of contiguous generations, so
+   it can collect the highest-garbage regions and hit a pause-time target. It
+   pays for that with remembered sets and write barriers.
+7. **"How does ZGC get sub-millisecond pauses?"** Coloured pointers plus a load
+   barrier, so relocation happens concurrently and each thread repairs stale
+   references as it reads them.
+8. **"Does ZGC have zero pauses?"** No — sub-millisecond ones, and they don't
+   grow with heap size.
+9. **"What's a safepoint?"** Where threads can stop for GC. A thread slow to
+   reach one delays the whole pause.
+10. **"`-Xmx2g` in a 2 GB container — fine?"** No. Stacks, Metaspace, code cache
+    and direct buffers are outside `-Xmx`, so the kernel kills you with exit 137
+    and no Java error. Use `-XX:MaxRAMPercentage`.
+11. **"You get OutOfMemoryError. What do you do?"** Read which OOM it is, take a
+    heap dump (ideally already enabled), analyse the dominator tree in MAT, and
+    find the retaining reference. Raise `-Xmx` only after ruling out a leak.
+12. **"How do you tell a leak from an undersized heap?"** Old-gen occupancy
+    *after* full GCs. Flat means undersized; climbing means a leak.
+13. **"Name a leak you'd expect."** A static cache with no eviction, or a
+    `ThreadLocal` never removed on a pooled thread.
+14. **"Why is the first request slow?"** Interpretation before JIT compilation,
+    plus class loading and lazy initialisation.
+15. **"What is escape analysis?"** If an object provably doesn't escape its
+    method, the JIT can stack-allocate it or eliminate it entirely.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Raising `-Xmx` to fix an OOM** without checking whether it's a leak. You've
+  bought time, not a fix.
+- **Setting `-Xmx` to the container limit.** Non-heap memory is real.
+- **Tuning GC flags before measuring.** Almost every "GC problem" is an
+  allocation-rate or leak problem.
+- **Benchmarking without warm-up**, measuring the interpreter instead of the
+  JIT.
+- **`ThreadLocal` without `remove()` on pooled threads** — a leak and a
+  cross-request data bug at the same time.
+- **Assuming `System.gc()` does something.** It's a suggestion, and calling it
+  in production is almost always wrong.
+- **Not enabling `-XX:+HeapDumpOnOutOfMemoryError`,** so the one crash that
+  could have explained everything tells you nothing.
+</Callout>
+
+### Where this connects
+
+- [Java concurrency](/java/3-concurrency-senior-must-have) — the memory model,
+  and why thread stacks being per-thread matters.
+- [2. Operating systems and concurrency](/cs-fundamentals/2-operating-systems-concurrency)
+  — what the OS is doing underneath: virtual memory, the page cache, context
+  switches.
+- [Collections deep dive](/java/2-collections-framework-deep-dive) — where your
+  allocation actually comes from.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — an in-process cache is heap you're choosing not to collect.

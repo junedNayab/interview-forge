@@ -1,0 +1,178 @@
+---
+title: "Day-of Interview Checklist"
+topic: "behavioral"
+order: 906
+difficulty: "easy"
+estimatedMinutes: 13
+tags: [behavioral, checklist, interview-day, logistics, recovery]
+format: "mdx"
+summary: "A timed checklist from the week before to the debrief afterwards, covering screen-share and editor setup, what to do when you blank, how to ask for a hint, and why writing down every question the same day matters."
+---
+
+## How to use this page
+
+Read it once a week before your first onsite, then again the morning of each
+round. It is deliberately boring in places: most interview-day damage comes from
+logistics and nerves rather than from not knowing things.
+
+## The week before
+
+- [ ] **Confirm the format in writing.** Ask the recruiter: how many rounds, how
+      long each, which platform, shared editor or your own IDE, whether code
+      execution is allowed, and whether there is a drawing tool for design.
+- [ ] **Ask what the rounds actually are.** "Is the system design round HLD, LLD,
+      or both?" saves you from preparing the wrong thing. Also ask who you are
+      meeting and their role.
+- [ ] **Rehearse your stories out loud, timed.** Six to eight of them, four
+      minutes each, from bullets not a script. See
+      [general behavioral tips](/behavioral/general-behavioral-tips).
+- [ ] **Do one full-length timed mock per round type.** A 45-minute design
+      problem standing at a whiteboard, two mediums under time, one machine
+      coding problem. Silent practice does not transfer.
+- [ ] **Re-read your resume and interrogate it.** Every line is fair game. For
+      each bullet, ask yourself the three follow-ups you would ask. See
+      [resume guidance](/roadmap/6-resume-guidance-projects-skills-sections).
+- [ ] **Re-read your project code,** so you are not surprised by your own
+      decisions. For the URL shortener: the caching strategy, code generation,
+      the rate limiter, and what you would change before production.
+- [ ] **Write your questions for the interviewer.** Two or three per round, and
+      different ones for the hiring manager.
+
+## The day before
+
+- [ ] **Test the tooling.** Open the actual platform — CoderPad, HackerRank,
+      Meet, Zoom, whatever it is — and run through it. Discovering that screen
+      share needs an OS permission grant is fine today and a disaster tomorrow.
+- [ ] **Set up your editor.** If you can use your own: a scratch file open, a
+      main method ready, collection and stream imports already there. If you are
+      in a browser editor, pick your language and write a hello world so you know
+      whether autocomplete exists.
+- [ ] **Silence everything.** Notifications, calendar alerts, phone, Slack, the
+      second monitor.
+- [ ] **Save the recruiter's phone number in your phone.** If the link fails at
+      the start time you need a human in thirty seconds, not an inbox search.
+- [ ] **Light review only.** Skim your one-page notes and the
+      [rapid-fire self-test](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud).
+      Do not learn a new topic the night before.
+- [ ] **Sleep.** Not filler advice: sleep loss degrades exactly what interviews
+      test — working memory, verbal fluency, and recovering from a mistake
+      without spiralling.
+
+## Two hours before
+
+- [ ] Eat something. Low blood sugar in the fourth round is a real phenomenon.
+- [ ] Restart your machine. Close everything you do not need.
+- [ ] Re-test camera, microphone and share. Again. It takes ninety seconds.
+- [ ] Fill a large glass or bottle of water and put it within reach.
+- [ ] Put paper and a pen next to you. Physical, not a second window.
+- [ ] Warm up your voice and your hands: solve one easy problem you have already
+      solved, talking out loud the whole time. The goal is not practice, it is to
+      not have the first words you say all day be in the interview.
+- [ ] Use the bathroom. Back-to-back rounds have short gaps.
+
+## Five minutes before
+
+- [ ] Close every tab except the interview platform and one blank notes file.
+- [ ] Join two or three minutes early.
+- [ ] Have ready: your one-line introduction, your questions for this specific
+      interviewer, and the name of the person you are meeting.
+- [ ] Take four slow breaths with a long exhale. It is a physiological trick
+      rather than a psychological one and it works on the shakiness.
+
+## During the round
+
+**Thinking out loud is scored.** This is the single most important thing on this
+page. An interviewer cannot give credit for reasoning they cannot hear, and
+silence reads as being stuck even when you are making progress. Narrate: "I'm
+considering two approaches here…", "I'm going to check the empty case…", "let me
+re-read the constraint before I commit to this."
+
+**Restate the problem before you start.** Thirty seconds of "so, to confirm:
+input is X, output is Y, and I can assume Z" catches misunderstandings while
+they are still free.
+
+**Write down constraints and examples as they are given.** On paper. You will
+forget the edge case they mentioned in passing.
+
+### When you blank
+
+It happens, and how you handle it is itself observed. The recovery sequence:
+
+1. **Say it.** "Give me a moment to think" is a complete and acceptable sentence.
+   Twenty seconds of acknowledged silence is normal; twenty seconds of unexplained
+   silence is not.
+2. **Go back to the concrete.** Work a small example by hand. In a design round,
+   go back to the numbers: "let me recalculate the write volume, because that
+   decides this." Returning to first principles is always a legal move and it
+   buys thinking time while still producing signal.
+3. **State what you do know.** "I know this is a graph problem and I know BFS
+   gives shortest path in an unweighted graph; what I'm not sure about yet is how
+   to represent the state." That is a partial answer, and partial answers score.
+
+### Asking for a hint
+
+You lose fewer points than you think, and far fewer than you lose by burning
+fifteen minutes in silence. The cost depends entirely on how you ask.
+
+- Weak: "I don't know, can you help?"
+- Strong: "I've got a working brute force at O(n²) and I think the improvement
+  involves preprocessing the array, but I can't see what to precompute. Am I on
+  the right track, or should I be thinking differently?"
+
+The second version shows where you are, what you have tried, and what specific
+gap you have. Interviewers are generally instructed to give hints, and many
+score the *use* of a hint rather than the need for it. **Ask at around the
+ten-minute mark of being genuinely stuck, not at thirty.**
+
+### When you get something wrong
+
+If you notice the error yourself, say so immediately and out loud — "actually,
+that's wrong, this breaks when the list is empty" — and fix it. Self-correction
+is a positive signal, not a negative one.
+
+If the interviewer points it out, do not defend it reflexively. "You're right,
+let me look at that" costs nothing. If you genuinely believe you are correct, say
+why once, calmly, and then defer: "I may be wrong about that — let me trace
+through your example." Arguing past two pushes is a reliable way to fail a round
+you were otherwise passing.
+
+### Watch the clock
+
+Reserve the last five minutes of a design round for bottlenecks and
+self-critique, and the last five of a coding round to trace your solution on an
+example and name the complexity. Running out of time with nothing tested reads
+as poor planning.
+
+## Immediately after each round
+
+- [ ] **Write down every question you were asked.** Do this within ten minutes,
+      before the next round if you can. Memory for this decays remarkably fast
+      and it is the highest-value artifact of the whole day — it tells you what
+      that company actually asks, it is your study list if you are rejected, and
+      it is your preparation list for the next loop.
+- [ ] Note what you fumbled and what you would say differently.
+- [ ] Note the interviewer's name and anything specific they mentioned, for the
+      thank-you note and for later rounds.
+- [ ] Then close the notebook. Do not relitigate the last round during the next
+      one — a round you think went badly has often gone fine, and the reverse
+      also happens.
+
+## At the end of the day
+
+- [ ] Send a short thank-you to the recruiter, and to interviewers if you have
+      their addresses. Two or three sentences with one specific reference to
+      something discussed. It rarely changes an outcome but it is cheap.
+- [ ] Add every question from the day to a running document. Over three or four
+      loops this becomes the most accurate picture you will have of what these
+      companies ask.
+- [ ] Update [your tracker](/roadmap/5-progress-tracking), then stop thinking
+      about it. The decision is out of your hands.
+
+<Callout type="note" title="If a round goes badly">
+Candidates routinely misjudge this, in both directions. Interviewers are
+comparing you against a bar, not against your own expectations, and a round where
+you struggled and recovered out loud frequently scores better than one that felt
+smooth. Finish the day properly regardless — the remaining rounds are independent,
+and a visibly demoralised candidate in round four converts one bad round into
+four.
+</Callout>

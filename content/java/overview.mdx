@@ -1,0 +1,155 @@
+---
+title: "Overview"
+topic: "java"
+order: 600
+group: "Java + SQL"
+difficulty: "easy"
+estimatedMinutes: 9
+tags: [overview, java, spring, study-plan, reading-order]
+format: "mdx"
+summary: "What the Java deep-dive round actually scores, the order to work through the 22 lessons in this track given Spring Boot basics, and the self-check that tells you the track is done."
+---
+
+## What this track is assessed on
+
+Almost everyone preparing for a Java round prepares for the wrong thing. They memorise
+facts — `HashMap` uses buckets, `String` is immutable, `ArrayList` grows by 50 percent —
+then get asked "what happens if two threads resize the same `HashMap` at once?" and have
+nothing to say. The facts were real; they just were not the thing being tested.
+
+**The Java round tests whether you can explain a mechanism and then reason about what
+breaks it.** The interviewer picks something you use daily, asks how it works, then
+perturbs it: add a second thread, add a null, add a subclass, make the key mutable, put
+the call inside a transaction. Your answer to the first question is table stakes; your
+answer to the perturbation is your level.
+
+So a fact you cannot derive is one you will lose under pressure, and every lesson here
+spends more time on *why the design is that way* than on the API surface. For a backend
+role the "Java" round and the "Spring/persistence" round are usually the same 45 minutes,
+so do not treat them as separate subjects.
+
+## Where you stand, and what to prioritise
+
+You have solid DSA and SQL, and Spring Boot basics: you can build a working service with
+`@RestController`, `@Service`, repositories and `application.yml`. That means most of this
+track is deepening rather than learning.
+
+The gap is specific. **Spring Boot basics means you know the annotations that make things
+work, not the machinery that makes the annotations work** — and every interesting Spring
+question is about the machinery. Why does calling your own `@Transactional` method from
+inside the same class silently skip the transaction? Why does a
+`LazyInitializationException` appear only after you return from the service layer? Why does
+`@Transactional` on a `private` method do nothing? All three have the same answer, and it
+is the proxy. So prioritise, in order: concurrency, the container and proxy model,
+transactions, and the N+1 problem. Move generics and exception handling later; they are
+asked, and asked shallowly.
+
+## The order to work through it
+
+Core language first, because Spring questions reduce to language questions and
+not the other way round.
+
+1. [1. JVM Internals](/java/1-jvm-internals) — memory model, class loading and
+   garbage collection, because every later topic ("why is `volatile` needed?",
+   "why does a big cache cause GC pauses?") is grounded here.
+2. [2. Collections Framework — Deep Dive](/java/2-collections-framework-deep-dive)
+   — the single most-asked class in Java interviews, and the best worked example
+   of design-under-constraint you will get.
+3. [3. Concurrency — Senior Must-Have](/java/3-concurrency-senior-must-have) —
+   the highest-value lesson in the track; read it twice and do not move on until
+   the happens-before rules feel obvious.
+4. [4. Java 8+ Features](/java/4-java-8-features) — streams, `Optional` and
+   functional interfaces, which are the lens most code questions are now framed
+   in.
+5. [5. OOP & Design Principles](/java/5-oop-design-principles) — the bridge into
+   the [low-level design track](/lld), and the vocabulary you will reuse there.
+6. [6. Exception Handling](/java/6-exception-handling) — short, and it sets up
+   the rollback rules in the transactions lesson.
+7. [7. Generics](/java/7-generics) — erasure and variance; mostly asked as a
+   trap question, so it is cheap insurance.
+8. [Quick Reference: Junior vs Senior Answers](/java/quick-reference-what-seniors-say-in-interviews)
+   — a junior-versus-senior answer comparison across the core-Java questions
+   above, best read *after* those lessons so you can see the difference rather
+   than memorise it.
+
+Then the Spring and persistence half, which follows a single arc: the container
+creates beans, wraps them in proxies, and the proxies are where transactions and
+caching live.
+
+9. [8. Spring internals — the container, bean lifecycle & AOP proxies](/java/8-spring-internals-ioc-beans-and-aop-proxies)
+   — read this before the persistence lessons, not after. It is the explanation
+   that every later "why didn't my annotation work?" answer points back to.
+10. [1. JDBC Fundamentals](/java/1-jdbc-fundamentals) — the layer Hibernate sits
+    on; connection pooling and `PreparedStatement` come up on their own too.
+11. [2. Spring Data JPA / Hibernate](/java/2-spring-data-jpa-hibernate) — entity
+    lifecycle, the persistence context, and dirty checking.
+12. [3. The N+1 Problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question)
+    — the most-asked JPA question in the industry; you should be able to
+    diagnose and fix it three different ways.
+13. [4. Spring Data Repository](/java/4-spring-data-repository) — derived
+    queries, projections and pagination, which is also where keyset pagination
+    connects to the [SQL track](/sql).
+14. [5. Transaction Management (@Transactional)](/java/5-transaction-management-transactional)
+    — propagation, rollback rules and self-invocation; this is the lesson that
+    most often changes how people write code.
+15. [6. Hibernate First-Level vs Second-Level Cache](/java/6-hibernate-first-level-vs-second-level-cache)
+    — and the natural handoff to
+    [caching in system design](/system-design/5-caching-your-strongest-topic-you-already-use-redis).
+16. [7. Spring Boot Configuration Quick Reference](/java/7-spring-boot-configuration-quick-reference)
+    — property precedence, profiles and secret handling; keep it open while you
+    audit your own project's `application.yml`.
+17. [Quick Reference: Sentences That Signal Seniority](/java/quick-reference-what-seniors-say)
+    — the phrasing layer: the actual sentences that make a persistence answer
+    sound like experience rather than revision.
+
+Finally, the five practice problems. These are not warm-ups; each one is a real
+interview question with the follow-up chain attached, and the follow-ups are the
+point.
+
+18. [Practice: LRU Cache](/java/practice-lru-cache) — the most common
+    data-structure-design question, and it feeds directly into caching in system
+    design.
+19. [Practice: Producer / Consumer](/java/practice-producer-consumer) — the
+    canonical concurrency question, and the cleanest way to test whether the
+    concurrency lesson actually landed.
+20. [Practice: Thread-Safe Singleton](/java/practice-thread-safe-singleton) —
+    five approaches, and the `volatile` argument that separates recitation from
+    understanding.
+21. [Practice: Streams & Duplicates](/java/practice-streams-duplicates) —
+    collectors and the pipeline mechanics behind them.
+22. [Practice: flatMap on Nested Data](/java/practice-flatmap-on-nested-data) —
+    one-to-many transformations, including `Optional` chaining.
+
+## What "ready" looks like
+
+Close every tab and answer these out loud, in full sentences. If you stall on one, you have
+found your next lesson.
+
+- Walk through `HashMap.put()` end to end, then explain why treeification exists
+  and why the threshold is 8 rather than 4.
+- Explain what `volatile` guarantees and what it does not, with one bug it fixes
+  and one it does not.
+- Given `@Transactional` on `a()` calling `@Transactional` `b()` in the same
+  class, say what happens and why — then what changes if `b()` is in another bean
+  with `REQUIRES_NEW`.
+- Show three ways to fix N+1 and name where each is the wrong choice.
+- Explain why a checked exception inside a transactional method does not roll
+  back by default, and how you would change that.
+- Write a bounded producer-consumer with `wait`/`notify` on paper, justifying
+  every `while` and every `notifyAll`.
+- Say what a Spring bean's default scope is and what goes wrong when you inject
+  a request-scoped bean into it.
+
+A realistic bar: four minutes on any of those without prompting, and you name
+the trade-off in your own answer before the interviewer does.
+
+## How long this track takes
+
+Around 44,000 words, most lessons above 2,000, so this is reading you do with a
+notebook rather than reading you skim. Budget roughly eight hours for a first
+pass and another eight for the practice problems and out-loud rehearsal, spread
+over three to four weeks so spaced repetition does some of the work. Concurrency
+and Spring internals deserve a second pass.
+
+With less time, the compressed version is lessons 2, 3, 9, 12 and 14 plus the
+producer-consumer and singleton problems — the subset that gets asked most.

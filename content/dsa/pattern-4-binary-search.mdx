@@ -1,0 +1,396 @@
+---
+title: "Pattern 4 — Binary Search"
+topic: "dsa"
+order: 106
+difficulty: "medium"
+estimatedMinutes: 30
+tags: [binary-search, lower-bound, predicate, search-on-answer, rotated-array, invariant]
+format: "mdx"
+summary: "Binary search framed as an invariant on a shrinking range, the three template forms including the predicate-based lower bound, binary search on the answer space for Koko and Split Array Largest Sum, the rotated-array half test, and the exact off-by-one that causes each infinite loop."
+---
+
+## Layer 1 — When you reach for this
+
+Binary search is the pattern with the widest gap between how easy it looks and
+how often it is written wrong. Jon Bentley's observation that most professional
+programmers cannot write a correct binary search on the first attempt is still
+true, and the reason is that people memorise the code instead of the invariant.
+
+> Binary search applies whenever you can, in O(1), **rule out half of the
+> remaining candidates**. Sorted input is the most familiar way to earn that
+> right, but it is not the only one. **The real precondition is monotonicity: a
+> property that is false for a while and then true forever, with no flipping
+> back.**
+
+Signals in the problem statement:
+
+- **"Sorted array"** plus a lookup, an insertion point, a count of occurrences,
+  or a range of equal values.
+- **"In O(log n)"** stated as a constraint. That is not a hint, it is an
+  instruction.
+- **"Find the minimum X such that ..."** or "the maximum X such that ...". This
+  phrasing is the fingerprint of binary search on the answer, and it is the
+  version that shows up in hard interviews.
+- **"Minimise the maximum"** or "maximise the minimum" — the same idea wearing
+  its most recognisable disguise.
+- **"Rotated sorted array", "mountain array", "peak element"** — locally
+  ordered structures where a half can still be eliminated.
+- **"K-th smallest"** in a sorted matrix or across two sorted arrays.
+- A **small answer range and an expensive feasibility check** that you can
+  nevertheless run in O(n). If checking an answer is cheap and the answers are
+  monotone, search them.
+
+Anti-signals:
+
+- **Unsorted input with no monotone predicate.** Sorting *in order to* binary
+  search once is almost never right: the sort costs O(n log n), at which point a
+  single linear pass would have done.
+- **You need all pairs or all occurrences of a relationship**, not a boundary.
+- **The predicate is not monotone** — true, then false, then true. The classic
+  trap is binary searching a function with multiple local optima; peak-finding
+  works only because the problem guarantees a specific shape.
+- **You need the k-th largest of a stream.** A [heap](/dsa/pattern-9-heaps-priority-queue)
+  fits; a binary search does not, because you cannot index a stream.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+State this before writing a line of code:
+
+> **The answer, if it exists, is always inside the current range.**
+
+Every branch you write must preserve that. When you move `lo` to `mid + 1`, you
+are asserting that nothing at `mid` or below can be the answer. When you move
+`hi` to `mid`, you are asserting that nothing strictly above `mid` can be — and
+critically, that `mid` itself might still be. **Which of `mid` or `mid + 1` or
+`mid - 1` you assign is not a matter of taste; it is determined by exactly what
+you just proved.** If you decide that consciously, the off-by-ones disappear.
+If you recall the code from memory, they do not.
+
+The second half of correctness is termination: **the range must strictly shrink
+on every iteration.** Every infinite loop in binary search is a branch where the
+range did not change.
+
+### Why the complexity is O(log n)
+
+The range halves each iteration, so after k iterations its size is at most
+`n / 2^k` and the loop ends once `k` exceeds `log2(n)`. For a billion elements
+that is thirty iterations. The argument applies unchanged to binary search on
+the answer, where n is the **size of the answer range** — each of those thirty
+iterations may then cost an O(n) feasibility check, giving O(n log(range)).
+
+### Why `mid = lo + (hi - lo) / 2`
+
+`(lo + hi) / 2` overflows when `lo + hi` exceeds `Integer.MAX_VALUE`, which
+happens for arrays longer than about a billion elements or, far more commonly,
+when you are binary searching a numeric answer range that goes up to
+`10^9` or beyond. The overflowed sum is negative, the index is negative, and you
+get an `ArrayIndexOutOfBoundsException` or, worse, silently wrong arithmetic.
+`lo + (hi - lo) / 2` computes the same value with no intermediate that can
+overflow. **This bug survived in the JDK's own `Arrays.binarySearch` for nine
+years**, which is why interviewers like it as a question.
+
+For an upper-biased midpoint, used when you move `lo = mid`, the form is
+`lo + (hi - lo + 1) / 2`.
+
+### Template 1: exact match
+
+```java
+// Find target in a sorted array; return its index or -1.
+int lo = 0, hi = nums.length - 1;              // INCLUSIVE range [lo, hi]
+while (lo <= hi) {                             // a one-element range is still live
+    int mid = lo + (hi - lo) / 2;
+    if (nums[mid] == target) return mid;
+    if (nums[mid] < target) lo = mid + 1;      // mid ruled out
+    else hi = mid - 1;                         // mid ruled out
+}
+return -1;
+```
+
+Because both branches exclude `mid`, the range strictly shrinks and the loop
+cannot hang. The guard must be `lo <= hi`: with `lo < hi` the loop exits while a
+single unexamined element remains, and you miss any target sitting there. When
+the target is absent, `lo` ends at the insertion point, which is a fact worth
+knowing and stating.
+
+### Template 2: lower bound, the predicate form
+
+This is the most useful template and the least taught. Forget values and think
+in terms of a boolean predicate `p(i)` that is **false for a prefix and true for
+a suffix**. You want the first index where it is true.
+
+```java
+// First index in [0, n] where predicate(index) is true; n means "never true".
+int lo = 0, hi = nums.length;                  // HALF-OPEN: hi is one past the end
+while (lo < hi) {                              // stop when the range holds one candidate
+    int mid = lo + (hi - lo) / 2;
+    if (predicate(mid)) hi = mid;              // mid might BE the answer, so keep it
+    else lo = mid + 1;                         // mid is definitely not
+}
+return lo;                                     // lo == hi == the first true index
+```
+
+Note the three differences from template 1 and why each one is forced. The upper
+bound is `n`, not `n - 1`, because "no index satisfies the predicate" must be
+representable. The guard is `lo < hi`, because the invariant here is "the answer
+is in the half-open range", and a range of size zero means the answer is `lo`.
+And `hi = mid` rather than `mid - 1`, because `mid` satisfying the predicate
+makes it a candidate you must not discard.
+
+Termination still holds: since `mid` is computed with a **downward** bias,
+`mid < hi` always, so `hi = mid` strictly shrinks the range. **If you ever write
+`hi = mid` with an upward-biased midpoint, or `lo = mid` with a downward-biased
+one, you have written an infinite loop.** That single sentence prevents the
+majority of binary-search hangs.
+
+With `predicate(i)` as `nums[i] >= target`, this returns the first element not
+less than the target: the classic lower bound, and `Arrays.binarySearch` cannot
+give you this directly, which is why you write it yourself.
+
+### Template 3: upper bound
+
+Change the predicate to `nums[i] > target` and the same code returns the first
+index strictly greater than the target. The pair is what everything else is
+built from:
+
+- **Does the target exist?** `lowerBound(target) < n && nums[lowerBound] == target`.
+- **How many occurrences?** `upperBound(target) - lowerBound(target)`.
+- **First and last position of an element?** `lowerBound(target)` and
+  `upperBound(target) - 1`.
+- **Insertion point?** `lowerBound(target)`, directly.
+
+Learn one template and derive the rest rather than memorising four functions.
+
+### Binary search on the answer
+
+This is the big idea, and it is what separates a medium from a hard.
+
+When the input is not sorted but the **answer space** is monotone, binary search
+the answer space. The setup is always the same: you can guess an answer `x` and
+check in O(n) whether `x` is feasible, and feasibility is monotone — if `x`
+works then everything larger works too, or everything smaller does.
+
+The three questions to answer out loud before writing code:
+
+1. **What is the answer range?** The smallest and largest conceivable values.
+2. **What is `feasible(x)`?** A function returning a boolean, computed by a
+   simple linear scan.
+3. **Is it monotone, and in which direction?** Say why. This is the correctness
+   argument.
+
+**Koko Eating Bananas.** Koko eats at `k` bananas per hour; each pile takes
+`ceil(pile / k)` hours; find the minimum `k` finishing within `h` hours. The
+range is `1` to `max(piles)`. Feasibility is "total hours at speed `k` is at
+most `h`", and it is monotone because eating faster never takes longer. So it is
+false-then-true in `k`, and you want the first true — template 2 exactly.
+
+```java
+int lo = 1, hi = Arrays.stream(piles).max().getAsInt();
+while (lo < hi) {
+    int k = lo + (hi - lo) / 2;
+    long hours = 0;
+    for (int p : piles) hours += (p + k - 1) / k;   // ceiling division without doubles
+    if (hours <= h) hi = k;                          // k works; it might be the minimum
+    else lo = k + 1;                                 // k is too slow
+}
+return lo;
+```
+
+Use `(p + k - 1) / k` rather than `Math.ceil` on doubles; floating point in an
+exact-integer problem is a correctness risk, not just a style point. And
+accumulate hours in a `long`, because piles up to `10^9` with `k = 1` overflow
+an `int` immediately.
+
+**Split Array Largest Sum.** Split the array into `m` contiguous subarrays
+minimising the largest subarray sum. The answer is between `max(nums)` (no
+subarray can be smaller than its largest element) and `sum(nums)` (one piece).
+Feasibility of a cap `x` is "greedily filling subarrays up to `x` uses at most
+`m` of them", which is a single linear scan, and it is monotone because a larger
+cap never needs more pieces. Same template, different `feasible`. Capacity To
+Ship Packages Within D Days is the identical problem with different nouns, which
+is worth noticing out loud.
+
+### Worked example: rotated sorted array
+
+A sorted array rotated at an unknown pivot is not monotone, so the plain
+template does not apply. But **at least one of the two halves around `mid` is
+always properly sorted**, and you can tell which in O(1) by comparing
+`nums[lo]` with `nums[mid]`. Once you know a half is sorted, you can test in
+O(1) whether the target lies inside it, and eliminate accordingly.
+
+```java
+int lo = 0, hi = nums.length - 1;
+while (lo <= hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (nums[mid] == target) return mid;
+    if (nums[lo] <= nums[mid]) {                     // LEFT half is sorted
+        if (nums[lo] <= target && target < nums[mid]) hi = mid - 1;
+        else lo = mid + 1;
+    } else {                                         // RIGHT half is sorted
+        if (nums[mid] < target && target <= nums[hi]) lo = mid + 1;
+        else hi = mid - 1;
+    }
+}
+return -1;
+```
+
+The comparison that decides which half is sorted must be `nums[lo] <= nums[mid]`
+with the equality included, because when the range has two elements `mid` equals
+`lo` and a strict comparison misclassifies the half. For Find Minimum in Rotated
+Sorted Array the cleaner framing is a predicate: compare `nums[mid]` with
+`nums[hi]`, and the minimum is the first index where the suffix is sorted.
+
+With **duplicates** allowed, the O(log n) guarantee is gone. When
+`nums[lo] == nums[mid] == nums[hi]` you cannot tell which side is sorted and the
+only safe move is to shrink by one, which degrades to O(n) in the worst case.
+Being able to say that is a stronger answer than producing code that pretends
+otherwise.
+
+### Worked example: Median of Two Sorted Arrays
+
+The partition approach is the reason this problem is hard. You are not searching
+for a value; you are **searching for a cut position in the smaller array**. Cut
+the smaller array after `i` elements and the larger after `j`, where `i + j` is
+fixed at half the total. The cut is correct when every element left of the cut
+is at most every element right of it, which reduces to two comparisons:
+`leftA <= rightB` and `leftB <= rightA`. If `leftA > rightB`, the cut in A is
+too far right, so search left. That test is monotone in `i`, which is what makes
+it binary-searchable, and searching the **smaller** array keeps the range small
+and the bound at O(log(min(m, n))).
+
+The sentinels are the implementation trick worth remembering: treat a cut at
+position 0 as having a left value of `Integer.MIN_VALUE` and a cut at the end as
+having a right value of `Integer.MAX_VALUE`. That removes every boundary
+special case, which would otherwise be four of them.
+
+### Off-by-one and infinite-loop traps, by template
+
+- **Template 1 with `lo < hi`.** Exits with one element unexamined; misses
+  targets. Must be `lo <= hi` with an inclusive `hi = n - 1`.
+- **Template 2 with `hi = n - 1`.** Cannot represent "no index satisfies the
+  predicate", so it returns the last index when the answer is "none".
+- **Template 2 with `hi = mid - 1`.** Discards a valid candidate and returns a
+  position that is one too large.
+- **`lo = mid` with a downward-biased midpoint.** When `hi == lo + 1`, `mid`
+  equals `lo`, the assignment changes nothing, and the loop spins forever. If
+  you need `lo = mid`, you must use `mid = lo + (hi - lo + 1) / 2`.
+- **`(lo + hi) / 2` on a large answer range.** Overflow, negative mid.
+- **Returning `lo` without checking it is in range.** In the lower-bound
+  template `lo` can legitimately be `n`, and indexing there throws.
+- **Searching an answer range with the wrong endpoints.** If the true answer is
+  outside `[lo, hi]`, binary search returns a boundary with total confidence.
+  Justify both endpoints before writing the loop.
+- **Mixing `int` feasibility accumulators with large inputs.** Use `long`.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity?"** O(log n) time and O(1) space iteratively, or
+   O(log n) stack space if written recursively.
+2. **"Why `lo + (hi - lo) / 2`?"** `(lo + hi)` can overflow `int`, producing a
+   negative midpoint. This exact bug lived in the JDK for years.
+3. **"Why `lo <= hi` here but `lo < hi` there?"** It follows from whether the
+   range is inclusive or half-open. Inclusive ranges need `<=` so the final
+   single element is examined; half-open ranges terminate when the range is
+   empty and `lo` is the answer.
+4. **"How do you find the first and last occurrence of a value?"** Lower bound
+   and upper bound minus one. The count is their difference.
+5. **"What if the array has duplicates?"** Exact-match search still works but
+   returns an arbitrary match, so use the bound templates. In a rotated array
+   duplicates break the O(log n) guarantee and the worst case becomes O(n).
+6. **"What if the array isn't sorted?"** Then you cannot binary search values —
+   but you may still be able to binary search the answer, if feasibility is
+   monotone.
+7. **"What is binary search on the answer?"** Guess an answer, check
+   feasibility in O(n), and exploit that feasibility is false then true. The
+   cost is O(n log(range)).
+8. **"Give an example."** Koko Eating Bananas, Split Array Largest Sum, Capacity
+   To Ship Packages, and Minimum Number of Days to Make m Bouquets are all the
+   same template with a different `feasible`.
+9. **"How do you prove your predicate is monotone?"** State the physical
+   reason — eating faster never takes more hours; a larger cap never needs more
+   subarrays. If you cannot state it, the search is not justified.
+10. **"How do you search a rotated array?"** One half is always sorted; detect
+    which by comparing `nums[lo]` with `nums[mid]`, then test whether the target
+    lies in that sorted half.
+11. **"What if the data doesn't fit in memory?"** Binary search over disk blocks
+    or over a sorted index; this is what a B-tree does, and why databases use
+    B-trees rather than binary search trees — the branching factor matches the
+    page size.
+12. **"What if it's a stream?"** You cannot binary search without random access.
+    For an unbounded sorted source, double an index until you overshoot
+    (exponential search) and then binary search the bracketed range, which is
+    O(log p) where p is the answer's position.
+13. **"Can you do the search recursively?"** Yes, and it is tail-recursive, but
+    Java does not eliminate tail calls, so the iterative form is preferred for
+    the O(1) space.
+14. **"Median of two sorted arrays in O(log(m+n))."** Binary search the cut
+    position in the smaller array; the correct cut is the one where both
+    cross-comparisons hold, and sentinels of `MIN_VALUE` and `MAX_VALUE` remove
+    the boundary cases.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`(lo + hi) / 2` overflow**, especially when searching a numeric answer range
+  rather than array indices.
+- **`lo = mid` with a downward-biased midpoint**, which is a guaranteed infinite
+  loop on a two-element range.
+- **`hi = mid - 1` in a lower-bound search**, which skips the answer.
+- **An inclusive upper bound in a predicate search**, which cannot express "no
+  such index".
+- **Indexing at the returned `lo` without a range check.**
+- **`Math.ceil` on doubles** where integer ceiling division is exact and cheap.
+- **Answer-range endpoints chosen by guesswork.** Justify both, or the search
+  silently returns a boundary.
+- **Forgetting `long`** in the feasibility accumulator.
+- **Assuming `Arrays.binarySearch` gives the first occurrence.** It returns an
+  arbitrary matching index, and a negative insertion-point encoding when absent.
+</Callout>
+
+### Problems to drill
+
+**Easy** — nail the templates until the boundaries are automatic.
+
+- **Binary Search** — template 1, and the insertion-point fact.
+- **Search Insert Position** — lower bound, stated plainly.
+- **First Bad Version** — the predicate form with no array at all; the purest
+  statement of the pattern.
+- **Sqrt(x)** — binary search on an answer range, with the overflow trap in the
+  `mid * mid` comparison.
+
+**Medium** — where the pattern is genuinely tested.
+
+- **Find First and Last Position of Element in Sorted Array** — both bounds.
+- **Search in Rotated Sorted Array** — the sorted-half test.
+- **Find Minimum in Rotated Sorted Array** — the cleaner predicate framing.
+- **Koko Eating Bananas** — the canonical search on the answer.
+- **Find Peak Element** — binary search without global sortedness, justified by
+  the guaranteed shape.
+
+**Hard**
+
+- **Split Array Largest Sum** — minimise the maximum, with a greedy feasibility
+  check.
+- **Median of Two Sorted Arrays** — searching a partition rather than a value.
+- **Kth Smallest Element in a Sorted Matrix** — binary search the value range
+  with a counting predicate.
+
+### Where this connects
+
+- [Two pointers](/dsa/pattern-2-two-pointers) — the other technique that a
+  sorted input unlocks, and the better one for pair problems.
+- [Arrays and hashing](/dsa/pattern-1-arrays-hashing) — the O(n) alternative
+  when sorting is not already paid for.
+- [Trees, DFS and BFS](/dsa/pattern-7-trees-dfs-bfs) — a BST is binary search
+  made structural, and validation uses the same bounds reasoning.
+- [Heaps and priority queues](/dsa/pattern-9-heaps-priority-queue) — the other
+  answer to "k-th smallest", and the right one for streams.
+- [Greedy](/dsa/pattern-13-greedy) — the feasibility check inside a search on
+  the answer is almost always a greedy scan.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — why
+  thirty iterations cover a billion elements.

@@ -1,0 +1,381 @@
+---
+title: "5. Query Optimization Checklist"
+topic: "sql"
+order: 705
+group: "Advanced SQL"
+difficulty: "hard"
+estimatedMinutes: 25
+tags: [sql, explain, query-planning, performance, pagination, cte, postgres, mysql]
+format: "mdx"
+summary: "A method rather than a list — how to read EXPLAIN ANALYZE inside out, what each plan node means, why estimated-versus-actual rows is the metric that finds the bug, and a worked slow query taken from plan to fix."
+---
+
+## Layer 1 — The mental model
+
+Most "SQL optimization tips" lists are true statements in no useful order, and
+following them top to bottom is how you spend an afternoon adding indexes that
+change nothing. They tell you what to do without telling you which item applies.
+
+> **Do not optimise a query. Read its plan, find the one node where reality
+> diverged from the planner's expectation, and fix that.** Everything else on
+> the checklist is a candidate explanation for what you found, not a step to
+> perform in order.
+
+A plan is a tree of operations with measured costs, and slow queries almost
+always have one dominant node. Find it, ask why it is expensive, and the fix
+follows. Tuning without the plan is guessing.
+
+```
+   THE LOOP
+   1. Reproduce      run it with EXPLAIN (ANALYZE, BUFFERS)
+   2. Locate         read the tree inside-out; find the node with the time
+   3. Diagnose       scanning too much, estimating wrong, sorting, or
+                     repeating work per row?
+   4. Change one     index, rewrite, statistics, or schema
+   5. Re-measure     same command, compare actual time and rows
+```
+
+Step 5 is not optional. A change that "should" help and does not usually means
+the diagnosis was wrong, and learning that in two minutes is cheaper than
+shipping four speculative indexes.
+
+---
+
+## Layer 2 — The mechanism
+
+### Reading a plan
+
+`EXPLAIN` prints the plan with estimates; `EXPLAIN ANALYZE` runs the query and
+adds measurements; `BUFFERS` adds the I/O picture. Use all three when
+diagnosing, and remember that `EXPLAIN ANALYZE` executes the statement, so wrap
+a destructive one in a transaction you roll back.
+
+The output is a tree with children indented beneath their parents. **Read it
+inside-out**: the most indented nodes run first, each feeding its rows upwards.
+A single line looks like this:
+
+```
+->  Hash Join  (cost=1240.00..8932.11 rows=1204 width=64)
+               (actual time=12.402..318.774 rows=98211 loops=3)
+      Buffers: shared hit=812 read=14209
+```
+
+Every number in there earns its place:
+
+- **`cost=1240.00..8932.11`** is startup and total cost in arbitrary planner
+  units — for comparing plans, never for predicting milliseconds. Startup cost
+  is what must happen before the first row appears, which is why a blocking node
+  like `Sort` has a high one and an index scan has almost none.
+- **`rows=1204` versus `actual ... rows=98211`** is the estimate against the
+  truth, and gets its own section below.
+- **`actual time=12.402..318.774`** is time to first row and to last row, **per
+  loop**, in milliseconds.
+- **`loops=3`** means the node ran three times, so **multiply**: the real cost is
+  roughly 318 milliseconds times three, and `rows` is the average per loop.
+  Missing this is the most common misreading of a plan, and matters most under a
+  nested loop where loops run into the thousands.
+- **`Buffers: shared hit / read`** counts 8 KB pages found in the buffer pool
+  versus fetched from the OS. Mostly `read` on a repeated query means the
+  working set does not fit in memory.
+
+A node's `actual time` **includes its children**, so the time a node owns alone
+is its total minus theirs. You want the node where that difference is large.
+
+### The node types worth recognising
+
+**Scans — how rows leave the table.** `Seq Scan` reads every page, correct for a
+small table or an unselective predicate and a problem only when the query is
+selective. `Index Scan` walks the index and fetches each matching row, one
+random read apiece, so it is excellent when few rows match and poor when many
+do. `Index Only Scan` answers entirely from the index — but watch the
+`Heap Fetches` line, where a non-zero value means the visibility map is stale
+and vacuum has fallen behind (see
+[3. Indexing and performance](/sql/3-indexing-performance)).
+
+`Bitmap Heap Scan` with a `Bitmap Index Scan` beneath it is the middle ground:
+Postgres collects matching row locations into a bitmap, sorts it by physical
+page, then reads each page once in order. **Usually the right answer, not a
+symptom.** A `BitmapOr` combines two indexes for an `OR`, and `Recheck Cond`
+means the bitmap went lossy at page granularity so rows are re-tested.
+
+**Joins.** `Nested Loop`, `Hash Join` and `Merge Join` are covered in
+[1. JOINs](/sql/1-joins-know-them-cold). React to a nested loop with a large
+`loops` count — the planner expected a tiny outer side and was wrong — and to
+`Batches: 8` on a hash join, meaning it exceeded `work_mem` and spilled.
+
+**Ordering and grouping.** `Sort` reports its method and volume:
+`quicksort Memory: 25kB` is fine, `external merge Disk: 84MB` spilled to disk.
+`HashAggregate` needs no sorted input; `GroupAggregate` does and often carries a
+`Sort` beneath it, which the right index removes. `WindowAgg` needs input sorted
+by partition then order columns.
+
+**Also worth naming.** `Materialize` caches a subplan for re-reading, `Memoize`
+caches inner-side results per parameter, `Gather` marks parallel query, and
+`SubPlan` means a correlated subquery running per row.
+
+### Estimated versus actual rows is the money metric
+
+If you take one thing from this lesson, take this. The planner chose every node
+by estimating how many rows each would produce, so when an estimate is badly
+wrong, every decision above it was made on bad information and the plan can be
+catastrophically wrong even though each choice was individually rational.
+
+```
+->  Index Scan on events  (cost=0.43..8.45 rows=1 ...) (actual ... rows=48213 loops=1)
+```
+
+Expected one row, got 48,213. The node above almost certainly chose a nested
+loop because looping once is cheap, and it is now looping 48,213 times. An index
+will not fix this. **The fix is upstream, in the estimate.**
+
+The causes, in rough order of how often they are the answer:
+
+1. **Stale statistics.** Run `ANALYZE table_name`. After a bulk load autovacuum
+   has not caught up and the planner is using the old distribution. Free, and
+   the first thing to try.
+2. **Correlated columns.** The planner assumes predicates are independent and
+   multiplies their selectivities, so
+   `WHERE city = 'Mumbai' AND state = 'Maharashtra'` comes out far too low. Use
+   `CREATE STATISTICS ON city, state FROM addresses` and re-analyze.
+3. **Expressions it cannot reason about.** `WHERE lower(email) = ?` has no
+   statistics unless you create an expression index, which also creates those.
+4. **Coarse histogram resolution** on a skewed column. Raise it with
+   `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS 500`.
+5. **A cached plan built for an unrepresentative parameter** — a prepared
+   statement planned for a rare value, reused with a common one.
+
+### The checklist, with the reason for each item
+
+Now that you can locate the problem, here is what to check, each with the
+mechanism behind it.
+
+**Is the index being used, and if not, why?** Work through the five index
+killers from [3. Indexing and performance](/sql/3-indexing-performance): a
+function on the column, implicit type coercion, a leading wildcard, `OR` across
+columns, and negation. If the index exists and the plan ignores it, check
+selectivity before concluding the planner is wrong — past roughly 5 to 10
+percent of the table a sequential scan is right.
+
+**Is the estimate wrong?** Covered above; check it first.
+
+**Is it sorting when an index could supply the order?** A `Sort` beneath a
+`GroupAggregate`, a `WindowAgg`, or an `ORDER BY ... LIMIT` is often removable
+with a matching index. The `LIMIT` case pays best: read ten index entries and
+stop, instead of sorting a million rows to keep ten.
+
+**Is it doing per-row work that could be done once?** A `SubPlan` with a high
+loop count is a correlated subquery re-executed per row; rewriting it as a join
+or an aggregated CTE turns N executions into one.
+
+**Is the application issuing N+1 queries?** No plan shows this, because each of
+the thousand queries is individually fast. You find it in the SQL log, and it is
+the most common performance bug in ORM-backed services. See
+[the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question).
+
+**Is it `SELECT *`?** It forces the table fetch even when a covering index
+exists, carries wide columns through every join, sort and hash, and breaks when
+someone adds a column.
+
+**Is pagination using `OFFSET`?** `LIMIT 20 OFFSET 100000` produces and discards
+100,000 rows before returning anything, so load time grows with page number.
+**Keyset (seek) pagination** remembers the last row's sort key:
+
+```sql
+-- O(offset + limit): slower the further you page
+SELECT * FROM products ORDER BY created_at, id LIMIT 20 OFFSET 100000;
+
+-- O(limit): constant time, an index seek straight to the position
+SELECT * FROM products
+WHERE (created_at, id) > ('2024-03-01 10:00:00', 91422)
+ORDER BY created_at, id
+LIMIT 20;
+```
+
+The row-constructor comparison handles ties correctly and matches an index on
+`(created_at, id)`. The trade is losing page numbers — fine for infinite scroll,
+rarely fine for an admin table.
+
+**`EXISTS`, `IN`, or a join for a semi-join?** Modern Postgres and MySQL 8
+normalise all three into a semi-join and often produce identical plans, so
+choose for readability. The real differences are correctness, not performance:
+`NOT IN` returns zero rows if the subquery yields a NULL, and a join can
+duplicate the outer row once per match.
+
+**Is a CTE acting as an optimisation fence?** Dialect-specific, and a frequent
+follow-up. **Before Postgres 12 every `WITH` clause was materialised** — computed
+in full, with no predicates pushed in across the boundary — so a CTE scanning
+ten million rows scanned them all even when the outer query wanted three. From
+Postgres 12 a CTE referenced once and free of side effects is inlined, and you
+can force either behaviour:
+
+```sql
+WITH recent AS MATERIALIZED (      -- compute once and reuse: good for expensive
+    SELECT ... FROM big_table WHERE ...   -- subqueries referenced several times
+)
+SELECT ... FROM recent r JOIN other o ON ...;
+
+WITH recent AS NOT MATERIALIZED (  -- inline, letting the planner push the
+    SELECT ... FROM big_table         -- predicate down into the CTE
+)
+SELECT ... FROM recent WHERE id = 42;
+```
+
+MySQL has never had the fence. On Postgres 11 this is why a "cleaner" CTE
+rewrite sometimes made a query ten times slower.
+
+**Would `UNION ALL` do?** `UNION` deduplicates, costing a sort or hash over the
+combined result. If duplicates are impossible, skip that.
+
+**Is denormalisation the right answer?** Sometimes, and proposing it at the
+right moment is a maturity signal. A counter column, a materialised view, or a
+reporting table all trade write complexity and staleness for read speed. You are
+choosing to maintain a second source of truth, so decide up front how it gets
+rebuilt when it drifts, because it will.
+
+### A worked example
+
+The ten most recent orders for one customer, with the customer's name:
+
+```sql
+SELECT o.id, o.created_at, o.total, c.name
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE o.customer_id = 4711
+ORDER BY o.created_at DESC
+LIMIT 10;
+```
+
+The plan:
+
+```
+Limit  (actual time=2841.200..2841.215 rows=10 loops=1)
+  ->  Sort  (actual time=2841.198..2841.204 rows=10 loops=1)
+        Sort Key: o.created_at DESC
+        Sort Method: top-N heapsort  Memory: 27kB
+        ->  Hash Join  (actual time=1912.004..2803.881 rows=9184 loops=1)
+              Hash Cond: (o.customer_id = c.id)
+              ->  Seq Scan on orders o  (actual time=0.031..2402.118 rows=9184 loops=1)
+                    Filter: (customer_id = 4711)
+                    Rows Removed by Filter: 8194301
+              ->  Hash  (actual time=1901.114..1901.115 rows=201000 loops=1)
+                    ->  Seq Scan on customers c  (actual time=0.010..1102.442 rows=201000 loops=1)
+Planning Time: 0.214 ms
+Execution Time: 2841.502 ms
+```
+
+Reading inside-out: the `Seq Scan on orders` read 8.2 million rows and discarded
+all but 9,184, and that `Rows Removed by Filter` line is 2.4 of the 2.8 seconds.
+Above it the whole `customers` table was hashed for a join needing exactly one
+customer row, and above that 9,184 rows were sorted to return ten. Three faults
+with one cause: there is no index on `orders.customer_id`, so nothing downstream
+could be narrowed.
+
+```sql
+CREATE INDEX idx_orders_customer_created
+    ON orders (customer_id, created_at DESC);
+```
+
+`customer_id` leads because it is the equality predicate, and `created_at DESC`
+follows so the index also supplies the `ORDER BY` and removes the sort. Leftmost
+prefix, applied deliberately. The new plan:
+
+```
+Limit  (actual time=0.048..0.071 rows=10 loops=1)
+  ->  Nested Loop  (actual time=0.046..0.068 rows=10 loops=1)
+        ->  Index Scan using idx_orders_customer_created on orders o
+              (actual time=0.028..0.034 rows=10 loops=1)
+              Index Cond: (customer_id = 4711)
+        ->  Index Scan using customers_pkey on customers c
+              (actual time=0.002..0.002 rows=1 loops=10)
+              Index Cond: (id = o.customer_id)
+Execution Time: 0.106 ms
+```
+
+Everything changed at once and the reasons chain. The index seek returns rows
+already ordered by `created_at DESC`, so the `Sort` is gone and `LIMIT 10` stops
+the scan after ten entries. Because only ten rows reach the join, the planner
+switches from hashing 201,000 customers to a nested loop of ten primary-key
+lookups, visible as `loops=10`. 0.1 milliseconds against 2,841.
+
+The lesson worth repeating in an interview: **the sort and the hash join were
+symptoms, not the disease.** Plan nodes are chosen from the row counts beneath
+them, so fixing the scan fixed all three.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"A query is slow. Walk me through what you do."** Reproduce with
+   `EXPLAIN (ANALYZE, BUFFERS)`, read the tree inside-out, find the node that
+   owns the time, diagnose it, change one thing, re-measure.
+2. **"`EXPLAIN` versus `EXPLAIN ANALYZE`?"** Estimates without running, versus
+   measured rows and timings. Only the second tells you whether the planner was
+   right.
+3. **"What do the two cost numbers mean?"** Startup and total cost in arbitrary
+   units — for comparing plans, not predicting milliseconds.
+4. **"What does `loops` mean?"** How many times the node ran. Timings and rows
+   are per loop, so multiply.
+5. **"The single most useful number in a plan?"** The gap between estimated and
+   actual rows. A large gap means every decision above that node rested on bad
+   information.
+6. **"What causes a bad estimate?"** Stale statistics, correlated columns
+   assumed independent, expressions with no statistics, a coarse histogram, or a
+   cached plan built for a different parameter.
+7. **"Is a `Seq Scan` always bad?"** No. It is correct for a small table or an
+   unselective predicate.
+8. **"What is a bitmap heap scan and when is it right?"** The index produces a
+   bitmap of pages read in physical order — the middle ground between index and
+   sequential scan.
+9. **"You see `external merge Disk: 84MB` under a `Sort`."** It exceeded
+   `work_mem` and spilled. Raise `work_mem`, reduce what is sorted, or index the
+   sort away.
+10. **"Why is `SELECT *` a problem?"** It defeats covering indexes, carries wide
+    columns through joins and sorts, and breaks on schema changes.
+11. **"Why is `OFFSET` pagination slow?"** The engine produces and discards
+    every skipped row, so cost grows with page depth. Keyset pagination seeks on
+    the last row's sort key, at the cost of page numbers.
+12. **"`EXISTS` versus `IN` versus a join?"** Modern planners normalise all
+    three to a semi-join, so pick for readability. The real differences are
+    `NOT IN` with NULLs and that a join can duplicate the outer row per match.
+13. **"Are CTEs an optimisation fence?"** Always in Postgres 11 and earlier. In
+    12 and later, a single-reference side-effect-free CTE is inlined unless you
+    write `MATERIALIZED`.
+14. **"When is a nested loop the wrong plan?"** When the outer side is much
+    larger than estimated, so the inner lookup runs thousands of times — an
+    estimate problem, not a join problem.
+15. **"How do you find an N+1 problem?"** Not in a plan — each query is fast.
+    Count near-identical statements per request in the query log.
+16. **"When is denormalisation the right call?"** When the read pattern is hot
+    and the write path can absorb the maintenance, with a plan for rebuilding
+    the derived data.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Optimising without reading the plan.** Indexing by intuition is how a table
+  ends up with twelve indexes and no faster queries.
+- **Reading `cost` as milliseconds.** Arbitrary units.
+- **Forgetting to multiply by `loops`** and blaming the wrong node.
+- **Testing on a small dataset.** Plans come from row counts, so a thousand rows
+  tell you nothing about a million.
+- **Running `EXPLAIN ANALYZE` on a write** outside a transaction you can roll
+  back.
+- **Indexing a query whose real problem is a bad estimate.**
+- **Fixing symptoms.** A sort or hash join caused by a bad scan below it
+  disappears when you fix the scan.
+- **Measuring once, warm.** Compare `Buffers` between runs.
+</Callout>
+
+### Where this connects
+
+- [1. JOINs](/sql/1-joins-know-them-cold) — which algorithm each join node is.
+- [2. Window functions](/sql/2-window-functions-the-senior-differentiator) — the
+  `WindowAgg` node and the sort beneath it.
+- [3. Indexing and performance](/sql/3-indexing-performance) — the index killers
+  the checklist refers to, and how to choose column order.
+- [4. Transactions and isolation levels](/sql/4-transactions-isolation-levels) —
+  bloat as a cause of plans degrading over time.
+- [Java: the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question)
+  — the performance bug no query plan shows you.
+- [System design: databases](/system-design/6-databases) — replicas and caching,
+  when tuning runs out of room.

@@ -1,0 +1,251 @@
+---
+title: "How to approach ANY coding problem (say this out loud in the interview)"
+topic: "dsa"
+order: 101
+difficulty: "easy"
+estimatedMinutes: 18
+tags: [method, communication, interview-process, problem-solving]
+format: "mdx"
+summary: "A seven-step script with the actual sentences to say, time boxes for a 45-minute round, and what the interviewer is scoring at each step — including what to do in the two situations that sink most candidates."
+---
+
+## The one thing to internalise
+
+You are not being scored on whether you produce the optimal solution. You are
+being scored on **whether the interviewer would want you on their team when a
+hard problem lands on the sprint board.**
+
+> A clear brute-force-then-optimise narration usually beats a silent optimal
+> solution. A candidate who solves it in silence has demonstrated that they can
+> solve *this* problem. A candidate who thinks out loud has demonstrated how
+> they will approach every problem after they're hired.
+
+That's why the script below is a *speaking* script. Its purpose is to make your
+reasoning visible, because reasoning you didn't say doesn't exist as far as the
+scorecard is concerned.
+
+There's a second, more practical reason. **An interviewer who can hear your
+reasoning can help you.** If you say "I'm thinking of sorting first, but that
+costs me the original indices," they can nudge. If you stare at the screen for
+four minutes, they have nothing to work with and they have to mark you as
+stuck.
+
+---
+
+## The script, with time boxes
+
+For a 45-minute round with one medium problem:
+
+| Step | Time | What you're demonstrating |
+|---|---|---|
+| 1. Clarify | 3–5 min | You don't build the wrong thing |
+| 2. Example | 2–3 min | You understand before you type |
+| 3. Brute force | 2–3 min | You always have something working |
+| 4. Optimise | 5–8 min | Pattern recognition |
+| 5. Code | 15–20 min | You can actually write code |
+| 6. Test | 5 min | You find your own bugs |
+| 7. Complexity | 1–2 min | You know what you built |
+
+### 1. Clarify — restate, then ask
+
+Restate the problem in your own words first. This catches misunderstandings in
+ten seconds that would otherwise cost you twenty minutes, and it's the single
+highest-return habit in the whole round.
+
+Then ask about the things that actually change the solution:
+
+- **Input size.** *"What's the range of n?"* This is the most useful question
+  you can ask, because it tells you the target complexity. If n is up to a
+  million you need `O(n log n)` at worst; if n is up to 20 the answer is
+  probably exponential and that's fine.
+- **Duplicates?** Changes a set to a frequency map.
+- **Sorted?** Unlocks two pointers and binary search.
+- **Empty or null input** — what should it return?
+- **Value range.** Negatives? Can the sum overflow an `int`?
+- **Is there one answer or could there be several?** Return any, or all?
+- **Can I modify the input?** Sometimes permits an O(1) space solution.
+
+What to say: *"Let me make sure I have this right — given an array of integers
+and a target, I return the indices of two numbers summing to the target. A few
+questions: can the array contain duplicates, can values be negative, and is
+there guaranteed to be exactly one solution?"*
+
+### 2. Example — walk one by hand
+
+Take the given example, or invent a small one, and walk through it manually.
+Write the expected output. This is where you usually discover you had the
+problem slightly wrong.
+
+Then invent a **second** example that's an edge case — an empty array, a single
+element, all duplicates. Mentioning edge cases here rather than at the end is a
+visible signal of thoroughness, and it costs you thirty seconds.
+
+### 3. Brute force — say it, don't code it
+
+State the naive approach and its complexity, out loud, and then say you can do
+better:
+
+> *"The brute force is two nested loops checking every pair — that's `O(n^2)`
+> time and `O(1)` space. It works, but I think we can do better. Let me think
+> about whether there's a way to avoid rescanning."*
+
+Three reasons this matters. It proves you have *a* solution, so you'll never
+finish with nothing. It establishes the baseline that makes your optimisation
+legible as an improvement. And it buys you thinking time while saying something
+useful.
+
+**Do not start coding the brute force yet** unless you're out of ideas or short
+on time. Say it, then try to improve it.
+
+### 4. Optimise — name the bottleneck, then the pattern
+
+The productive question is never "what's the trick?" It's **"what is the brute
+force doing repeatedly that it shouldn't have to?"** Optimisation is almost
+always the removal of repeated work, and naming the repetition points at the
+tool:
+
+| The repeated work | The tool |
+|---|---|
+| Rescanning for a value you've already seen | A hash map |
+| Recomputing a sum over a range | Prefix sums |
+| Re-examining elements in a window | Sliding window |
+| Searching a sorted space linearly | Binary search |
+| Recomputing the same subproblem | Memoisation / DP |
+| Repeatedly finding the smallest | A heap |
+| Checking every pair in a sorted array | Two pointers |
+
+Say the reasoning, not just the conclusion: *"The brute force keeps rescanning
+for the complement. If I store what I've already seen in a hash map, I can look
+the complement up in O(1) — that makes it one pass, `O(n)` time and `O(n)`
+space. I'm trading space for time."*
+
+**Naming the trade is worth as much as finding the answer.** See
+[the complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) for
+turning the input size into a target complexity.
+
+### 5. Code — narrate while you type
+
+Say what you're about to write before you write it. *"I'll keep a map from
+value to index, then loop once, checking whether the complement is already in
+the map."*
+
+Practical habits that score:
+
+- **Name things properly.** `seenValueToIndex` over `m`. Naming is the cheapest
+  legibility signal there is.
+- **Handle the edge cases you named** in step 2, rather than hoping nobody
+  notices.
+- **If you get stuck mid-implementation, say so.** *"I'm not sure whether this
+  boundary should be inclusive — let me check against the example."* That's
+  normal engineering. Silence is what reads badly.
+- **Don't optimise while writing.** Get it correct, then improve it.
+
+### 6. Test — dry-run, don't ask
+
+Walk your actual code line by line against your example, tracking the variable
+values out loud. Then run the edge cases.
+
+**Find your own bug.** If the interviewer has to point out an off-by-one, you've
+lost the point. If you find it yourself, you've gained one — self-correction is
+explicitly what many rubrics reward.
+
+Never end with *"I think that's right?"* End with *"I walked through the main
+example and the empty and single-element cases, and it behaves correctly."*
+
+### 7. Complexity — state both, and be precise
+
+Time and space, with the variables defined. *"`O(n)` time, one pass; `O(n)`
+space for the map, where n is the array length."*
+
+Be ready for *"can you do better?"* Sometimes yes. Sometimes the correct answer
+is: *"Not asymptotically — you have to read every element, so `O(n)` is the
+lower bound. I could reduce the space to O(1) if the array were sorted, by
+using two pointers, but sorting costs `O(n log n)`."* **Knowing that a bound is
+optimal is itself a strong answer.**
+
+---
+
+## The two situations that sink candidates
+
+<Callout type="pitfall" title="You're ten minutes in with no idea">
+The failure mode is continuing to think in silence, hoping for insight, until
+there's no time left to code anything. You end with nothing.
+
+What to do instead, in order:
+
+1. **Say it.** *"I don't have the optimal approach yet. Let me code the brute
+   force so we have something working, then optimise."* This is a mature
+   engineering instinct, not an admission of defeat.
+2. **Shrink the problem.** Solve it for n equals 2, then 3. The general
+   structure often appears.
+3. **Walk the input shape.** Sorted suggests two pointers or binary search.
+   Contiguous suggests a sliding window. "All combinations" suggests
+   backtracking. "Count the ways" or "minimum cost" suggests DP. A tree or grid
+   suggests DFS/BFS.
+4. **Ask for a hint, specifically.** *"I'm considering a heap here but I'm not
+   sure it handles the ordering requirement — am I on the right track?"* A
+   targeted question costs you far less than being stuck, and most interviewers
+   are instructed to give hints.
+
+**A working brute force plus a clear articulation of the better approach scores
+well above an unfinished optimal solution.**
+</Callout>
+
+<Callout type="pitfall" title="You've found a bug with five minutes left">
+Don't silently rewrite. Say what you found, what the fix is, and how long you
+think it will take. *"I've realised this fails when the array has duplicates —
+I need to skip equal elements after a match. It's a two-line change, let me
+make it."*
+
+If there genuinely isn't time, describe the fix precisely instead of making it.
+An interviewer can score a correct diagnosis. They cannot score a half-finished
+edit that no longer compiles.
+</Callout>
+
+---
+
+## What the interviewer is actually writing down
+
+Most rubrics score four axes, and only one of them is the answer:
+
+| Axis | What earns the mark |
+|---|---|
+| **Problem solving** | Did you get to a reasonable approach, and how? |
+| **Coding** | Does it compile, is it clean, is it correct? |
+| **Communication** | Could they follow your reasoning without asking? |
+| **Testing** | Did you verify it, and find your own bugs? |
+
+Two implications worth acting on. **You can fail the optimal solution and still
+pass** on a strong showing across the other three. And **you can produce the
+optimal solution and still fail** if you did it silently and couldn't explain
+why it works — that outcome is more common than people expect, because the
+interviewer has no evidence you'd reproduce it.
+
+<Callout type="interview" title="Sentences worth having ready">
+1. *"Let me restate the problem to make sure I have it right."*
+2. *"What's the range of n?"* — the question that sets your target complexity.
+3. *"Can I assume the input is sorted / has no duplicates / fits in memory?"*
+4. *"The brute force is `O(n^2)`. Let me see if I can do better."*
+5. *"What's the brute force doing repeatedly that it doesn't need to?"*
+6. *"I'm trading space for time here."*
+7. *"Before I code, let me walk through my approach on the example."*
+8. *"Let me handle the empty case first."*
+9. *"I want to double-check this boundary — is it inclusive?"*
+10. *"Let me trace through my code with the example."*
+11. *"`O(n)` time and `O(n)` space, where n is the length of the array."*
+12. *"I don't think we can do better than `O(n)` — we have to read every
+    element."*
+13. *"I don't have the optimal approach yet; let me code the brute force so we
+    have something working."*
+14. *"I'm considering X — am I on the right track?"*
+</Callout>
+
+### Where this connects
+
+- [Coding-round survival tips](/dsa/coding-round-survival-tips) — the tactical
+  layer: time management, editors, and staying calm.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — turning
+  the input size into a target complexity during step 1.
+- [The DSA patterns](/dsa) — the vocabulary you draw on in step 4.
+- [The framework for design interviews](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — the same idea, applied to the system design round.

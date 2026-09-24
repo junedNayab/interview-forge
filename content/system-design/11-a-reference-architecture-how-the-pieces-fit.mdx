@@ -1,0 +1,262 @@
+---
+title: "11. A reference architecture (how the pieces fit)"
+topic: "system-design"
+order: 211
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 21
+tags: [architecture, request-path, failure-modes, synthesis, evolution]
+format: "mdx"
+summary: "One diagram you can draw from memory in ninety seconds, traced end to end — what each hop costs, what each layer fails like, and the order in which a real system grows into it."
+---
+
+## Layer 1 — The mental model
+
+Every previous lesson in this track covered one component. This one is the
+synthesis, and its value is specific:
+
+> **You should be able to draw this diagram from memory in ninety seconds, and
+> then delete the boxes the problem doesn't need.**
+
+That second clause is the part candidates miss. The reference architecture is a
+**starting point to subtract from**, not a checklist to reproduce. Drawing a
+message queue into a design that has no asynchronous work is worse than not
+drawing one, because now you have to defend it.
+
+```
+                       ┌──── CDN (static, edge cache) ────┐
+ Client ─► DNS ─► Load Balancer (L7) ─┐                    ▼
+                           │          │            (S3 / object store)
+                           ▼          │
+                   ┌───────────────┐  │
+                   │  API Gateway  │  │  auth, rate limit, routing
+                   └───────┬───────┘  │
+                           ▼          │
+                   ┌───────────────┐  │
+                   │   Stateless   │◄─┘   ◄── Auto Scaling Group
+                   │  App Servers  │
+                   └───┬───┬───┬───┘
+             ┌─────────┘   │   └──────────┐
+             ▼             ▼              ▼
+       ┌──────────┐  ┌──────────┐  ┌──────────────┐
+       │  Redis   │  │ Primary  │  │ Message Queue│
+       │ (cache)  │  │    DB    │  │              │
+       └──────────┘  └────┬─────┘  └──────┬───────┘
+                          │ replication    ▼
+                          ▼          Async Consumers
+                    Read Replicas    (email, analytics, search index)
+```
+
+The organising principle to notice: **the diagram is ordered by cost.** Each
+layer left to right is roughly 10–100× more expensive than the one before, and
+**every layer exists to stop traffic reaching the next one.** The CDN protects
+the load balancer, the cache protects the database, the queue protects the
+consumer from the producer's burst. Reading it that way turns a picture into an
+argument.
+
+---
+
+## Layer 2 — The mechanism
+
+### Tracing one request, with the costs
+
+Walk a `GET /api/urls/abc123` through it. This narration is itself a strong
+interview move, because it demonstrates you know what each hop actually does
+rather than that it exists.
+
+**DNS** (0 ms cached, ~20 ms cold). Resolves your domain, and is also where
+geographic routing happens if you're multi-region. Remember it's cached far past
+your TTL, so it is a poor failover mechanism.
+
+**CDN** (~10 ms on a hit). Static assets end here and never touch your
+infrastructure. For a cacheable API response it can end here too.
+
+**Load balancer** (~1 ms). Terminates TLS, picks a healthy backend by
+least-connections, and — because it's L7 — can retry an idempotent request on
+another instance if one fails. It's also where the client's real IP becomes
+`X-Forwarded-For`, which matters for rate limiting.
+
+**API gateway** (~2 ms). Authentication, rate limiting, routing. Optional, and
+worth omitting in a small design.
+
+**Application server** (~1 ms of your code). Stateless, so any instance works
+and the autoscaling group can add or remove them freely.
+
+**Cache** (~0.5 ms). On a hit, you're done — and the two layers below never see
+the request. This is where most of your traffic should terminate.
+
+**Database** (~5–50 ms). Reads can go to a replica; writes must go to the
+primary. This is the most expensive hop and the hardest to scale, which is why
+everything to its left exists.
+
+**Queue** (fire and forget). Anything slow or not needed for the response —
+the analytics write, the email, the search-index update — is published here and
+the response returns without waiting.
+
+Add it up: **a cache hit is about 15 ms end to end, and a database read is
+50 ms or more.** That ratio is the justification for the whole left half of the
+diagram, and being able to state it makes the architecture feel derived rather
+than copied.
+
+### What each layer fails like
+
+A more useful table than "what each layer does," because interviewers probe
+failure:
+
+| Layer | Fails as | Blast radius | Mitigation |
+|---|---|---|---|
+| DNS | Stale records after a change | Global, and slow to fix | Low TTLs; don't rely on DNS for failover |
+| CDN | Stale content, or a cold edge | Regional | Content-hashed URLs; `stale-while-revalidate` |
+| Load balancer | Evicts healthy servers on a bad health check | **Total outage** | Fail-open threshold, shallow liveness check |
+| App server | One instance dies | One instance | Health checks, autoscaling, draining |
+| Cache | Redis down, or mass eviction | **Stampede onto the DB** | Fail open to the DB; jittered TTLs; request coalescing |
+| Primary DB | Down, or a failover | Writes stop | Multi-AZ, replicas, and accept the async data-loss window |
+| Replica | Lag | Stale reads, confused users | Read-your-writes routing |
+| Queue | Consumer stalls | Silent backlog | Alert on lag, not error rate |
+
+Two entries deserve emphasis because they're counter-intuitive. **The load
+balancer's failure mode is the worst one in the table** — a health check that's
+too deep or too aggressive removes the entire fleet in response to a problem
+that would otherwise have degraded a fraction of requests. And **losing the
+cache can be worse than a slow cache**, because every request simultaneously
+falls through to a database that was sized assuming a 90% hit rate.
+
+### The order a real system grows into this
+
+Nobody builds the full diagram on day one, and describing the evolution is a
+strong answer to "how would this evolve?"
+
+```
+Stage 0   One box: app + database on one machine.        → thousands of users
+Stage 1   Split the database onto its own machine.       → the first real fix
+Stage 2   Add a cache. Biggest win per unit of effort.
+Stage 3   Multiple app servers + a load balancer.
+             ↑ requires statelessness first — sessions move to Redis
+Stage 4   Read replicas. Most workloads are read-heavy.
+Stage 5   CDN and object storage for static and uploads.
+Stage 6   A queue: move slow work off the request path.
+Stage 7   Shard the database, or split a service out.
+             ↑ the first genuinely expensive, hard-to-reverse step
+```
+
+The through-line is that **every step up to 6 is cheap and reversible, and
+step 7 is neither.** Saying that — and saying which stage the problem in front
+of you actually needs — is more impressive than drawing the whole thing.
+
+### Subtracting from the template
+
+Which boxes to delete, and when:
+
+| Box | Keep it when | Drop it when |
+|---|---|---|
+| CDN | Static assets, images, video, global users | Internal API, tiny payloads |
+| API gateway | Many services, shared auth | One service |
+| Cache | Read-heavy, repeated keys | Write-heavy, or every read is unique |
+| Read replicas | Read-heavy | Write-heavy, or reads must be current |
+| Queue | Slow work, bursts, fan-out | Everything must be synchronous |
+| Object storage | Files, images, backups | No blobs |
+| Search index | Full-text, fuzzy, faceting | Lookups by key |
+
+**A design with fewer boxes, each justified, beats a design with every box.**
+The interviewer is assessing judgement, and judgement is visible mainly in what
+you leave out.
+
+### Where your project sits
+
+The url-shortener is roughly stage 2 of that ladder, and mapping it makes the
+diagram concrete: a Spring Boot application server, PostgreSQL as the primary
+database, Redis as a cache in front of the code lookups, and Redis again as the
+shared counter for `RateLimitInterceptor`. There is no load balancer because
+there's one instance, no queue — which is why `recordClick()` runs synchronously
+on the redirect path — and no CDN because there are no static assets to speak
+of.
+
+Being able to say "here's what my project has, here's the next box I'd add and
+why" is a much better answer to "tell me about your project" than a feature
+list. The next box is the queue, because the click write is on the hottest path
+and doesn't need to be synchronous.
+
+### Variations worth knowing
+
+**Multi-region.** Duplicate the whole stack per region, route with
+anycast or geographic DNS, and then confront the one hard question:
+**what do you do about the database?** Either one global primary (simple,
+but writes from the far region pay 150 ms) or multi-primary with conflict
+resolution (fast, and now you own a
+[consistency problem](/system-design/7-cap-theorem-consistency-models)).
+Everything else about multi-region is easy by comparison.
+
+**Event-driven.** The queue moves from the side of the diagram to the centre;
+services communicate by publishing events rather than calling each other. Buys
+decoupling and replay, costs you the ability to reason about a request by
+reading one call stack.
+
+**CQRS.** Separate the write model from one or more read models, kept in sync
+asynchronously. Justified when reads and writes have genuinely different shapes
+and scale, and over-applied otherwise.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Walk me through a request."** DNS, CDN, load balancer, gateway, app,
+   cache, database — and name what each costs, not just what it is.
+2. **"Why is each layer there?"** Every layer exists to stop traffic reaching
+   the next, more expensive one.
+3. **"What's the latency difference between a cache hit and a DB read?"**
+   Roughly 15 ms versus 50 ms or more end to end. That ratio justifies the cache
+   layer.
+4. **"Which component failing is worst?"** The load balancer, if a bad health
+   check evicts the whole fleet. It converts a partial degradation into a total
+   outage.
+5. **"What happens if Redis dies?"** Every request falls through to a database
+   sized for a 90% hit rate. Fail open, and plan for the stampede.
+6. **"How would this evolve from a single box?"** Split the database, cache,
+   load balance, replicate, CDN, queue, then shard — cheap and reversible until
+   the last step.
+7. **"Which boxes would you remove for this problem?"** The real question. Name
+   what you're dropping and why.
+8. **"Where does the state live?"** Database for durable data, Redis for
+   sessions and cache, object storage for blobs. The app tier holds nothing.
+9. **"How do you go multi-region?"** Duplicate the stack, route
+   geographically, and then decide between one global primary and multi-primary
+   with conflict resolution. The database is the only hard part.
+10. **"Where's the single point of failure?"** Usually the primary database, and
+    then whatever piece of the request path is unreplicated.
+11. **"How would you know it's healthy?"** RED metrics at p99 per layer, cache
+    hit rate, replication lag, and consumer lag.
+12. **"Where would you put an API gateway, and would you?"** In front of the app
+    tier for shared auth and rate limiting — and not at all if there's one
+    service.
+13. **"What's the first thing you'd add to your project?"** A queue, so the
+    click write comes off the redirect path.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Drawing every box** and being unable to justify half of them.
+- **Adding a queue with no asynchronous work** to put in it.
+- **Forgetting that the app tier must be stateless** for any of this to work.
+- **Sizing the database for the cached hit rate** and having no answer when the
+  cache is cold.
+- **Treating the load balancer as infallible**, when its health check is the
+  most dangerous config in the diagram.
+- **Jumping to microservices or sharding** — the two irreversible steps —
+  before the reversible ones.
+- **Multi-region without deciding the write story**, which is the only part that
+  is actually hard.
+</Callout>
+
+### Where this connects
+
+- [1. The framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — how to use this diagram inside the R-E-A-H-D-B flow.
+- [3. Scaling](/system-design/3-scaling-vertical-vs-horizontal) — the ladder of
+  growth stages in more depth.
+- [4. Load balancing](/system-design/4-load-balancing) — the layer with the
+  worst failure mode.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  and [6. Databases](/system-design/6-databases) — the two boxes doing most of
+  the work.
+- [10. Other building blocks](/system-design/10-other-building-blocks-to-know) —
+  the CDN, gateway and observability pieces named here.

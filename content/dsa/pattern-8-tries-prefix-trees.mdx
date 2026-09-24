@@ -1,0 +1,395 @@
+---
+title: "Pattern 8 — Tries (Prefix Trees)"
+topic: "dsa"
+order: 110
+difficulty: "medium"
+estimatedMinutes: 28
+tags: [trie, prefix-tree, autocomplete, backtracking, word-search, radix-tree]
+format: "mdx"
+summary: "Why a hash map cannot answer prefix queries, the node layout trade between a 26-slot array and a map, insert and search at O(L) regardless of dictionary size, the isEndOfWord flag, wildcard search by DFS, Word Search II as trie-pruned backtracking, and compressed tries as the answer to memory."
+---
+
+## Layer 1 — When you reach for this
+
+A trie is the only structure in the catalogue that exists for a single query
+type, which makes recognising it unusually easy once you know what that query
+is.
+
+> A hash map answers **"is this exact string present?"** in O(1) and is
+> unbeatable at it. What it cannot do is answer **"which stored strings start
+> with this?"** without examining every key, because hashing deliberately
+> destroys the relationship between a string and its prefixes — that is what a
+> good hash function is *for*. **A trie is the structure that keeps prefixes
+> adjacent, by making the shared prefix a shared path.**
+
+Signals in the problem statement:
+
+- **"Starts with", "prefix", "autocomplete", "type-ahead", "suggestions as you
+  type"** — the defining query.
+- **"Dictionary", "word list", "is this a valid word"** combined with repeated
+  lookups. One lookup does not justify building a trie; thousands do.
+- **"Find all words in the board / the matrix / the text"** — many patterns
+  searched against one body of text at once. This is the case where a trie is
+  not merely convenient but asymptotically necessary.
+- **"With a wildcard"**, "matching `.` as any character", "one edit away" — a
+  trie plus a DFS handles partial matches that a hash map cannot express at all.
+- **"Longest common prefix"**, "shortest unique prefix", "replace words with
+  their roots".
+- **"Maximum XOR of two numbers"** — a binary trie over the bits, which is the
+  version people do not see coming.
+
+Anti-signals:
+
+- **You only need exact membership.** Use a `HashSet`. A trie is slower in
+  constant factors and far heavier in memory, and choosing it anyway is a
+  judgement error the interviewer will notice.
+- **A single search of one pattern in one text.** That is KMP or
+  `String.indexOf`, at O(n + m) with no structure to build.
+- **The strings are few, or the query count is low.** Building a trie costs the
+  total length of all words; if you are not amortising that build over many
+  queries, a linear scan wins.
+- **You need sorted order by whole-string value** rather than prefix. A
+  `TreeMap` gives that with far less memory.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+> **Every path from the root to a node spells exactly one string, and that
+> string is the common prefix of everything stored in that node's subtree.**
+
+Two consequences define the whole data structure. First, **a prefix query is
+just a walk**: to find everything starting with `"ca"`, follow `c` then `a` and
+the answer is the entire subtree beneath, already grouped, with no searching
+required. Second, **the cost of any operation is the length of the string, not
+the size of the dictionary**, because the walk consumes one character per level
+and never looks sideways at unrelated words.
+
+### Why the complexity is O(L) and independent of n
+
+Insert, search, and `startsWith` all walk one node per character of the query
+string, doing O(1) work at each step to index into the children. So each is
+**O(L)** where L is the length of the query. A dictionary of ten words and a
+dictionary of ten million words cost the same to query. Compare that with
+scanning a list for prefix matches, which is O(n × L).
+
+Against a `HashSet`, exact lookup is O(L) either way — hashing a string reads
+every character, so the "O(1)" of a hash set quietly hides an O(L) hash
+computation. **The trie's advantage is not exact lookup; it is that prefix
+queries cost the same as exact ones**, plus O(k) to enumerate k results from the
+subtree. Building the trie costs O(total characters across all words), which is
+the same as reading the input.
+
+### The node structure, and the memory trade
+
+```java
+class TrieNode {
+    TrieNode[] children = new TrieNode[26];   // fixed alphabet: fastest indexing
+    boolean isEndOfWord;                      // see below — this flag is not optional
+}
+```
+
+The array version indexes with `c - 'a'`, which is a single subtraction and an
+array access: no hashing, no boxing, contiguous memory. The cost is that **every
+node carries 26 references whether it uses them or not**, which on a 64-bit JVM
+is roughly 104 to 208 bytes per node before the object header. A dictionary with
+a million total characters can therefore consume well over a hundred megabytes.
+
+```java
+class TrieNode {
+    Map<Character, TrieNode> children = new HashMap<>();   // sparse or large alphabet
+    boolean isEndOfWord;
+}
+```
+
+The map version allocates only the children that exist, which is much smaller
+for sparse tries, and it handles Unicode, digits, and mixed case without
+redefining the index function. It pays a hash computation and a boxed
+`Character` per step.
+
+**The rule: array for a small known alphabet and a dense trie; map for a large
+or unknown alphabet and a sparse one.** Say the trade out loud even if you
+choose the array — the interviewer is often asking about memory, not speed.
+
+### Insert, search, and startsWith
+
+```java
+void insert(String word) {
+    TrieNode node = root;
+    for (char c : word.toCharArray()) {
+        int i = c - 'a';
+        if (node.children[i] == null) node.children[i] = new TrieNode();
+        node = node.children[i];
+    }
+    node.isEndOfWord = true;                 // mark the terminal node, not the path
+}
+
+private TrieNode walk(String s) {            // shared by search and startsWith
+    TrieNode node = root;
+    for (char c : s.toCharArray()) {
+        node = node.children[c - 'a'];
+        if (node == null) return null;       // the path does not exist
+    }
+    return node;
+}
+
+boolean search(String word)      { TrieNode n = walk(word);   return n != null && n.isEndOfWord; }
+boolean startsWith(String prefix){ return walk(prefix) != null; }
+```
+
+**The entire difference between `search` and `startsWith` is the
+`isEndOfWord` check**, which is the cleanest way to state why the flag exists.
+
+### Why `isEndOfWord` is necessary
+
+Insert `"apple"`. The trie now contains nodes for `a`, `ap`, `app`, `appl`, and
+`apple`. Without a flag, `search("app")` would follow a valid path and report
+true, even though `"app"` was never inserted. **The flag distinguishes "this
+path exists" from "this path is a stored word"**, and those are genuinely
+different facts: the first is what `startsWith` asks and the second is what
+`search` asks.
+
+The variant worth mentioning is replacing the boolean with a payload — a count
+of insertions (so deletion can decrement), a frequency for ranking autocomplete
+suggestions, or the word itself, which is the trick that makes Word Search II
+clean. Deletion in a trie also needs it: you clear the flag, then prune upward
+while a node has no children and is not itself the end of another word.
+
+### Wildcard search by DFS backtracking
+
+The design question "Add and Search Word" allows `.` to match any single
+character. A hash map cannot express this at all; a trie handles it by turning
+the deterministic walk into a search.
+
+```java
+boolean search(String word) { return dfs(word, 0, root); }
+
+private boolean dfs(String word, int i, TrieNode node) {
+    if (node == null) return false;
+    if (i == word.length()) return node.isEndOfWord;
+    char c = word.charAt(i);
+    if (c != '.') return dfs(word, i + 1, node.children[c - 'a']);
+    for (TrieNode child : node.children) {           // wildcard: try every branch
+        if (dfs(word, i + 1, child)) return true;    // succeed on the first match
+    }
+    return false;
+}
+```
+
+The complexity changes with the wildcards. A concrete character costs one branch
+per level, so a query with no dots is O(L). Each dot multiplies the branching
+by up to 26, so the worst case is **O(26^d × L)** for d dots — which is why a
+query of all dots is expensive and why interviewers ask about it. Existing nodes
+prune most of that branching in practice, since `children[i]` is usually null.
+
+### Worked example: Word Search II, the canonical hard application
+
+Find every word from a dictionary that can be traced on a character grid. The
+obvious approach runs a separate backtracking search per word, at roughly
+O(words × cells × 4^L). With a thousand words that is hopeless.
+
+**The trie inverts the loop.** Build one trie from the dictionary, then walk the
+board **once**, carrying a trie node alongside the board position. At each step
+the trie tells you whether the prefix you have traced is a prefix of any word at
+all — and if it is not, **you abandon that entire branch immediately, for every
+word simultaneously.** That pruning is the whole point: a board path spelling
+`"zq"` is discarded once, rather than being rediscovered as hopeless a thousand
+times.
+
+```java
+void dfs(char[][] board, int r, int c, TrieNode node, List<String> found) {
+    char ch = board[r][c];
+    TrieNode next = (ch == '#') ? null : node.children[ch - 'a'];
+    if (next == null) return;                    // PRUNE: no word has this prefix
+
+    if (next.word != null) {                     // store the word at its terminal node
+        found.add(next.word);
+        next.word = null;                        // de-duplicate without a Set
+    }
+
+    board[r][c] = '#';                           // mark visited, in place
+    for (int[] d : DIRS) {
+        int nr = r + d[0], nc = c + d[1];
+        if (nr >= 0 && nr < board.length && nc >= 0 && nc < board[0].length) {
+            dfs(board, nr, nc, next, found);
+        }
+    }
+    board[r][c] = ch;                            // restore on the way out
+}
+```
+
+Three details that get asked about. Storing the **word** at its terminal node
+rather than a boolean removes the need to rebuild the string from the path.
+Nulling it after collection deduplicates results without a `HashSet`. And
+marking the cell in place and restoring it afterwards is the standard
+backtracking discipline from
+[backtracking](/dsa/pattern-10-backtracking) — the restore must happen on every
+return path, which is why it sits after the loop rather than inside it. A
+further optimisation that interviewers like: prune the trie itself by removing
+leaf nodes once their word has been found, so the search shrinks as it
+progresses.
+
+### Memory is the real cost, and compressed tries are the answer
+
+A trie trades memory for query flexibility, and on a large dictionary the trade
+is steep. The fix is that **long chains of single-child nodes carry no
+information** — if `t`, `th`, `thr`, `thro` each have exactly one child, four
+nodes are storing what one edge labelled `"thro"` could.
+
+A **compressed trie**, also called a radix tree or PATRICIA trie, collapses
+every such chain into a single edge holding a substring. It keeps the O(L) query
+bound while reducing node count dramatically on real dictionaries, at the cost
+of edge-splitting logic on insert. A **ternary search trie** is the other
+compromise: three children per node (less, equal, greater) gives near-array
+speed with map-like memory.
+
+These are not just textbook curiosities, and naming the real uses is a good way
+to close a trie discussion:
+
+- **Autocomplete and spell check**, where the subtree under a prefix is exactly
+  the candidate set.
+- **IP routing tables**, where longest-prefix match on a binary trie over
+  address bits is literally how a router forwards a packet.
+- **Suffix trees and suffix arrays** for substring search in bioinformatics and
+  full-text indexes.
+- **Java's own `HashMap`** does not use a trie, but persistent map
+  implementations in functional languages use a hash array mapped trie, which is
+  a trie over hash bits.
+
+### Edge cases and traps
+
+- **The empty string.** It is stored by setting `isEndOfWord` on the root, and
+  it is a case most implementations silently get wrong.
+- **Forgetting `isEndOfWord`**, so `search` and `startsWith` become the same
+  method.
+- **Assuming lowercase.** `c - 'a'` on an uppercase letter or a digit gives a
+  negative index or one past 25, and the exception is an
+  `ArrayIndexOutOfBoundsException` well away from the real mistake.
+- **Not null-checking the child** before descending, in both the walk and the
+  wildcard DFS.
+- **Iterating `children` and dereferencing** without a null check in the
+  wildcard loop.
+- **Deleting by clearing the flag only**, which leaks nodes. Prune upward while
+  the node has no children and is not another word's end.
+- **Rebuilding the word from the path** during Word Search II instead of storing
+  it at the terminal node.
+- **Reaching for a trie when a `HashSet` suffices**, which is the judgement
+  error the pattern is most prone to.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity of insert and search?"** O(L) in the length of the
+   word, independent of how many words are stored. Building the trie is O(total
+   characters).
+2. **"Why not just use a HashMap?"** A map answers exact membership but cannot
+   answer prefix queries without scanning every key, because hashing destroys
+   the prefix relationship deliberately.
+3. **"Isn't a HashSet lookup O(1) and therefore better?"** Hashing a string
+   already reads all L characters, so exact lookup is O(L) either way. The trie
+   wins only when prefix queries matter.
+4. **"What's the space complexity?"** O(total characters) nodes in the worst
+   case, times the per-node cost — 26 references for the array layout, which is
+   where the real memory goes.
+5. **"Array of 26 or a HashMap for children?"** Array for a small dense
+   alphabet, because indexing is a subtraction; map for large, sparse, or
+   Unicode alphabets, because it allocates only what exists.
+6. **"How would you reduce the memory?"** Compress single-child chains into a
+   radix tree, or use a ternary search trie. Both keep the O(L) bound.
+7. **"Why do you need `isEndOfWord`?"** To distinguish a stored word from a mere
+   prefix. Without it, inserting "apple" makes "app" appear to be present.
+8. **"How do you delete a word?"** Clear the flag, then prune upward while each
+   node has no children and is not itself the end of another word. A reference
+   count on each node makes this simpler.
+9. **"How do you return the top k autocomplete suggestions?"** Walk to the
+   prefix node, then DFS the subtree collecting words; store a frequency at each
+   terminal node and keep a size-k min-heap if the suggestions must be ranked.
+10. **"What about wildcards?"** Turn the walk into a DFS: a concrete character
+    follows one child, a dot tries all of them. The worst case is O(26^d × L)
+    for d wildcards.
+11. **"Why does a trie help in Word Search II?"** It lets one board traversal
+    test all words at once and abandon a path the moment no word shares that
+    prefix, instead of repeating the same failure per word.
+12. **"What if the dictionary doesn't fit in memory?"** Shard by first
+    character across machines and route queries by prefix, which the structure
+    makes natural; or store it as a compressed on-disk trie, which is what a
+    full-text index does.
+13. **"Where are tries used in real systems?"** Autocomplete, spell check,
+    longest-prefix-match IP routing, and full-text search indexes built on
+    suffix structures. Insertion is incremental at O(L) per word, which is what
+    makes a trie usable on a live stream of new terms.
+14. **"How would you find the maximum XOR of two numbers in an array?"** Build a
+    binary trie over the 32 bits of each number and greedily descend toward the
+    opposite bit at each level: O(32n), which is linear.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Omitting `isEndOfWord`**, collapsing `search` into `startsWith`.
+- **Assuming a lowercase-only alphabet** and indexing out of bounds on any other
+  character.
+- **Skipping the null check** before descending to a child.
+- **Handling the empty string**, which must set the flag on the root.
+- **Deleting by clearing the flag alone**, which leaks every node on the path.
+- **Building a trie for a handful of exact lookups**, where a `HashSet` is
+  smaller, faster, and simpler.
+- **Underestimating memory** — 26 references per node adds up faster than people
+  expect on a real dictionary.
+- **Forgetting to restore the board cell** in Word Search II, which silently
+  loses valid words found along other paths.
+- **Recursing deeply on very long words**, which is bounded by word length and
+  therefore usually safe, but worth checking when the alphabet is a genome.
+</Callout>
+
+### Problems to drill
+
+**Easy** — learn the structure by building it.
+
+- **Implement Trie (Prefix Tree)** — insert, search, `startsWith`, and the flag
+  that separates the last two.
+- **Longest Common Prefix** — solvable without a trie, but building one makes
+  the answer "walk down while there is exactly one child", which is the clearest
+  statement of what a common prefix *is*.
+**Medium** — the query types a map cannot express.
+
+- **Design Add and Search Words Data Structure** — wildcard DFS and its
+  branching cost.
+- **Replace Words** — walk each word until the first terminal node; the trie
+  makes "shortest matching root" a one-line condition.
+- **Map Sum Pairs** — a payload at each node instead of a boolean, summing over
+  a subtree.
+- **Implement Magic Dictionary** — search allowing exactly one substitution,
+  which is a constrained version of the wildcard DFS.
+- **Search Suggestions System** — autocomplete proper, returning the top three
+  suggestions per prefix.
+- **Design Search Autocomplete System** — the same with frequencies and a heap
+  for ranking.
+
+**Hard**
+
+- **Word Search II** — a trie pruning a grid backtracking search; the canonical
+  demonstration of why the structure exists.
+- **Maximum XOR of Two Numbers in an Array** — a binary trie over bits, and the
+  greedy descent.
+- **Palindrome Pairs** — a trie of reversed words plus palindrome checks on the
+  remaining suffixes.
+- **Concatenated Words** — a trie combined with memoised recursion, which is
+  dynamic programming over trie paths.
+
+### Where this connects
+
+- [Trees, DFS and BFS](/dsa/pattern-7-trees-dfs-bfs) — a trie is a tree, and
+  every traversal idea transfers directly.
+- [Backtracking](/dsa/pattern-10-backtracking) — the wildcard search and Word
+  Search II are backtracking with the trie supplying the pruning test.
+- [Arrays and hashing](/dsa/pattern-1-arrays-hashing) — the structure a trie
+  competes with, and usually loses to when prefixes are not involved.
+- [Heaps and priority queues](/dsa/pattern-9-heaps-priority-queue) — the ranking
+  layer on top of autocomplete.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  what `HashMap` does with a `String` key, and why "O(1)" hides an O(L) hash.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  costs to quote when comparing a trie against a set.

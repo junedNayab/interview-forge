@@ -1,0 +1,288 @@
+---
+title: "5. Rapid-fire self-test (answer out loud)"
+topic: "cs-fundamentals"
+order: 805
+difficulty: "medium"
+estimatedMinutes: 16
+tags: [self-test, revision, interview-prep]
+format: "mdx"
+summary: "Sixty questions across networking, OS, security and distributed systems — each paired with the one thing a good answer must contain, so you can grade yourself honestly instead of feeling like you knew it."
+---
+
+## How to use this
+
+Read the question, **answer it out loud, in full sentences, before looking at
+the grading note.** That instruction is not a formality — it's the entire point.
+
+The gap between "I know this" and "I can say this" is where interviews are
+lost. Recognising an answer is effortless and feels identical to knowing it,
+which is why silent revision produces confident candidates who freeze when
+asked. Speaking forces you to produce the words in order, discover the sentence
+you can't finish, and hear yourself trail off. That failure is the information
+you came for.
+
+Each question below is followed by **the one thing a good answer must
+contain.** If your spoken answer didn't contain it, mark the question and go
+back to the lesson. Don't award yourself partial credit for "I knew that" — you
+either said it or you didn't.
+
+<Callout type="tip" title="Grade on the follow-up, not the first answer">
+Almost everyone can produce the first sentence. The interview happens in the
+second and third. So for each question, after you answer, ask yourself **"and
+why?"** twice more. If the second "why" produces silence, you have a bookmark
+rather than an understanding — which is exactly the failure this whole site is
+built to fix.
+</Callout>
+
+---
+
+## Networking
+
+1. **Walk me through what happens when I type a URL and press Enter.**
+   *Must contain:* the seven stages, and that DNS, TCP and TLS are roughly three
+   round trips of pure latency before the server sees a byte.
+2. **Why is the first request to a server slower than the second?**
+   *Must contain:* handshakes, plus TCP slow start ramping the congestion
+   window.
+3. **TCP vs UDP — a real use case for each.**
+   *Must contain:* that TCP's ordering guarantee is actively harmful for live
+   media, where a stale retransmitted frame is worse than a dropped one.
+4. **What does the TCP handshake accomplish?**
+   *Must contain:* agreeing initial sequence numbers and confirming both
+   directions, at a cost of one round trip.
+5. **What is `TIME_WAIT` and why should you care?**
+   *Must contain:* ephemeral port exhaustion, and that the fix is connection
+   pooling.
+6. **Did HTTP/2 solve head-of-line blocking?**
+   *Must contain:* only at the application layer — it moved the problem into
+   TCP, where one lost packet stalls every stream.
+7. **Why does HTTP/3 run over UDP?**
+   *Must contain:* per-stream reliability in QUIC, plus a merged transport and
+   TLS handshake.
+8. **Which HTTP methods are idempotent, and why does it matter?**
+   *Must contain:* that idempotency is what makes a retry safe.
+9. **`301` vs `302`, `401` vs `403`, `502` vs `503` vs `504`.**
+   *Must contain:* 401 is unauthenticated despite its name; 504 specifically
+   means the upstream timed out.
+10. **What does TLS actually give you?**
+    *Must contain:* three properties — confidentiality, integrity **and**
+    authentication — and asymmetric to agree a symmetric key.
+11. **Why not use asymmetric encryption for everything?**
+    *Must contain:* orders of magnitude slower.
+12. **When would you choose gRPC over REST?**
+    *Must contain:* service-to-service, and that REST wins at the browser edge.
+
+## Operating systems and concurrency
+
+13. **Process vs thread, and when does a context switch happen?**
+    *Must contain:* isolation versus cost, and that the indirect cost of a
+    switch (cold caches) usually exceeds the direct cost.
+14. **Why doesn't adding threads add throughput indefinitely?**
+    *Must contain:* switching overhead and cache thrash grow while cores don't.
+15. **How would you size a thread pool?**
+    *Must contain:* about the core count for CPU-bound, much higher for
+    I/O-bound, scaled by the wait-to-compute ratio.
+16. **What are the four conditions for deadlock, and how do you prevent one?**
+    *Must contain:* all four named, and that you only need to break one — then
+    say which one your fix breaks.
+17. **Deadlock vs livelock vs starvation.**
+    *Must contain:* stuck and idle; busy but not progressing; never scheduled.
+18. **Mutex vs semaphore.**
+    *Must contain:* ownership — a mutex must be released by its locker.
+19. **When is a spinlock the right choice?**
+    *Must contain:* when the expected wait is shorter than a context switch, and
+    never on a single core.
+20. **What is the C10K problem and how was it solved?**
+    *Must contain:* thread-per-connection memory and scheduler cost; event loops
+    with `epoll`, and now virtual threads.
+21. **`select` vs `epoll`.**
+    *Must contain:* O(n) rescan per call versus register-once and get only what
+    is ready.
+22. **What do virtual threads change?**
+    *Must contain:* the JVM unmounts a blocked virtual thread from its carrier,
+    so blocking code scales — unless it pins.
+23. **What is thrashing?**
+    *Must contain:* the working set exceeding RAM, so the machine pages instead
+    of computing.
+24. **Why is a system call expensive?**
+    *Must contain:* the trap into the kernel, which is why I/O is buffered.
+
+## Java and the JVM
+
+25. **Why does the JVM have generations?**
+    *Must contain:* the weak generational hypothesis, and that copying cost
+    scales with survivors rather than allocations.
+26. **Which garbage collector, and why?**
+    *Must contain:* G1 by default; ZGC when tail latency beats 10–15% of
+    throughput.
+27. **How does ZGC get sub-millisecond pauses?**
+    *Must contain:* coloured pointers and a load barrier, so relocation is
+    concurrent.
+28. **You set `-Xmx` to the container's memory limit. What happens?**
+    *Must contain:* stacks, Metaspace, code cache and direct buffers are outside
+    `-Xmx`, so the kernel kills the process with no Java error.
+29. **You get an `OutOfMemoryError`. Walk me through what you do.**
+    *Must contain:* take a heap dump, analyse the dominator tree, and
+    distinguish a leak from an undersized heap by old-gen occupancy after full
+    GCs.
+30. **How does `HashMap` work?**
+    *Must contain:* hash spreading, the power-of-two mask, chaining,
+    treeification and resize at 75%.
+31. **Why does `HashMap` treeify at 8?**
+    *Must contain:* it's a defence against deliberate hash collisions, not an
+    optimisation for normal use.
+32. **What breaks if you override `equals` but not `hashCode`?**
+    *Must contain:* equal objects land in different buckets, so `get` returns
+    null for a key that's present.
+33. **Is `HashMap` thread-safe since Java 8?**
+    *Must contain:* no — Java 8 removed the resize infinite loop, not the
+    unsafety.
+34. **Why does `ConcurrentHashMap` forbid null?**
+    *Must contain:* a null return would be ambiguous and you can't disambiguate
+    it without a race.
+35. **`ArrayList` or `LinkedList`?**
+    *Must contain:* ArrayList, because cache locality beats the Big-O — and
+    `ArrayDeque` for queues.
+36. **When is a parallel stream a bad idea?**
+    *Must contain:* it shares the JVM-wide common ForkJoinPool, so blocking I/O
+    inside one starves everything else.
+37. **`orElse` vs `orElseGet`.**
+    *Must contain:* `orElse`'s argument is evaluated even when a value is
+    present.
+38. **Why is type erasure the reason you can't do `new T[]`?**
+    *Must contain:* generics are compile-time only; there is no `T` at runtime.
+
+## Spring and data access
+
+39. **Why does calling a `@Transactional` method from within the same class do
+    nothing?**
+    *Must contain:* self-invocation bypasses the proxy.
+40. **Does a checked exception roll back a transaction?**
+    *Must contain:* no, by default — only unchecked ones do.
+41. **What is the N+1 problem and how do you detect it?**
+    *Must contain:* one query per lazily-loaded association, and that you detect
+    it by counting queries, not by reading code.
+42. **`JOIN FETCH` with pagination — what happens?**
+    *Must contain:* Hibernate pages in memory after loading everything.
+43. **First-level vs second-level cache.**
+    *Must contain:* L1 is the per-transaction persistence context and can't be
+    disabled; L2 is shared and only safe when your app is the sole writer.
+44. **Why is `OFFSET` pagination slow?**
+    *Must contain:* the database produces and discards every skipped row.
+
+## Databases and SQL
+
+45. **What's the default isolation level, and what can still go wrong?**
+    *Must contain:* Read Committed in Postgres, and that lost updates are still
+    possible.
+46. **Explain MVCC in one breath.**
+    *Must contain:* readers don't block writers because each row has versions
+    and a snapshot decides visibility.
+47. **A user updates their profile and doesn't see the change. Why?**
+    *Must contain:* replication lag, and read-your-own-writes as the fix.
+48. **Sync or async replication?**
+    *Must contain:* async is the default and loses recent writes on failover.
+49. **What is split-brain and how do you prevent it?**
+    *Must contain:* two nodes both accepting writes after a bad failover;
+    quorum decisions and fencing.
+50. **How would you shard, and what breaks?**
+    *Must contain:* never `hash % N`; and that joins, cross-shard transactions
+    and auto-increment IDs all break.
+51. **Why is an index on a low-cardinality column often useless?**
+    *Must contain:* past a selectivity threshold a sequential scan beats random
+    I/O, and the planner knows it.
+52. **What kills an index silently?**
+    *Must contain:* a function on the column, implicit type coercion, or a
+    leading wildcard.
+
+## Security
+
+53. **How do you store passwords, and why not SHA-256?**
+    *Must contain:* bcrypt or Argon2 because password hashing must be
+    deliberately slow; SHA-256 is billions per second on a GPU.
+54. **What does a salt prevent?**
+    *Must contain:* rainbow tables and cracking every account at once — not
+    making one password harder.
+55. **Is a JWT encrypted?**
+    *Must contain:* no, signed — anyone can read the payload.
+56. **How do you log a user out with JWTs?**
+    *Must contain:* you can't really; short-lived access tokens plus a revocable
+    refresh token.
+57. **How do you prevent SQL injection?**
+    *Must contain:* parameterised queries as separate channels for code and
+    data — not escaping.
+58. **Do you need CSRF protection on a token API?**
+    *Must contain:* not if the token is in an `Authorization` header; yes the
+    moment it lives in a cookie.
+59. **Is CORS a security control?**
+    *Must contain:* no — it governs which origins may read a response and never
+    replaces server-side authorization.
+
+## Distributed systems and design
+
+60. **What makes distributed systems hard?**
+    *Must contain:* you cannot distinguish a slow node from a dead one, or a
+    lost request from a lost reply.
+61. **How do you make a write safe to retry?**
+    *Must contain:* an idempotency key recorded atomically with the effect.
+62. **What does `W + R > N` buy you?**
+    *Must contain:* overlap between the read and write sets.
+63. **2PC or saga?**
+    *Must contain:* 2PC blocks when the coordinator dies; a saga trades away
+    isolation for availability.
+64. **Why can't you order distributed events by timestamp?**
+    *Must contain:* clock skew, and that NTP can move a clock backwards.
+65. **What's wrong with a Redis distributed lock?**
+    *Must contain:* a stalled client holding a stale belief past the TTL;
+    fencing tokens are the fix.
+66. **Why exponential backoff *with jitter*?**
+    *Must contain:* without jitter, every client retries in lockstep and
+    re-breaks the recovering dependency.
+67. **What's a cache stampede and how do you fix it?**
+    *Must contain:* a hot key expiring and every request missing at once;
+    coalesce, refresh early, or don't expire hot keys.
+68. **How would you know a queue-based system was unhealthy?**
+    *Must contain:* consumer lag and message age — error rate stays green while
+    everything is merely slow.
+
+---
+
+## Scoring yourself honestly
+
+| You got | What it means |
+|---|---|
+| Under 40 | Breadth gaps. Work through the lessons rather than re-testing. |
+| 40–55 | Solid breadth. Now drill the ones you missed and re-test in a week. |
+| 55–65 | Interview-ready on fundamentals. Spend your time on system design and coding. |
+| All 68, with two "why?" follow-ups each | You are past what this test can measure. |
+
+The number matters less than the pattern. **Three misses clustered in one
+section is a lesson to reread; three scattered misses are just revision.** And
+re-test a week later rather than immediately — being able to answer a question
+you just read is not evidence of anything.
+
+<Callout type="interview" title="The three questions that carry the most weight">
+If you only rehearse three, make them these, because they're the ones that most
+reliably open into a long, well-scored conversation:
+
+1. **"Walk me through what happens when I type a URL and press Enter."** It
+   touches DNS, TCP, TLS, HTTP, load balancing, caching and rendering, so the
+   interviewer can go anywhere from it.
+2. **"How would you scale this?"** The answer that scores is finding the thing
+   that can't be duplicated, not saying "horizontally."
+3. **"How would you know it was working?"** Consistently under-prepared, and it
+   separates people who have operated a system from people who have drawn one.
+</Callout>
+
+### Where this connects
+
+- [1. Networking](/cs-fundamentals/1-networking),
+  [2. OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency),
+  [3. Distributed systems](/cs-fundamentals/3-distributed-systems-concepts),
+  [4. Security](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements)
+  — the four lessons this test covers.
+- [Java track](/java) and [SQL track](/sql) — for the language and data
+  questions above.
+- [System design](/system-design) — where most of these become follow-ups
+  rather than questions.
+- [Master roadmap](/roadmap) — to keep all four tracks moving together.

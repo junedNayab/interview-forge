@@ -1,0 +1,362 @@
+---
+title: "Practice: Streams & Duplicates"
+topic: "java"
+order: 902
+group: "Practice Problems"
+difficulty: "medium"
+estimatedMinutes: 18
+tags: [practice, streams, collectors, groupingby, laziness, parallel-streams]
+format: "mdx"
+summary: "Four ways to find duplicates with streams, why the clever Set.add trick is unsafe in parallel, and the pipeline-mechanics follow-ups: laziness, one-pass fusion, operation ordering, the toMap duplicate-key trap, and when a plain loop is better."
+---
+
+## Why this problem is asked
+
+Finding duplicates is a trivial problem — a first-year student solves it with a
+`HashSet` and a loop. It is asked anyway, and almost always phrased as "using
+streams", because **the problem is a pretext for examining whether you understand the
+stream pipeline or merely the stream syntax.**
+
+The distinction shows up immediately in the follow-ups. Anyone can chain `filter` and
+`collect`. The question is whether you know that nothing executes until the terminal
+operation, that `filter` and `map` are fused into a single traversal rather than
+producing intermediate lists, why the order you write the operations in changes the
+amount of work done, and which operations quietly break when the stream goes parallel.
+Those facts determine whether the streams you write in production are elegant or
+merely short.
+
+The secondary signal is judgement. There are at least four reasonable solutions here
+with genuinely different properties, and a candidate who presents one and stops has
+said less than one who presents two and explains the trade.
+
+## The problem
+
+Given a list, return the elements that appear more than once. Variations ask for the
+counts as well, or for the unique elements instead.
+
+## The naive attempt, and why it fails
+
+```java
+// The version that works and does not scale
+static <T> List<T> findDuplicates(List<T> list) {
+    List<T> duplicates = new ArrayList<>();
+    for (int i = 0; i < list.size(); i++) {
+        for (int j = i + 1; j < list.size(); j++) {
+            if (list.get(i).equals(list.get(j)) && !duplicates.contains(list.get(i))) {
+                duplicates.add(list.get(i));
+            }
+        }
+    }
+    return duplicates;
+}
+```
+
+Two nested loops make this O(n²), with the `duplicates.contains` check inside them making
+it worse in the pathological case. Correct, and unusable on a hundred thousand elements.
+
+**The insight is the one behind most array problems: trade memory for time by letting a
+hash structure remember what you have already seen.** One pass, O(n) time, O(n) space.
+What makes it interesting is that streams offer two quite different ways to express that,
+and they are not equivalent — plus a third that looks like a stream solution and is
+secretly quadratic, which is approach 4.
+
+## Approach 1: `groupingBy` with `counting`
+
+```java
+static <T> List<T> findDuplicatesGrouping(List<T> list) {
+    return list.stream()
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
+            .entrySet().stream()
+            .filter(e -> e.getValue() > 1)
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toList());
+}
+```
+
+`Function.identity()` is the classifier: each element is its own group key.
+`Collectors.counting()` is the *downstream* collector, applied to each group instead of
+collecting the group's members into a list — so the intermediate map is
+`Map<T, Long>` rather than `Map<T, List<T>>`, which matters on large inputs.
+
+This is the solution to lead with. It is two passes rather than one, which is the cost,
+and in exchange it is stateless, declarative, parallel-safe, and it generalises
+immediately to "give me the counts" by dropping the final `map`.
+
+## Approach 2: the `Set.add` trick
+
+```java
+static <T> Set<T> findDuplicatesWithSet(List<T> list) {
+    Set<T> seen = new HashSet<>();
+    return list.stream()
+            .filter(item -> !seen.add(item)) // Set.add returns false if already present
+            .collect(Collectors.toSet());
+}
+// Note: This uses mutable state (seen) inside a stream, which is fine for
+// sequential streams but UNSAFE for parallel streams. Mention this in interview!
+```
+
+`Set.add` returns `false` when the element is already present, so `!seen.add(item)` is a
+one-expression "have I seen this before". Single pass, and the shortest correct answer.
+
+Present it with the caveat attached, because the predicate has a side effect on captured
+state. Sequentially that is well-defined — one thread, encounter order. Add `.parallel()`
+and it is a data race on a `HashSet`, which can corrupt the internal table and produce
+silently wrong results rather than an exception. **Presenting this while naming why it
+breaks in parallel is a better answer than presenting the safe one without comment**,
+because it shows you know which rule you are bending.
+
+## Approach 3: duplicates with their counts
+
+```java
+static <T> Map<T, Long> findDuplicatesWithCount(List<T> list) {
+    return list.stream()
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))
+            .entrySet().stream()
+            .filter(e -> e.getValue() > 1)
+            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+}
+```
+
+Approach 1 with the final `map` replaced by a `toMap`, which answers the common
+follow-up "and how many times does each appear?" without restructuring anything. The
+`toMap` here is safe from the duplicate-key exception discussed below, because the keys
+come from a map's entry set and are therefore already distinct — a point worth making
+if the interviewer probes it.
+
+## Approach 4: `Collections.frequency`, and why not
+
+```java
+static <T> List<T> findDuplicatesFrequency(List<T> list) {
+    return list.stream()
+            .filter(item -> Collections.frequency(list, item) > 1)
+            .distinct()
+            .collect(Collectors.toList());
+}
+// Don't use this in production -- O(n^2). Show it to demonstrate awareness.
+```
+
+This reads beautifully and is quadratic: `Collections.frequency` walks the entire list,
+and it is called once per element. It is the most instructive failure in the set,
+because it demonstrates that **stream syntax says nothing about complexity** — a short
+pipeline can hide a nested loop inside a predicate. Mention it as a code-review
+anti-pattern rather than as a solution.
+
+## Complexity
+
+| Approach | Time | Space | Note |
+|---|---|---|---|
+| Nested loops | O(n²) | O(d) | Correct, unusable at scale |
+| `groupingBy` + `counting` | O(n) average | O(u) for the count map | Two passes, parallel-safe |
+| `Set.add` filter | O(n) average | O(u) for the seen set | One pass, not parallel-safe |
+| `Collections.frequency` | O(n²) | O(d) | Quadratic despite looking declarative |
+
+Here `u` is the number of unique elements and `d` the number of duplicates. The O(n)
+figures are averages inherited from `HashMap`: they assume a reasonable `hashCode`, and a
+poor one degrades per lookup until treeification bounds it at O(log n).
+
+One point worth adding unprompted. If someone suggests sorting instead, the trade is
+O(n log n) time for O(1) extra space when you are allowed to mutate the input — so
+sorting is the right answer only when memory is the binding constraint, and it requires
+`Comparable` elements where the hashing approach does not.
+
+## Additional collector patterns
+
+```java
+static void bonusStreamOperations() {
+    List<String> words = List.of("hello", "world", "hello", "java", "world", "stream");
+
+    // Count occurrences of each word
+    Map<String, Long> wordCount = words.stream()
+            .collect(Collectors.groupingBy(Function.identity(), Collectors.counting()));
+
+    // Partition into duplicates and unique
+    Map<Boolean, List<String>> partitioned = words.stream()
+            .collect(Collectors.partitioningBy(w ->
+                    Collections.frequency(words, w) > 1));
+
+    // Join strings
+    String joined = words.stream()
+            .distinct()
+            .collect(Collectors.joining(", ", "[", "]"));
+
+    // Reduce to find longest word
+    Optional<String> longest = words.stream()
+            .reduce((a, b) -> a.length() >= b.length() ? a : b);
+
+    // Statistics
+    IntSummaryStatistics stats = words.stream()
+            .mapToInt(String::length)
+            .summaryStatistics();
+
+    // toMap with merge function (handle duplicate keys)
+    Map<Integer, String> byLength = words.stream()
+            .collect(Collectors.toMap(
+                    String::length,           // key: word length
+                    Function.identity(),       // value: the word
+                    (existing, replacement) -> existing + "," + replacement  // merge duplicates
+            ));
+}
+```
+
+The last one is the most important line on this page and the reason it is worth reading
+past the duplicates problem. `partitioningBy` is also worth knowing as the
+boolean-keyed special case of `groupingBy`, which is faster because it needs only two
+buckets — though note that this particular example inherits the quadratic
+`Collections.frequency` problem.
+
+## The follow-up questions
+
+### Are streams lazy, and what does that buy you?
+
+Intermediate operations — `filter`, `map`, `sorted`, `distinct`, `limit` — build a
+pipeline description and execute nothing. No work happens until a terminal operation
+(`collect`, `forEach`, `reduce`, `count`, `findFirst`) demands elements.
+
+Two consequences, and the second gets asked more. A pipeline with no terminal operation
+does nothing at all, silently, which is a real bug when someone writes
+`list.stream().map(this::save)` and wonders why nothing was saved. And laziness is what
+makes short-circuiting possible: `findFirst` and `anyMatch` stop pulling as soon as they
+have an answer, so `stream().filter(expensive).findFirst()` on a million elements may
+evaluate the predicate once. Streams are also single-use — reusing a consumed stream
+throws `IllegalStateException`, because a stream is a pipeline over a source, not a
+collection.
+
+### Does `filter().map()` create an intermediate list?
+
+No, and this is the mechanical content of "streams are lazy". The stages are *fused*:
+each element is pulled from the source and pushed through the whole chain before the next
+is touched, so `filter` then `map` is one traversal rather than two with a list in
+between. Add a `println` to each stage and the output interleaves by element rather than
+grouping by stage.
+
+The exceptions are the *stateful* operations. `sorted` and `distinct` must see elements
+before emitting any, so they act as buffering barriers — which is what makes the next
+question matter.
+
+### Why is `sorted` before `filter` wrong?
+
+Because `sorted` is a barrier that processes everything it is given, so ordering
+determines how much work it does.
+
+```java
+// Sorts a million elements, then discards most of them
+list.stream().sorted().filter(x -> x > 1000).collect(toList());
+
+// Discards first, then sorts what survives
+list.stream().filter(x -> x > 1000).sorted().collect(toList());
+```
+
+The first form is O(n log n) on the full input; the second is O(n) for the filter plus
+O(k log k) on the k survivors, which is an order of magnitude if the filter is selective.
+**The stream API does not reorder your operations — unlike a SQL query planner, the
+pipeline executes in the order you wrote it**, so predicate placement is your
+responsibility. That comparison is the clearest way to state the rule: push filters as
+early as you would in a query.
+
+The same applies to `distinct`, which also buffers, and to `map`, since mapping before
+filtering transforms elements you are about to discard. `limit` is the exception, being a
+short-circuit that is cheap anywhere after a stateless stage.
+
+### What is the `Collectors.toMap` duplicate-key trap?
+
+The two-argument `toMap` throws `IllegalStateException` on a duplicate key.
+
+```java
+// Throws: IllegalStateException: Duplicate key 5 (attempted merging values "hello" and "world")
+words.stream().collect(Collectors.toMap(String::length, Function.identity()));
+```
+
+This is a common production bug, and its character is what makes it nasty: the code works
+for months on data that happens to have distinct keys, then throws the first time it does
+not. Grouping entities by a field that turns out not to be unique is the usual trigger.
+
+The three-argument form takes a merge function and makes the decision explicit — keep the
+first, keep the last, or combine:
+
+```java
+Collectors.toMap(String::length, Function.identity(), (existing, replacement) -> existing)
+```
+
+Two further traps. `toMap` throws `NullPointerException` if the *value* function returns
+null, because it uses `Map.merge` internally, where `groupingBy` tolerates nulls. And the
+four-argument form takes a map factory, which is how you get a `TreeMap` or
+`LinkedHashMap` instead of an unordered `HashMap`.
+
+### What else can `groupingBy` do with a downstream collector?
+
+The downstream collector is what makes `groupingBy` powerful, and knowing more than
+`counting()` is a reliable differentiator.
+
+```java
+// Sum a field per group
+groupingBy(Order::customerId, summingDouble(Order::total))
+// Collect one field instead of whole objects
+groupingBy(Employee::department, mapping(Employee::name, toList()))
+// Filter inside the group, keeping empty groups
+groupingBy(Employee::department, filtering(e -> e.salary() > 100_000, toList()))
+// Reduce to the best element per group
+groupingBy(Employee::department, maxBy(comparing(Employee::salary)))
+// Two-level grouping: groupingBy is itself a collector
+groupingBy(Employee::department, groupingBy(Employee::title))
+```
+
+`mapping` comes up most often in real code, because you rarely want whole objects in
+every bucket. And the difference between `filtering` and filtering upstream is worth a
+sentence: `filtering` keeps a group with an empty list, while
+`stream().filter().collect(groupingBy(...))` drops the group entirely.
+
+### When is a plain loop better?
+
+More often than stream enthusiasm suggests, and saying so is a maturity signal rather
+than a concession.
+
+A loop is clearer when the body has side effects, because a stream advertises a pure
+transformation and a `forEach` that writes to a database is a lie about what the code
+does. It is clearer when you need an index, or an early exit that `limit` and `takeWhile`
+cannot express, or to walk two collections together since streams have no `zip`, or a
+`try`/`catch` in the body, because checked exceptions do not pass through lambdas without
+an obscuring wrapper.
+
+Loops are also faster on small collections, where pipeline setup is not amortised — but
+**for a ten-element list neither choice matters, so readability should decide and the
+performance argument is mostly a distraction.** The rule that holds up: streams for
+declarative transformation, loops for imperative work with control flow or effects.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **Which solution would you ship?** `groupingBy` with `counting` — stateless,
+   parallel-safe, and it extends to counts for free.
+2. **What is wrong with the `Set.add` trick in parallel?** The predicate mutates captured
+   state, so it becomes a data race on a `HashSet` and produces silently wrong results
+   rather than an exception.
+3. **Why is the `Collections.frequency` version bad?** O(n²) — the scan runs per element.
+   Stream syntax says nothing about complexity.
+4. **Are streams lazy, and why does it matter?** Nothing runs until a terminal operation,
+   so a pipeline without one does nothing at all, and laziness is what lets `findFirst`
+   and `anyMatch` short-circuit.
+5. **Does `filter().map()` build an intermediate list?** No — stages are fused, so each
+   element passes through the whole chain in one traversal.
+6. **Why is `sorted` before `filter` wrong?** `sorted` is a barrier that processes
+   everything given to it, and the pipeline runs in written order.
+7. **What does `toMap` do on a duplicate key?** Throws `IllegalStateException`. Use the
+   three-argument form with a merge function; note it also throws on a null value where
+   `groupingBy` would not.
+8. **Three downstream collectors beyond `counting`?** `mapping` for one field,
+   `summingInt` for a total, `maxBy` for the best per group — and `groupingBy` nests
+   inside itself.
+9. **`partitioningBy` versus `groupingBy`?** The boolean-keyed special case, exactly two
+   buckets, both always present.
+10. **Can you reuse a stream?** No — reuse after the terminal operation throws
+    `IllegalStateException`.
+11. **When would you use a plain loop?** Side effects, early exit, indices, two
+    collections in step, or checked exceptions in the body.
+12. **Should you use `parallelStream` here?** Almost never. It runs on the shared common
+    pool, needs a splittable source and a stateless operation, and this problem is already
+    O(n).
+</Callout>
+
+### Where this connects
+
+- [4. Java 8+ Features](/java/4-java-8-features) — the full stream and collector surface, `Optional`, functional interfaces, and the parallel-stream discussion in depth.
+- [Practice: flatMap on Nested Data](/java/practice-flatmap-on-nested-data) — the one-to-many half of the stream question set, including `Optional` chaining.
+- [2. Collections Framework — Deep Dive](/java/2-collections-framework-deep-dive) — why the O(n) claims here are averages, and the `equals`/`hashCode` contract that duplicate detection depends on entirely.
+- [Pattern 1 — Arrays & Hashing](/dsa/pattern-1-arrays-hashing) — the memory-for-time trade this problem is an instance of.

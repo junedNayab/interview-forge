@@ -1,0 +1,352 @@
+---
+title: "4. Transactions & Isolation Levels"
+topic: "sql"
+order: 704
+group: "Advanced SQL"
+difficulty: "hard"
+estimatedMinutes: 25
+tags: [sql, transactions, isolation, mvcc, locking, deadlocks, postgres, mysql]
+format: "mdx"
+summary: "What each ACID letter actually costs, the four anomalies including the lost update the standard forgets, how MVCC lets readers avoid blocking writers and why that creates vacuum, why Postgres SERIALIZABLE aborts instead of locking, and when to pick pessimistic over optimistic locking."
+---
+
+## Layer 1 — The mental model
+
+A transaction is usually taught as a safety feature: wrap your statements in
+`BEGIN` and `COMMIT` and the database protects you. That framing is why people
+get stuck on the follow-ups; it hides what is really going on.
+
+> **Isolation is a dial that trades correctness for concurrency, and every
+> database ships it turned down.** Perfect isolation means transactions behave
+> as if they ran one after another, which is expensive, so the defaults are
+> weaker than most developers assume. Your job is to know which anomalies your
+> default lets through and which of them your code cares about.
+
+The four letters of ACID are not equal partners. Atomicity and durability are
+largely solved for you by the write-ahead log. Consistency in the ACID sense
+means only "the database enforces the constraints you declared" — a property of
+your schema, and the letter that separates people who memorised the acronym from
+people who understand it. **Isolation is the interesting part**: the only
+configurable one, and the only one whose default is not what you would guess.
+
+```
+   Isolation level        Concurrency        Anomalies allowed
+   ------------------     -----------        ----------------------------
+   READ UNCOMMITTED       highest            dirty, non-repeatable, phantom
+   READ COMMITTED         high               non-repeatable, phantom      <- Postgres default
+   REPEATABLE READ        medium             phantom (per the standard)   <- MySQL default
+   SERIALIZABLE           lowest             none
+
+   Lost update is possible at every level below SERIALIZABLE and is the one
+   the SQL standard forgot to name.
+```
+
+---
+
+## Layer 2 — The mechanism
+
+### What each ACID letter actually costs
+
+**Atomicity** comes from the write-ahead log plus, in Postgres, row versions
+tagged with the transaction that created them. A rollback does not undo work in
+place; it marks the transaction aborted and the changes never become visible.
+That is why `ROLLBACK` is nearly instant however much the transaction did, and
+why its cost is paid later, in cleanup.
+
+**Consistency** is the weakest letter. If you never declared a `CHECK` or a
+foreign key, the database stores nonsense and still calls itself consistent.
+
+**Durability** means a committed transaction survives a crash, implemented by
+flushing the WAL to stable storage before acknowledging the commit — one `fsync`
+per commit, which is why group commit exists to batch several into one flush. It
+is also a dial: `synchronous_commit = off` in Postgres, or
+`innodb_flush_log_at_trx_commit = 2` in MySQL, acknowledges before the flush and
+buys throughput for a loss window of a fraction of a second. Sometimes that
+trade is right; knowing it i i s a trade is the point.
+
+**Isolation** costs concurrency, and the rest of this lesson is how.
+
+### The four anomalies
+
+**Dirty read** — you read a row another transaction wrote but has not committed,
+and it then rolls back. Only `READ UNCOMMITTED` permits it, and Postgres does not
+implement that level; asking for it gives you `READ COMMITTED`.
+
+**Non-repeatable read** — you read a row, someone commits an update to it, you
+read it again in the same transaction and get a different value. The row's
+*content* changed underneath you.
+
+**Phantom read** — you run a range query, someone commits an insert or delete
+inside that range, and re-running it returns a different set of rows. The
+*population* changed. No row you saw was modified; new ones appeared.
+
+**Lost update** — two transactions read the same row, both compute a new value
+from it, and both write. The second silently overwrites the first.
+
+```
+ T1: SELECT stock FROM items WHERE id = 1;      -- reads 10
+ T2: SELECT stock FROM items WHERE id = 1;      -- reads 10
+ T1: UPDATE items SET stock = 9 WHERE id = 1;   -- writes 9
+ T2: UPDATE items SET stock = 9 WHERE id = 1;   -- writes 9
+ -- two units sold, one unit deducted
+```
+
+The standard's table omits this one, unfortunately, because it is the most
+common real bug in application code. Note that
+`UPDATE items SET stock = stock - 1 WHERE id = 1 AND stock > 0` has no lost
+update at all, since the read and the write happen inside one statement under
+the row lock. Reach for that before any explicit locking scheme.
+
+| Level | Dirty read | Non-repeatable read | Phantom | Lost update |
+|---|---|---|---|---|
+| READ UNCOMMITTED | possible | possible | possible | possible |
+| READ COMMITTED | prevented | possible | possible | possible |
+| REPEATABLE READ | prevented | prevented | possible per the standard, prevented by InnoDB gap locks | prevented in Postgres by an error, possible in MySQL |
+| SERIALIZABLE | prevented | prevented | prevented | prevented |
+
+### The defaults differ, and the difference matters
+
+**Postgres defaults to READ COMMITTED. MySQL/InnoDB defaults to REPEATABLE
+READ.** The same application code behaves differently on the two engines, and
+this is a favourite question because it catches people who learned one engine
+and assumed it was SQL.
+
+At `READ COMMITTED` each *statement* takes a fresh snapshot, so two `SELECT`s in
+one transaction can see different data. At `REPEATABLE READ` the snapshot is
+taken once per *transaction*, so every statement sees one frozen view. A report
+running several queries that must agree is therefore wrong at `READ COMMITTED`
+and right at `REPEATABLE READ`; conversely a long `REPEATABLE READ` transaction
+pins an old snapshot whose row versions cannot be cleaned up.
+
+### MVCC: how readers avoid blocking writers
+
+Multi-Version Concurrency Control is the mechanism behind all of this. **An
+update never overwrites a row in place. It creates a new version and leaves the
+old one readable.** Each transaction sees the versions that were current when
+its snapshot was taken.
+
+In Postgres every row carries two hidden columns, `xmin` (the transaction that
+created this version) and `xmax` (the one that deleted or superseded it). A
+snapshot is a transaction id plus the set of transactions in flight when it was
+taken, and a version is visible if its `xmin` committed before the snapshot and
+its `xmax` is absent or uncommitted at that moment. An `UPDATE` is physically an
+insert plus setting `xmax` on the old version. InnoDB gets there differently:
+the current row lives in the clustered index and older versions are
+reconstructed on demand through a roll pointer into the **undo log**.
+
+What MVCC buys is the line to say out loud: **readers do not block writers and
+writers do not block readers.** A `SELECT` never waits for an `UPDATE`; it reads
+an older version. Only writer-writer conflicts on the same row wait, and row
+locks handle those. What it costs is dead versions.
+
+<Callout type="pitfall" title="Bloat, vacuum, and why a long transaction is a production hazard">
+Old row versions do not disappear at commit; they become garbage some later
+process must collect. In Postgres that is `VACUUM`, normally autovacuum, which
+marks dead tuples' space reusable and maintains the visibility map that
+index-only scans depend on. InnoDB has an equivalent background purge thread.
+
+Neither can clean up a version some open snapshot might still need. So an idle
+transaction left open in a console, a connection-pool leak, or a batch job that
+begins a transaction and then spends twenty minutes calling an external API
+**holds back cleanup across the entire database**. The symptoms are a table that
+grows while its row count does not, queries slowing because they scan dead
+tuples, and index-only scans reverting to heap fetches. Other costs stack on
+top: it holds its locks until commit, occupies a connection, and in Postgres can
+threaten transaction id wraparound, at which point the database refuses writes
+to protect itself.
+
+The rules are concrete. Keep transactions short and never let one span a network
+call to another service. Set `idle_in_transaction_session_timeout` so abandoned
+transactions are killed. Monitor the age of the oldest running transaction as a
+first-class metric, not something you look at during an incident.
+</Callout>
+
+### REPEATABLE READ is not one thing
+
+Both engines use the name and they behave differently, which is exactly the kind
+of detail that separates answers.
+
+**InnoDB prevents phantoms at REPEATABLE READ** using **next-key locks** — a row
+lock plus a **gap lock** on the interval between index entries — so a range query
+with `FOR UPDATE` locks the matching rows and the gaps around them and nobody
+can insert into the range. That is stronger than the standard requires, and it
+is why InnoDB deadlocks more than people expect. One asymmetry worth knowing:
+locking reads see the *current* data rather than the snapshot.
+
+**Postgres at REPEATABLE READ gives true snapshot isolation** — no phantoms
+either, since your snapshot excludes rows created after it. But it handles
+conflicting writes differently: updating a row another transaction modified
+since your snapshot aborts you with `could not serialize access due to
+concurrent update` rather than blocking, so **your application must retry.**
+MySQL would block and then apply your update on top of the newer row, which is
+how a lost update happens there and not in Postgres.
+
+### SERIALIZABLE in Postgres is a different animal
+
+Traditional `SERIALIZABLE` uses two-phase locking, which serialises your
+throughput along with your transactions, which is why nobody turns it on.
+
+Postgres since 9.1 implements **Serializable Snapshot Isolation (SSI)**.
+Transactions still run on snapshots and take no blocking locks; instead the
+engine tracks read-write dependencies between concurrent transactions with
+in-memory predicate locks and watches for the pattern that proves a
+serialisation anomaly — two consecutive read-write edges forming a dangerous
+structure. On finding one it aborts a transaction with SQLSTATE `40001`.
+
+Two things follow, both commonly missed. **Nothing blocks, so throughput stays
+high** when conflicts are rare; you pay in aborts rather than waiting. And
+**your application must handle serialization failures with a retry loop.** A
+transaction that failed with `40001` did nothing, so retrying from the beginning
+is safe. Turning on `SERIALIZABLE` without a retry loop does not make your
+system correct, it makes it fail randomly under load — and the retry must sit
+*outside* the transaction boundary.
+
+MySQL's `SERIALIZABLE` is the classic implementation: every plain `SELECT`
+becomes a shared-mode locking read, so readers block writers and the concurrency
+cost is real.
+
+### Pessimistic versus optimistic locking
+
+Both solve the lost update. They differ in what they assume about contention.
+
+**Pessimistic** — take the lock before you read.
+
+```sql
+BEGIN;
+SELECT stock FROM items WHERE id = 1 FOR UPDATE;  -- exclusive row lock, others wait
+UPDATE items SET stock = stock - 1 WHERE id = 1;
+COMMIT;                                            -- lock released
+```
+
+`FOR SHARE` (`LOCK IN SHARE MODE` in MySQL) takes a shared lock instead: other
+shared readers proceed, writers wait. Use it when a row must stay unchanged but
+you are not modifying it, such as checking a parent exists before inserting a
+child. Two modifiers matter. `FOR UPDATE NOWAIT` fails immediately, which suits
+interactive paths. `FOR UPDATE SKIP LOCKED` skips rows other transactions hold,
+the standard way to build a work queue — each worker takes the next unlocked
+job.
+
+**Optimistic** — no lock; detect the conflict at write time with a version
+column.
+
+```sql
+-- read version 7, compute, then:
+UPDATE items SET stock = 9, version = 8
+WHERE id = 1 AND version = 7;
+-- zero rows affected: someone else got there first, so reload and retry
+```
+
+This is what JPA's `@Version` does, with Spring Data raising
+`OptimisticLockingFailureException` when the update affects zero rows. See
+[transaction management](/java/5-transaction-management-transactional) for the
+application-side wiring.
+
+**The decision rule.** Optimistic when conflicts are rare and think-time between
+read and write is long — a user filling in a form, where a pessimistic lock
+would be held for minutes. Pessimistic when conflicts are frequent, such as the
+hot inventory row in a flash sale where optimistic retries would livelock, and
+the critical section is short. Before either, ask whether one atomic statement
+would do.
+
+### Deadlocks
+
+A deadlock is a cycle in the waits-for graph: T1 holds A and wants B while T2
+holds B and wants A.
+
+```
+ T1: UPDATE accounts SET ... WHERE id = 1;   -- holds lock on 1
+ T2: UPDATE accounts SET ... WHERE id = 2;   -- holds lock on 2
+ T1: UPDATE accounts SET ... WHERE id = 2;   -- waits for T2
+ T2: UPDATE accounts SET ... WHERE id = 1;   -- waits for T1  -> cycle
+```
+
+Databases **detect** rather than prevent this. InnoDB checks for a cycle as soon
+as a lock request would block; Postgres waits `deadlock_timeout` (one second)
+first, since most waits resolve themselves and detection is not free. Either way
+the engine picks a **victim**, usually the transaction that has done the least
+work, and rolls it back.
+
+Three consequences. **The application must catch the error and retry**, because
+a deadlock victim is a normal operating condition, not a bug report. **The
+prevention is consistent lock ordering** — if every transaction touches accounts
+in ascending id order, no cycle can form. And **long transactions and coarse
+locks make deadlocks likelier** by widening the window for a cycle.
+
+Distinguish a deadlock from a **lock wait timeout**: a deadlock is a detected
+cycle and fails fast, while a timeout means somebody held a lock too long, which
+points at a long-running transaction rather than lock ordering.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Explain ACID, and which letter is weakest."** Consistency — it only means
+   the database enforces the constraints you declared. Isolation is the
+   configurable one, and the one worth discussing.
+2. **"What does durability cost?"** An `fsync` of the WAL before the commit is
+   acknowledged, tunable at the price of a loss window.
+3. **"Name the anomalies."** Dirty read, non-repeatable read, phantom read and
+   lost update — the last is not in the standard and is the one you meet.
+4. **"Non-repeatable read versus phantom?"** A row whose contents changed,
+   versus rows appearing or disappearing from a range.
+5. **"What are the defaults?"** Postgres `READ COMMITTED`, MySQL `REPEATABLE
+   READ` — snapshots per statement versus per transaction.
+6. **"What is MVCC?"** Writes create new row versions instead of overwriting,
+   and each transaction reads what its snapshot sees. Postgres tags versions
+   with `xmin`/`xmax`; InnoDB rebuilds them from the undo log.
+7. **"What does MVCC buy?"** Readers never block writers and writers never block
+   readers. Only same-row writer conflicts wait.
+8. **"What does MVCC cost?"** Dead row versions, so you need vacuum or undo
+   purge, and a table can bloat while its row count stays flat.
+9. **"Why is a long transaction dangerous?"** It holds locks, ties up a
+   connection, and pins a snapshot so cleanup stalls database-wide.
+10. **"Does MySQL's `REPEATABLE READ` allow phantoms?"** Not in practice —
+    next-key locks cover the gaps between index entries. Stronger than the
+    standard, and a source of deadlocks.
+11. **"How does Postgres implement `SERIALIZABLE`?"** Serializable Snapshot
+    Isolation: it tracks read-write dependencies and aborts on a dangerous
+    pattern, rather than locking.
+12. **"What must the application do under it?"** Catch SQLSTATE `40001` and
+    retry the whole transaction, from outside its boundary.
+13. **"Optimistic or pessimistic?"** Optimistic when conflicts are rare or think
+    time is long; pessimistic when contention is high and the critical section
+    is short. Before either, try one atomic `UPDATE`.
+14. **"How do you implement a job queue in SQL?"**
+    `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1` in a transaction.
+15. **"Why do deadlocks happen and what do you do?"** Inconsistent lock
+    ordering. The database kills a victim and the application retries; prevent
+    it by locking in a consistent order.
+16. **"Deadlock versus lock wait timeout?"** A detected cycle failing fast,
+    versus somebody holding a lock too long.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Read-modify-write in application code** with no version column, no
+  `FOR UPDATE` and no atomic expression. The lost update, and the commonest
+  concurrency bug in business software.
+- **A transaction spanning a call to another service.** The remote system's
+  latency becomes your lock duration.
+- **Turning on `SERIALIZABLE` with no retry handling.**
+- **Assuming a `@Transactional` method is serialisable.** It runs at the
+  database default.
+- **Swallowing a serialization or deadlock error** instead of retrying.
+- **Connection-pool leaks leaving transactions idle.** Set
+  `idle_in_transaction_session_timeout` and alert on transaction age.
+- **Assuming a rollback frees space immediately.** Dead versions stay until
+  vacuum reaches them.
+- **Locking rows in whatever order they arrive.**
+</Callout>
+
+### Where this connects
+
+- [3. Indexing and performance](/sql/3-indexing-performance) — vacuum and the
+  visibility map, and why InnoDB takes gap locks on index ranges.
+- [5. Query optimization checklist](/sql/5-query-optimization-checklist) — bloat
+  as a cause of degrading plans.
+- [Java: transaction management with @Transactional](/java/5-transaction-management-transactional)
+  — propagation, rollback rules, `@Version`, and where the retry loop belongs.
+- [OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency) — the
+  same deadlock conditions one layer down.
+- [System design: databases](/system-design/6-databases) — isolation once the
+  data no longer lives on one machine.

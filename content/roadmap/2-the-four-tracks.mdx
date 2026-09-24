@@ -1,0 +1,290 @@
+---
+title: "2. The four tracks"
+topic: "roadmap"
+order: 2
+difficulty: "easy"
+estimatedMinutes: 17
+tags: [roadmap, tracks, dsa, system-design, lld, java, sql, behavioral]
+format: "mdx"
+summary: "What each of the four interview tracks is scored on, roughly how much of the outcome it decides at mid-to-senior level, where you currently stand on each, and the exact lesson order to work through."
+---
+
+## The four things you are being graded on
+
+An interview loop is not one assessment with several parts. It is four separate
+assessments that happen to occur on the same day, scored by different people
+against different rubrics, and then combined. That structure has one dominant
+consequence: **your weakest track sets your ceiling**, because a weak round is
+rarely rescued by a strong one.
+
+| Track | Rounds it feeds | Share of outcome at mid-to-senior | Your position |
+|---|---|---|---|
+| **A. DSA and coding** | OA, phone screen, 2 onsite rounds | ~30% | Strong — maintenance, not growth |
+| **B. Java and SQL depth** | Backend deep dive, project interrogation | ~20% | Good foundations, thin on internals |
+| **C. System design (HLD + LLD)** | 1–2 onsite rounds, sometimes machine coding | ~35% | **The gap. Main focus.** |
+| **D. CS fundamentals + behavioral** | Breadth questions, HM round | ~15% | Unprepared rather than weak |
+
+The percentages are a rough weighting, not a published rubric — companies differ
+and the split moves with level. Treat them as a guide to time allocation rather
+than a fact. The one number that is not negotiable in spirit is track C: at
+senior level, design is where candidates with strong coding scores get rejected.
+
+## Track A — DSA and coding
+
+### What it is assessed on
+
+Not whether you can solve hard problems given a week. Four narrower things:
+
+- **Pattern recognition speed.** Can you tell within two or three minutes that
+  this is a sliding window problem? Interview problems are almost always a known
+  pattern in unfamiliar clothing, and the candidates who do well are the ones who
+  recognise rather than derive.
+- **Optimal complexity.** A working brute force scores partial credit. Reaching
+  the intended complexity is the bar, and you should be able to state it.
+- **Correctness on edge cases.** Empty input, one element, duplicates, overflow,
+  the boundary of the loop. Interviewers keep a mental list.
+- **Communication while solving.** Silence is scored as absence of reasoning.
+
+### Where you stand
+
+Strong. Several hundred problems solved is well past the threshold where
+additional volume helps. **The risk on this track is not weakness, it is
+rust** — pattern recall degrades fast and comes back fast.
+
+Your realistic failure mode is freezing on a problem you would solve comfortably
+at your desk, because you have not done a timed, narrated attempt in a year.
+
+### What to do, in order
+
+1. Take [how to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+   and use its script on every practice problem from now on. The script is the
+   thing that transfers to the interview, not the problems.
+2. Diagnose: skim the fifteen pattern lessons from
+   [arrays and hashing](/dsa/pattern-1-arrays-hashing) through
+   [bit manipulation and math](/dsa/pattern-15-bit-manipulation-math), and for
+   each one, without solving anything, decide whether you could write the
+   template from memory. You will find three or four you cannot. Those are your
+   weak patterns.
+3. Drill only the weak ones. For most people coming back after a gap that means
+   [dynamic programming](/dsa/pattern-12-dynamic-programming),
+   [graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find),
+   [backtracking](/dsa/pattern-10-backtracking) and
+   [tries](/dsa/pattern-8-tries-prefix-trees).
+4. Keep [the complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this)
+   genuinely memorised. You will be asked to state complexity out loud and
+   hesitating there costs more than it should.
+5. Then switch to maintenance: one or two timed mediums a day, narrated out
+   loud, forever. [The six-week sprint](/dsa/6-week-dsa-sprint-pairs-with-the-master-roadmap-phase-1-2)
+   is the structured version if you want one.
+6. Before the loop, read
+   [coding round survival tips](/dsa/coding-round-survival-tips).
+
+**Time budget: 30 to 45 minutes a day, as a secondary activity.** Do not let this
+track expand — it is the most comfortable one and therefore the one that steals
+time from track C.
+
+## Track B — Java and SQL depth
+
+### What it is assessed on
+
+This is the round where the interviewer stops asking puzzles and starts asking
+whether you understand the tools you claim to use. It is heavily biased toward
+things you would only know from having hit them.
+
+- **Language semantics below the API.** How HashMap actually resolves collisions,
+  what `volatile` guarantees, why `equals` and `hashCode` travel together, what
+  the JVM does with your garbage.
+- **Framework behaviour, not framework usage.** What `@Transactional` does to a
+  self-invocation, when a lazy association throws, what the persistence context
+  is doing between your two repository calls.
+- **SQL that goes past joins.** Window functions, what the planner does with your
+  query, which index a predicate can actually use.
+- **Your own project, interrogated.** Expect forty-five minutes of "why did you
+  do it that way?" on whatever you listed.
+
+### Where you stand
+
+Foundations are solid — Spring Boot basics, working SQL, a real project. The gap
+is depth: knowing that JPA has lazy loading versus being able to explain what
+happens to a lazy collection after the session closes and why.
+
+### What to do, in order
+
+Core Java first, because it underpins everything else:
+
+1. [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+   the most reliably asked topic in the entire track.
+2. [Concurrency](/java/3-concurrency-senior-must-have) — the actual senior
+   differentiator, and the one people bluff. Do the
+   [producer-consumer](/java/practice-producer-consumer) and
+   [thread-safe singleton](/java/practice-thread-safe-singleton) exercises rather
+   than only reading.
+3. [Java 8+ features](/java/4-java-8-features) and
+   [OOP and design principles](/java/5-oop-design-principles) — the second feeds
+   straight into LLD.
+4. [JVM internals](/java/1-jvm-internals) — enough to answer a garbage collection
+   question without guessing.
+5. [Exception handling](/java/6-exception-handling) and
+   [generics](/java/7-generics) as a second pass.
+
+Then the Spring and data layer, which is where your project lives:
+
+6. [Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate), then
+   [the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) —
+   which is asked more often than any other JPA question, by a distance.
+7. [Transaction management](/java/5-transaction-management-transactional) — read
+   this one carefully, because it explains why the `@Transactional` on your
+   URL shortener's resolve method is a problem.
+8. [Spring internals — IoC, beans and AOP proxies](/java/8-spring-internals-ioc-beans-and-aop-proxies),
+   which is what makes the previous lesson make sense.
+
+SQL is a refresher rather than a build, since you already know it:
+
+9. [Indexing and performance](/sql/3-indexing-performance) and
+   [query optimization](/sql/5-query-optimization-checklist) — the two most
+   likely to come up in a backend round.
+10. [Window functions](/sql/2-window-functions-the-senior-differentiator) if they
+    are rusty, then
+    [practice problems](/sql/practice-sql-problems) to keep them warm.
+
+Before the loop, skim
+[what seniors say in interviews](/java/quick-reference-what-seniors-say-in-interviews) —
+it is a list of phrasings that signal depth, which is a real and slightly
+cynical part of how this round is scored.
+
+**Time budget: three to four weeks as a primary track, then light maintenance.**
+
+## Track C — System design, HLD and LLD
+
+### What it is assessed on
+
+These are two different rounds with two different rubrics, and conflating them is
+a common preparation mistake.
+
+**HLD** is assessed on process more than output. There is no correct answer. The
+interviewer is scoring whether you scoped the problem, estimated with numbers and
+drew conclusions from them, justified each component by the bottleneck it solves,
+went one level below the buzzword when pushed, and criticised your own design
+before they did.
+
+**LLD and machine coding** are assessed on class modelling under time pressure:
+whether your abstractions are right, whether the design extends without
+rewriting, whether you know the pattern vocabulary, and — in machine coding —
+whether it actually runs.
+
+### Where you stand
+
+**This is the gap, and it is the one that decides the outcome at senior level.**
+You have not done system design before, which means you are starting from zero on
+roughly a third of the assessment.
+
+There is one large compensating factor: you have built a URL shortener with
+Postgres, Redis, JWT and a rate limiter. That is not a toy relative to the
+canonical interview question — it *is* the canonical interview question, at small
+scale. Most of the concepts in the HLD track already exist in your code, which
+makes them far easier to internalise than they are for someone learning them
+abstractly.
+
+### What to do, in order
+
+HLD first, because it is the round with more weight:
+
+1. [The framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview) —
+   read it twice. Everything else assumes the six phases.
+2. [Back-of-the-envelope estimation](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize) —
+   memorise the number set. This is genuinely rote and it pays for itself in
+   every design round.
+3. Building blocks in order:
+   [scaling](/system-design/3-scaling-vertical-vs-horizontal),
+   [load balancing](/system-design/4-load-balancing),
+   [caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+   (start here if you want a confidence win — you already do cache-aside),
+   [databases](/system-design/6-databases),
+   [CAP and consistency models](/system-design/7-cap-theorem-consistency-models),
+   [async processing and queues](/system-design/8-asynchronous-processing-message-queues),
+   [rate limiting](/system-design/9-rate-limiting-you-already-have-a-basic-version).
+4. [Other building blocks](/system-design/10-other-building-blocks-to-know),
+   [consistent hashing](/system-design/13-consistent-hashing),
+   [Kafka](/system-design/14-kafka-and-event-streaming) and
+   [microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+   as the second layer.
+5. [The reference architecture](/system-design/11-a-reference-architecture-how-the-pieces-fit)
+   to tie the components together into one picture.
+6. Then the case studies, starting with
+   [the URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+   because it is yours, through
+   [rate limiter](/system-design/case-2-design-a-distributed-rate-limiter),
+   [news feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline),
+   [chat](/system-design/case-4-design-a-chat-system-whatsapp-messenger) and
+   [notifications](/system-design/case-5-design-a-notification-system-email-sms-push).
+7. [How to practice](/system-design/12-how-to-practice-do-this-dont-just-read) and
+   [how to self-grade](/system-design/how-to-self-grade-your-practice) — do not
+   skip these. Reading case studies without timed, spoken attempts produces the
+   illusion of competence and nothing else.
+
+LLD in parallel or immediately after:
+
+8. [HLD versus LLD](/lld/hld-vs-lld-get-this-clear-first) first, to stop the two
+   rounds blurring together.
+9. [OOP applied](/lld/part-1-the-foundation-oop-the-4-pillars-applied) and
+   [SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview) — SOLID
+   is the vocabulary the round is graded in.
+10. [Design patterns](/lld/part-3-design-patterns-the-lld-vocabulary), then
+    [the method](/lld/part-4-how-to-drive-an-lld-interview-the-method) and the
+    [worked parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical).
+11. [Practice problems](/lld/part-6-practice-problems-beginner-advanced) with the
+    [four-week plan](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build),
+    finishing with
+    [machine coding survival tips](/lld/part-8-machine-coding-round-survival-tips).
+
+**Time budget: this is the primary track for roughly half of your total
+preparation time.** If something has to be cut, cut track A maintenance, not
+this.
+
+## Track D — CS fundamentals and behavioral
+
+### What it is assessed on
+
+Two quite different things bundled together because they are both breadth.
+
+**CS fundamentals** appears as five-minute detours rather than a dedicated round:
+what happens when you type a URL into a browser, how TCP differs from UDP, what a
+deadlock is, what idempotency means. The bar is a clear two-minute answer, not
+depth. Fumbling one of these is a small negative that accumulates.
+
+**Behavioral** is assessed on evidence of ownership, conflict handling and
+accountability. It is the round most people under-prepare, and — as
+[the hiring process lesson](/roadmap/1-how-product-company-hiring-actually-works)
+explains — at senior level it is frequently the deciding input.
+
+### Where you stand
+
+Not weak, unprepared. You have the knowledge for most of the fundamentals; what
+you lack is the ability to produce a crisp spoken answer. Behavioral is a genuine
+build, because it requires writing and rehearsing your own stories.
+
+### What to do, in order
+
+1. Read the four CS fundamentals lessons once each:
+   [networking](/cs-fundamentals/1-networking),
+   [operating systems and concurrency](/cs-fundamentals/2-operating-systems-concurrency),
+   [distributed systems](/cs-fundamentals/3-distributed-systems-concepts),
+   [security](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements).
+   The security one connects directly to the hardcoded credentials in your
+   project's configuration, which is worth fixing before anyone reads it.
+2. Then use [the rapid-fire self-test](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud)
+   as the actual study method. Answer out loud, timed. Anything you cannot answer
+   in two minutes goes back on the list.
+3. Behavioral: [general behavioral tips](/behavioral/general-behavioral-tips)
+   first, then draft your own stories through the four story lessons. Budget an
+   evening for the anchor lesson and an hour per story, most of it writing.
+
+**Time budget: two to three hours a week, spread out.** This track responds badly
+to cramming and well to repetition.
+
+## What to do with this
+
+Go to [the integrated plan](/roadmap/3-the-integrated-plan-everything-sequenced-your-chart),
+which sequences all four into weeks with one primary focus at a time. The
+ordering there is not arbitrary: it front-loads track C because it is your gap
+and because it is the slowest to improve.

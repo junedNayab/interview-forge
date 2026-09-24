@@ -1,0 +1,343 @@
+---
+title: "15. Microservice reliability patterns"
+topic: "system-design"
+order: 210.3
+group: "Fundamentals"
+difficulty: "hard"
+estimatedMinutes: 17
+tags: [microservices, saga, outbox, idempotency, circuit-breaker, resilience]
+prerequisites: [8-asynchronous-processing-message-queues]
+format: "mdx"
+summary: "The dual-write problem and the outbox that fixes it, sagas instead of distributed transactions, idempotency keys, and the retry/timeout/circuit-breaker trio that stops one slow service taking down the fleet."
+---
+
+## Layer 1 — The mental model
+
+A monolith with one database gets correctness for free: `@Transactional` wraps
+everything, and either all of it happens or none of it does.
+
+Split that into services with separate databases and the guarantee vanishes.
+This innocent method is broken:
+
+```java
+@Transactional
+public void placeOrder(Order order) {
+    orderRepository.save(order);              // Postgres
+    kafkaTemplate.send("orders", toEvent(order));  // Kafka — NOT in the transaction
+}
+```
+
+Two independent systems, no atomicity. Three ways it fails:
+
+1. The DB commit succeeds, the broker send fails → order exists, **nobody is
+   ever notified.** Silent, permanent inconsistency.
+2. The send succeeds, the DB commit rolls back → downstream services process an
+   order that **does not exist.**
+3. The send succeeds, the process is killed before commit → same as 2.
+
+This is the **dual-write problem**, and it is the root of most distributed-systems
+interview questions. Every pattern below is a way of avoiding a dual write or
+surviving one.
+
+The framing to carry in: **you cannot have atomic commits across services, so
+you trade atomicity for eventual consistency plus compensation, and you make
+every operation safe to repeat.**
+
+---
+
+## Layer 2 — The mechanism
+
+### Why not two-phase commit?
+
+2PC exists and does give atomicity: a coordinator asks everyone to prepare, then
+tells everyone to commit. It is avoided in practice because:
+
+- **It blocks.** Between prepare and commit, participants hold locks. If the
+  coordinator dies after prepare, they hold those locks *indefinitely* — they
+  cannot unilaterally decide, since the coordinator may have already told someone
+  else to commit.
+- **The coordinator is a single point of failure** and must itself be replicated
+  to be trusted, which is a consensus problem.
+- **Availability multiplies down.** Every participant must be up for any write to
+  succeed. Five services at 99.9% each gives 99.5% combined.
+- **Most things don't support it.** No HTTP API, Kafka, DynamoDB, Cassandra, or
+  Stripe implements XA.
+
+Mention 2PC, then reject it with the blocking argument. Knowing *why* it's
+rejected is the signal; pretending it doesn't exist isn't.
+
+### The transactional outbox
+
+The fix for the dual write is to **make it a single write.** Insert the event
+into an `outbox` table in the *same local transaction* as the business data:
+
+```java
+@Transactional                     // one DB, one transaction — atomic again
+public void placeOrder(Order order) {
+    orderRepository.save(order);
+    outboxRepository.save(new OutboxEvent(
+        UUID.randomUUID(), "OrderPlaced", order.id(), toJson(order)));
+}
+```
+
+A separate process then reads the outbox and publishes:
+
+```
+┌──────────────┐   one local tx   ┌──────────────────┐
+│ orders table │ ◄──────────────► │  outbox table    │
+└──────────────┘                  └────────┬─────────┘
+                                           │ poller or CDC
+                                           ▼
+                                      ┌─────────┐
+                                      │  Kafka  │
+                                      └─────────┘
+```
+
+Two ways to drain it:
+
+- **Polling publisher.** A scheduled job selects unpublished rows, publishes,
+  marks them sent. Simple, no extra infrastructure, adds poll-interval latency,
+  and needs `SELECT ... FOR UPDATE SKIP LOCKED` so multiple instances don't
+  double-publish.
+- **Change data capture.** Debezium tails the database's write-ahead log and
+  publishes inserts automatically. No polling, near-zero latency, no load on the
+  table — at the cost of running Debezium and Kafka Connect.
+
+Either way you get **at-least-once** delivery: the publisher can crash after
+publishing and before marking sent, so the event goes out twice. Which is
+precisely why the next pattern is mandatory rather than optional.
+
+<Callout type="pitfall" title="The outbox is not the only dual write in that flow">
+A common half-answer stops at the outbox. The consumer has the mirror-image
+problem: it receives the event, writes to *its* database, then commits the Kafka
+offset. Crash in between, and it reprocesses.
+
+So both ends need work: the producer needs the outbox, the consumer needs
+idempotency. Saying only one of those is what a partial answer sounds like.
+</Callout>
+
+### Idempotency: the pattern that makes everything else safe
+
+**Idempotent** means applying an operation twice has the same effect as applying
+it once. Once every delivery is at-least-once, idempotency is what makes
+at-least-once *behave* as exactly-once.
+
+Three mechanisms, in rough order of preference:
+
+**1. Natural idempotency.** `SET status = 'SHIPPED'` is already idempotent.
+`balance = balance - 100` is not. Prefer absolute assignments over deltas where
+the domain allows it.
+
+**2. A processed-events table.** Deduplicate on the event ID, in the same
+transaction as the work:
+
+```java
+@Transactional
+public void on(OrderPlaced event) {
+    if (!processed.insertIfAbsent(event.id())) return;  // unique constraint
+    inventory.reserve(event.orderId(), event.items());
+}
+```
+
+The uniqueness must be enforced by the database, not an `if (exists)` check —
+two concurrent redeliveries both pass the check and both do the work. Let the
+unique index reject the loser.
+
+**3. Client-supplied idempotency keys**, for synchronous APIs. The client sends a
+UUID it generated; the server stores key → response and replays the stored
+response on a repeat:
+
+```
+POST /payments
+Idempotency-Key: 7f3c1e40-...
+
+First call  → charge the card, store (key → 201 + body), return it
+Repeat call → return the stored response. Card charged exactly once.
+```
+
+This is how Stripe works, and it's the right answer to "how do you stop a user
+double-clicking Pay from being charged twice?" Note the necessary details: the
+key must be stored *with* the response (not just as a marker), must be scoped to
+the caller, and needs a TTL. A concurrent retry arriving while the first is
+in-flight should get `409`, not a second charge.
+
+### Sagas: distributed transactions without distributed transactions
+
+A **saga** is a sequence of local transactions where each step has a
+**compensating action** that semantically undoes it. Instead of rolling back,
+you roll *forward* through corrections.
+
+```
+Order:      create ──► reserve stock ──► charge card ──► ship
+                                              ✗ fails
+Compensate: cancel  ◄── release stock ◄──────┘
+```
+
+The critical point: **a compensation is not a rollback.** You cannot un-send an
+email or un-ship a package. You send an apology email, you issue a refund, you
+create a return label. Compensations are business operations, and designing them
+is domain work, not plumbing.
+
+**Choreography** — each service listens for events and emits the next one. No
+central component; the workflow is implicit in the event subscriptions. Fine for
+3 steps, and progressively harder to reason about after that, because no single
+place tells you what the process does or where a stuck order is.
+
+**Orchestration** — a coordinator explicitly drives each step and compensation.
+The workflow is readable in one file, and you can query its state. That's worth a
+lot once it matters, and it's why Temporal, Camunda and AWS Step Functions
+exist. The tradeoff is a component that must itself be durable and available.
+
+Default recommendation to give: **choreography for two or three steps,
+orchestration beyond that or whenever money is involved.**
+
+<Callout type="pitfall" title="Sagas have no isolation — this is the follow-up people miss">
+ACID minus the I. Partial saga state is **visible to everyone** while the saga is
+running, which produces anomalies that don't exist in a database transaction:
+
+- **Dirty reads.** Stock is reserved but the payment later fails. Meanwhile
+  another request saw the reduced stock and was refused a sale that should have
+  succeeded.
+- **Lost updates.** A concurrent saga overwrites a field that a compensation
+  later needs to restore.
+
+Standard countermeasures, worth naming:
+
+- **Semantic lock** — mark the record with an in-progress state (`PENDING_PAYMENT`)
+  so other operations know to wait or refuse. The most commonly used.
+- **Commutative updates** — design operations so order doesn't matter (`reserve`
+  and `release` commute; `set` doesn't).
+- **Reread value / version check** — optimistic locking before compensating, so
+  you don't clobber a newer write.
+- **Pessimistic ordering** — sequence steps so the most-likely-to-fail one runs
+  first, minimising the blast radius of a compensation.
+</Callout>
+
+### Timeouts, retries, and the failures they cause
+
+These are the three that interviewers probe for *second-order* understanding,
+because each naive implementation makes outages worse.
+
+**Timeouts.** A request with no timeout is a thread leaked until the OS gives up
+— potentially minutes. Under load, every thread ends up parked on a dead
+dependency and a healthy service stops serving. Every network call needs an
+explicit timeout, and timeouts should get **tighter as you go deeper**: if your
+caller gives up after 2s, a 5s call to your own dependency is pure waste.
+
+**Retries.** Necessary for transient failures, and dangerous:
+
+- **Only retry idempotent operations.** Retrying a non-idempotent POST on a
+  timeout may double-charge — the timeout tells you nothing about whether the
+  server processed it.
+- **Exponential backoff with jitter**, not fixed intervals. Without jitter,
+  every client that failed at the same moment retries at the same moment,
+  forever, in lockstep: a thundering herd that keeps the service down.
+- **Retry amplification.** Three retries at each of three layers is up to 27
+  requests for one user action. A struggling service gets 27× its normal load at
+  exactly the wrong time — retries turn a brownout into an outage. Retry at *one*
+  layer, preferably the outermost, and use a **retry budget** (cap retries at,
+  say, 10% of total requests) so retries can never dominate traffic.
+
+**Circuit breaker.** Stop calling a dependency that is clearly broken, so you
+fail fast instead of piling up threads on doomed calls:
+
+```
+CLOSED ──failure rate exceeds threshold──► OPEN ──after wait duration──► HALF_OPEN
+   ▲                                                                       │
+   └──────────── probe calls succeed ──────────────────────────────────────┘
+                  probe fails → back to OPEN
+```
+
+- **CLOSED** — normal; failures counted in a sliding window.
+- **OPEN** — reject immediately without calling. This is the point: it protects
+  *you* from thread exhaustion and gives the dependency room to recover.
+- **HALF_OPEN** — let a few probes through to test recovery.
+
+```java
+// Resilience4j — the standard choice on Spring Boot.
+@CircuitBreaker(name = "inventory", fallbackMethod = "reserveFallback")
+@Retry(name = "inventory")
+@TimeLimiter(name = "inventory")
+public CompletableFuture<Reservation> reserve(String orderId) { ... }
+
+private CompletableFuture<Reservation> reserveFallback(String orderId, Throwable t) {
+    return CompletableFuture.completedFuture(Reservation.deferred(orderId));
+}
+```
+
+Note the ordering when stacking these: retry *inside* the circuit breaker means
+one logical call consumes several failures; the usual arrangement is
+`Retry(CircuitBreaker(TimeLimiter(call)))`, so an open circuit short-circuits
+before retries are spent. The fallback matters as much as the breaker — degrade
+to cached data, a queued request, or a reduced feature. A breaker whose fallback
+is a 500 has only changed how fast you fail.
+
+**Bulkhead.** Separate thread pools or semaphore limits per dependency, so a slow
+one can't consume every thread in the service. The name is from ship
+compartments: one flooded section doesn't sink the vessel.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Save to the DB and publish an event — how do you make that atomic?"**
+   You can't, directly. Transactional outbox: event row in the same local
+   transaction, drained by a poller or CDC.
+2. **"Why not 2PC?"** Blocking locks if the coordinator dies, coordinator is a
+   SPOF, availability multiplies down, and most modern systems don't support XA.
+3. **"Outbox gives at-least-once. Then what?"** Idempotent consumers — a
+   processed-events table with a DB-enforced unique constraint, in the same
+   transaction as the work.
+4. **"Stop a double-clicked Pay button charging twice."** Client-generated
+   idempotency key; server stores key → response and replays it. Concurrent
+   in-flight retry gets a 409.
+5. **"What's a saga, and how is compensation different from rollback?"**
+   Compensation is a *business* operation that semantically undoes a committed
+   step. You can't un-send an email; you refund, apologise, issue a return.
+6. **"Choreography or orchestration?"** Choreography for 2–3 steps; orchestration
+   once you need to ask "where is order 123 stuck?" or money is involved.
+7. **"What do sagas lose relative to ACID?"** Isolation. Partial state is visible
+   — dirty reads, lost updates. Countered with semantic locks, commutative
+   operations, version checks.
+8. **"Why is retrying dangerous?"** Non-idempotent double-apply; thundering herd
+   without jitter; amplification across layers turning a brownout into an outage.
+   Retry at one layer, with jitter, under a budget.
+9. **"What does a circuit breaker actually protect?"** Primarily the *caller* —
+   from exhausting threads on calls that will fail. Secondarily the callee, by
+   removing load while it recovers.
+10. **"Service A is slow and now everything is down. Why?"** No timeouts, so
+    threads accumulate waiting on A; no bulkhead, so they're shared; no breaker,
+    so the pile-up never stops. All three are needed.
+11. **"How do you debug a request across twelve services?"** Distributed tracing
+    — a trace ID propagated in headers, spans per hop, with correlation IDs in
+    structured logs. Without it, you're guessing.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Outbox table never pruned.** It grows without bound and eventually dominates
+  the database. Delete or archive published rows.
+- **Polling without `SKIP LOCKED`.** Multiple app instances publish the same
+  event, or serialise on row locks.
+- **Idempotency via `if (exists)` instead of a unique index.** Two concurrent
+  redeliveries both pass the check. The database must arbitrate.
+- **Compensations that can themselves fail, with no plan.** A failed refund needs
+  retries, alerting, and eventually a human. Sagas need a dead-letter path and an
+  operations view, not just happy-path code.
+- **Circuit breaker with no fallback.** You've converted slow failures into fast
+  failures, which is progress, but the user still sees an error.
+- **Retries on non-idempotent endpoints, added "for reliability."** This is how
+  duplicate charges ship.
+</Callout>
+
+### Where this connects
+
+- [14. Kafka & event streaming](/system-design/14-kafka-and-event-streaming) —
+  the transport these patterns assume, and its at-least-once semantics.
+- [7. CAP theorem](/system-design/7-cap-theorem-consistency-models) — sagas are
+  what choosing availability looks like in application code.
+- [Transaction management with @Transactional](/java/5-transaction-management-transactional)
+  — the local transaction the outbox depends on, and the proxy semantics that
+  determine whether you actually got one.
+- [Distributed systems concepts](/cs-fundamentals/3-distributed-systems-concepts)
+  — failure detection and why timeouts are the only tool you have.

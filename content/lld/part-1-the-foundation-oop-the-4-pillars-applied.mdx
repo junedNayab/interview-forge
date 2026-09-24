@@ -1,0 +1,464 @@
+---
+title: "Part 1 — The foundation (OOP, the 4 pillars applied)"
+topic: "lld"
+order: 402
+difficulty: "medium"
+estimatedMinutes: 23
+tags: [lld, oop, encapsulation, inheritance, polymorphism, dispatch, java]
+format: "mdx"
+summary: "The four pillars as design tools rather than definitions — invariants you can actually enforce, the HashSet subclass bug that killed inheritance, and why overloading and overriding resolve at different times."
+---
+
+## Layer 1 — The mental model
+
+Everyone can recite the four pillars. Almost nobody can say what problem each
+one solves, which is why the recitation scores nothing and the application
+scores everything.
+
+> **The four pillars are not features of Java. They are four answers to the
+> question "what do I do when this requirement changes?"** Encapsulation answers
+> *"someone will put this object in an invalid state"*. Abstraction answers
+> *"the implementation will be swapped"*. Inheritance answers *"these types
+> share behaviour"*. Polymorphism answers *"a new type will be added"*.
+
+Read that as a table of problems, because that is how you will use it in a
+round:
+
+| Pillar | The problem it solves | The symptom when it's missing |
+|---|---|---|
+| **Encapsulation** | Invariants get violated by callers | `account.balance = -500;` compiles |
+| **Abstraction** | Callers are welded to one implementation | Swapping the payment provider touches 20 files |
+| **Inheritance** | Shared behaviour gets copy-pasted | Three classes with the same 40 lines |
+| **Polymorphism** | Adding a type means editing old code | A `switch` on an enum that keeps growing |
+
+Two of those four are mildly dangerous. Inheritance is the most over-used tool
+in the list and is the subject of the longest section below. Abstraction is the
+second: an interface with exactly one implementation that will never have
+another one is a cost with no benefit.
+
+The other two are nearly free, and beginners under-use both. **If you do nothing
+else in your next design, make every field private and make every "what kind is
+this?" `switch` into a polymorphic call.** That alone will move you from a
+failing design to a passing one.
+
+---
+
+## Layer 2 — The mechanism
+
+### Encapsulation is not "use private fields". It is "protect an invariant"
+
+An invariant is a statement about an object that must be true at every moment a
+caller can observe it. "A bank account's balance is never negative." "A ticket's
+exit time is never before its entry time." "A parking floor's free-spot count
+equals the number of spots whose occupant is null."
+
+The reason `private` matters is not information hiding for its own sake. It is
+that **a class with a public mutable field cannot enforce anything**, because
+there is no code path you control between the caller's intent and the state
+change.
+
+```java
+// BAD — this class has an invariant it is powerless to enforce.
+class BankAccount {
+    public double balance;          // any caller can write any value
+}
+// account.balance = -500;   compiles, runs, corrupts the system silently.
+// There is no line of code you could add to BankAccount to prevent it.
+```
+
+Making the field private moves every mutation through a method you own, and a
+method you own can reject bad input:
+
+```java
+// GOOD — the invariant "balance >= 0" is now enforceable, because every write
+// goes through code this class controls.
+public final class BankAccount {
+    private double balance;                         // no external writes possible
+
+    public BankAccount(double opening) {
+        if (opening < 0) throw new IllegalArgumentException("opening < 0");
+        this.balance = opening;                     // invariant true from birth
+    }
+
+    public void withdraw(double amount) {
+        if (amount <= 0) throw new IllegalArgumentException("amount <= 0");
+        if (amount > balance) throw new InsufficientFundsException(balance, amount);
+        balance -= amount;                          // invariant still true
+    }
+
+    public double balance() { return balance; }     // read-only view
+}
+```
+
+Notice the constructor. An invariant has to be true *from the first instant the
+object exists*, otherwise there is a window in which an observer sees garbage.
+This is the real argument for constructor injection and for avoiding
+"create-then-configure" patterns with setters.
+
+Encapsulation has a second failure mode that catches people in interviews:
+**returning a mutable internal collection is the same bug as a public field.**
+
+```java
+// BAD — the caller now holds a reference to the lot's own list.
+class ParkingFloor {
+    private final List<ParkingSpot> spots = new ArrayList<>();
+    public List<ParkingSpot> getSpots() { return spots; }   // spots.clear() from outside
+}
+
+// GOOD — hand out a view the caller cannot mutate, or better, don't hand out
+// the collection at all and expose the operation the caller actually wanted.
+final class ParkingFloor {
+    private final List<ParkingSpot> spots;
+
+    public List<ParkingSpot> spots() { return Collections.unmodifiableList(spots); }
+
+    // Better still: the caller wanted a free spot, not the list.
+    public Optional<ParkingSpot> findFreeSpot(VehicleType type) {
+        return spots.stream().filter(s -> s.canFit(type)).findFirst();
+    }
+}
+```
+
+The last method is the one to write in an interview, and it is worth saying why
+out loud: exposing `findFreeSpot` instead of `getSpots` means the floor keeps
+the freedom to change how spots are stored — a list today, a per-type
+`Map<VehicleType, Deque<ParkingSpot>>` tomorrow for speed — without touching a
+single caller. **Encapsulation is what buys you the right to change your mind
+about a data structure later.**
+
+### Abstraction is about who depends on whom
+
+Abstraction is the act of naming a capability without naming its
+implementation. `PaymentMethod` is a capability. `CreditCardPayment` is an
+implementation.
+
+```java
+public interface PaymentMethod {
+    PaymentResult pay(Money amount);          // the capability
+}
+
+final class CheckoutService {
+    private final PaymentMethod method;       // depends on the capability only
+    CheckoutService(PaymentMethod method) { this.method = method; }
+
+    public Receipt checkout(Cart cart) {
+        PaymentResult result = method.pay(cart.total());
+        if (!result.succeeded()) throw new PaymentFailedException(result.reason());
+        return Receipt.of(cart, result);
+    }
+}
+```
+
+`CheckoutService` will never need to change when a new payment method appears,
+and it can be unit-tested by passing a three-line fake. Both of those are the
+same property viewed from different angles, and the property has a name:
+`CheckoutService` is *decoupled* from the implementation.
+
+The honest caveat: an interface is only worth its weight when there is either
+more than one implementation, or a real need to substitute one in tests, or a
+genuine expectation that the implementation will be swapped. A `UserServiceImpl`
+that is the sole implementation of `UserService` forever is ceremony. In an
+interview, put interfaces on the things the interviewer is going to ask you to
+change — pricing, allocation, notification channel — and use plain classes for
+the rest. Saying that out loud is itself a signal of judgement.
+
+### Inheritance, and when not to use it
+
+Inheritance couples a subclass to its superclass's *implementation*, not merely
+its interface. That is the whole problem in one sentence, and the canonical
+demonstration is the counting `HashSet`.
+
+```java
+// BAD — this looks obviously correct and is obviously wrong.
+class CountingHashSet<E> extends HashSet<E> {
+    private int addCount = 0;
+
+    @Override public boolean add(E e) {
+        addCount++;
+        return super.add(e);
+    }
+
+    @Override public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return super.addAll(c);             // ← the trap
+    }
+
+    public int addCount() { return addCount; }
+}
+
+// CountingHashSet<String> s = new CountingHashSet<>();
+// s.addAll(List.of("a", "b", "c"));
+// s.addCount()  ==  6, not 3.
+```
+
+The count is doubled because `HashSet.addAll` is implemented by calling `add`
+for each element — and because `add` is overridden, those internal calls
+dispatch to *your* override, which increments again. Your subclass is broken by
+a private implementation detail of the superclass that is not part of its
+documented contract and can change in any release.
+
+**The general rule this illustrates: you may only safely subclass a class that
+was designed and documented for subclassing.** Everything else is a bet on
+internals you cannot see.
+
+The fix is composition — hold the collection rather than being one:
+
+```java
+// GOOD — forwards to a held instance. HashSet's internal calls can never
+// re-enter this class, so no double counting is possible.
+final class CountingSet<E> implements Set<E> {
+    private final Set<E> delegate;                 // composition, not inheritance
+    private int addCount = 0;
+
+    CountingSet(Set<E> delegate) { this.delegate = delegate; }
+
+    @Override public boolean add(E e) {
+        addCount++;
+        return delegate.add(e);
+    }
+
+    @Override public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return delegate.addAll(c);                 // delegate's internal add() is its own
+    }
+
+    public int addCount() { return addCount; }
+    // ... remaining Set methods forward to delegate
+}
+```
+
+Composition costs you forwarding methods. It buys you a class that cannot be
+broken by someone else's refactor, and it works with *any* `Set` implementation
+rather than just `HashSet` — which is also the Decorator pattern, arrived at
+from first principles.
+
+Three tests for whether inheritance is the right call:
+
+1. **Is it genuinely "is-a", in every context the base type is used?** Not "a
+   `Square` is a `Rectangle` in geometry" but "every method that works on a
+   `Rectangle` still works when handed a `Square`". That is the Liskov
+   question and it is the subject of
+   [Part 2](/lld/part-2-solid-principles-the-heart-of-every-lld-interview).
+2. **Am I inheriting to reuse code, or to be substitutable?** Reuse alone is the
+   wrong reason; that is what composition is for.
+3. **Would a second axis of variation force a combinatorial explosion?** If you
+   have `Vehicle` varying by size and also by fuel type, inheritance gives you
+   `SmallPetrolVehicle`, `SmallElectricVehicle`, `LargePetrolVehicle` and so on.
+   Composition gives you a `Vehicle` with a size and a `FuelType`. When you
+   catch yourself writing a class name with two adjectives in it, you have found
+   this case.
+
+Where inheritance genuinely earns its place in LLD: a small, shallow hierarchy
+where the base holds common identity and the subtypes exist to be dispatched on.
+`Vehicle` with `Car`, `Bike`, `Truck` is fine — it is one level deep, the base
+is yours, and you control both sides.
+
+### Polymorphism is the mechanism behind Open/Closed
+
+This is the pillar that does the most work in an LLD round, and the reason is
+mechanical rather than aesthetic: **polymorphism is the only way in Java to add
+a behaviour without editing code that already exists.**
+
+```java
+// BAD — every new notification channel edits this method. It is already tested
+// and already in production, and you are reopening it.
+class Notifier {
+    void send(String channel, String msg) {
+        if ("EMAIL".equals(channel))      sendEmail(msg);
+        else if ("SMS".equals(channel))   sendSms(msg);
+        else if ("PUSH".equals(channel))  sendPush(msg);
+        else throw new IllegalArgumentException(channel);
+    }
+}
+
+// GOOD — a new channel is a new file. Notifier is never reopened.
+interface NotificationChannel {
+    void send(Message message);
+}
+
+final class EmailChannel implements NotificationChannel { /* ... */ }
+final class SmsChannel   implements NotificationChannel { /* ... */ }
+
+final class Notifier {
+    private final List<NotificationChannel> channels;
+    Notifier(List<NotificationChannel> channels) { this.channels = List.copyOf(channels); }
+
+    void notifyAll(Message m) {
+        for (NotificationChannel c : channels) c.send(m);   // dispatch does the branching
+    }
+}
+```
+
+The `if`-chain and the interface do exactly the same thing at runtime; the JVM's
+virtual dispatch is the `switch`, written once, inside the language. What
+changed is *who owns the decision*. In the first version, `Notifier` owns
+knowledge of every channel that will ever exist. In the second, each channel
+owns knowledge of itself, and `Notifier` knows only that channels can send.
+
+The interviewer's phrase for this is "replace conditional with polymorphism",
+and recognising the opportunity is close to half of LLD. **Whenever you see a
+conditional branching on a type or a kind, and you expect new kinds to arrive,
+that conditional wants to be a set of classes.**
+
+The caveat, because it matters: a conditional that branches on a *value* rather
+than a type, or one whose set of cases is genuinely closed (the seven days of
+the week), is fine as a conditional. Java's sealed interfaces and pattern
+matching in `switch` exist precisely for closed sets, and using one is not a
+design failure.
+
+### Static vs dynamic dispatch — the favourite trick question
+
+Java resolves overloading and overriding at different times, and the difference
+is asked in interviews almost verbatim.
+
+**Overriding is dynamic.** The method that runs is chosen at runtime from the
+object's actual class. **Overloading is static.** The method *signature* that
+gets called is chosen at compile time from the declared type of the argument.
+
+```java
+class Animal { void speak() { System.out.println("..."); } }
+class Dog extends Animal { @Override void speak() { System.out.println("Woof"); } }
+
+class Vet {
+    void treat(Animal a) { System.out.println("treating an animal"); }
+    void treat(Dog d)    { System.out.println("treating a dog"); }
+}
+
+Animal pet = new Dog();        // declared type Animal, runtime type Dog
+
+pet.speak();                   // "Woof"                  ← overriding: RUNTIME type
+new Vet().treat(pet);          // "treating an animal"    ← overloading: COMPILE-TIME type
+```
+
+Both lines involve the same object. The first picks `Dog.speak` because dispatch
+on the receiver uses the runtime type. The second picks `treat(Animal)` because
+the compiler saw a variable declared `Animal` and burned that choice into the
+bytecode; the JVM never reconsiders it.
+
+Why it works this way: overload resolution is part of type-checking, and
+type-checking happens at compile time using declared types. Overriding is
+implemented with a virtual method table looked up through the object header at
+call time. They are two different machines.
+
+The practical consequences worth knowing:
+
+- **Java has single dispatch, not double dispatch.** Dispatch varies on the
+  receiver only, never on argument types. That is precisely the gap the Visitor
+  pattern fills, by turning one dynamic dispatch into two.
+- **`static` methods are never overridden, only hidden.** Calling a static
+  method through a reference uses the declared type, and most linters will tell
+  you to call it through the class name instead.
+- **Fields are never polymorphic.** `Animal a = new Dog(); a.name` reads
+  `Animal`'s field even if `Dog` declares one with the same name. This is one
+  more reason fields should be private.
+- **`private` and `final` methods are statically bound**, which is exactly why
+  Spring's CGLIB proxies cannot advise them — see
+  [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) for
+  where this becomes a real production bug.
+
+### Naming the relationships correctly
+
+When you sketch a class diagram, an interviewer listens for whether you name the
+arrows accurately. Four relationships cover almost everything:
+
+```
+Association   "uses-a"        Driver uses a Car            ───►
+Aggregation   "has-a", weak   Team has Players;                 ◇───
+                              players outlive the team
+Composition   "has-a", strong ParkingLot has Floors;            ◆───
+                              floors die with the lot
+Inheritance   "is-a"          Car is a Vehicle             ───▷
+```
+
+The distinction that carries real design weight is aggregation versus
+composition, because it decides **who is responsible for the lifecycle**. If
+`ParkingFloor` objects are created by and only meaningful inside a
+`ParkingLot`, the lot creates them and nobody else holds a reference — that is
+composition, and it means the lot can enforce invariants across its floors. If
+`Player` objects exist independently and are merely referenced by a `Team`, the
+team cannot assume anything about their lifetime, and deleting the team must not
+delete the players.
+
+You do not need formal UML. Boxes, arrows, and saying "this is composition, the
+floors belong to the lot" while you draw is exactly what is being looked for.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What is encapsulation for?"** Protecting an invariant. A class with public
+   mutable fields cannot enforce anything because there is no code path it owns
+   between the caller's intent and the state change.
+2. **"Is a getter that returns a `List` encapsulation?"** No — the caller gets a
+   reference to your internals and can clear it. Return an unmodifiable view, a
+   copy, or better, expose the operation the caller actually wanted.
+3. **"Why prefer composition over inheritance?"** Inheritance couples you to the
+   superclass's implementation details. The counting `HashSet` double-counts
+   because `addAll` internally calls `add`, which your subclass overrode.
+4. **"When is inheritance fine?"** Shallow, you own both classes, the subtype is
+   genuinely substitutable everywhere the base is used, and there is only one
+   axis of variation.
+5. **"Overloading vs overriding?"** Overriding resolves at runtime on the
+   object's actual class; overloading resolves at compile time on the declared
+   type of the argument. Be ready to trace the `Vet`/`Animal`/`Dog` example.
+6. **"Can you override a static method?"** No — you hide it. Resolution uses the
+   declared type, so there is no polymorphism.
+7. **"Are fields polymorphic?"** No. Field access is resolved on the declared
+   type. Another argument for keeping them private.
+8. **"What is double dispatch and does Java have it?"** Dispatch on two runtime
+   types. Java does not have it; Visitor simulates it with two chained single
+   dispatches.
+9. **"How does polymorphism relate to Open/Closed?"** It is the mechanism. Virtual
+   dispatch is a `switch` the language writes for you, so adding a type adds a
+   file instead of editing one.
+10. **"Aggregation vs composition?"** Lifecycle ownership. In composition the
+    part dies with the whole and the whole can enforce invariants across parts;
+    in aggregation the part exists independently.
+11. **"Is abstraction always good?"** No. An interface with one permanent
+    implementation is cost without benefit. Put interfaces on the axes of
+    change.
+12. **"Why is a constructor the right place for validation?"** Because an
+    invariant must hold from the instant the object is observable. Setter-based
+    configuration leaves a window in which the object is invalid.
+13. **"Abstract class or interface?"** Interface when you need only a contract or
+    multiple inheritance of type; abstract class when subtypes genuinely share
+    state or a template algorithm. Default methods have narrowed the gap, but
+    only an abstract class can hold fields.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Getters and setters for every field.** A class that is just private fields
+  with public accessors has the syntax of encapsulation and none of the
+  substance — the invariant is still unenforced. Ask what the caller is trying
+  to *do* and expose that instead.
+- **Deep inheritance hierarchies.** Three levels is usually one too many. Each
+  level multiplies the implementation details a change can break.
+- **`protected` fields.** They are public to every subclass, forever, including
+  ones you have not written. Prefer `protected` accessor methods if you must.
+- **Overloading methods that are meant to be polymorphic.** `process(Car)` and
+  `process(Bike)` look like polymorphism and are not — they bind at compile
+  time, so a `List<Vehicle>` loop will always call the base overload.
+- **`equals` without `hashCode`.** Two logically equal `Ticket` objects that
+  land in different hash buckets will make a `HashMap` lookup fail silently.
+  Java `record` types generate both correctly, which is one reason to reach for
+  them in machine-coding rounds.
+- **Mutable objects used as `Map` keys.** Mutate a field that participates in
+  `hashCode` and the entry becomes unreachable in its own map.
+</Callout>
+
+### Where this connects
+
+- [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — these four pillars are the raw materials; SOLID is the set of rules for
+  combining them.
+- [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) —
+  the `CountingSet` above is the Decorator pattern derived from first
+  principles.
+- [OOP and design principles](/java/5-oop-design-principles) — the Java-side
+  treatment, including `equals`/`hashCode` contracts.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) —
+  where static binding of `private` and `final` methods causes real,
+  silent production bugs.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  why `HashSet.addAll` is implemented the way that breaks the naive subclass.

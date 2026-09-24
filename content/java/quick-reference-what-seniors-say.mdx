@@ -1,0 +1,245 @@
+---
+title: "Quick Reference: Sentences That Signal Seniority"
+topic: "java"
+order: 608
+group: "Java + SQL"
+difficulty: "medium"
+estimatedMinutes: 14
+tags: [reference, java, spring, jpa, interview-phrasing, transactions]
+format: "mdx"
+summary: "Twenty-six specific sentences worth having ready for the Java and persistence round, each with the reason it registers as experience rather than revision."
+---
+
+## How this page differs from the other one
+
+This is the phrasing sheet. It is a list of actual sentences — the words in the
+order you would say them — each paired with an explanation of why that particular
+sentence makes an interviewer revise their estimate of you upward.
+
+The companion page,
+[Quick Reference: Junior vs Senior Answers](/java/quick-reference-what-seniors-say-in-interviews),
+is a diagnostic: it puts shallow and deep answers to the same question side by
+side so you can find out which one you would have given. Use that page to locate
+gaps in what you know. Use this page to sharpen how you say what you already know.
+
+Before the list, the thing that makes these sentences work, because it is a single
+property and once you see it you can generate your own. **Every sentence below
+states something specific that is only knowable from having been burned by it.**
+Not "I'm careful with transactions" but "catching the exception inside the method
+means no rollback happens". Not "I monitor the queue" but "I alert on consumer lag
+rather than error rate". Vague competence claims are free, so they carry no
+information. A specific failure mode costs something to know, so it does.
+
+Do not recite these. Say them when they are true and relevant, in your own
+register — a phrase delivered word-perfect out of context reads worse than a
+clumsy version of the same idea.
+
+## Transactions and the Spring proxy
+
+**"That would have worked, except the call is from inside the same class, so it
+goes to `this` and never touches the proxy."**
+
+This is the single highest-value sentence in the Spring half of the round. It
+demonstrates that you know `@Transactional` is not a language feature but a proxy
+wrapping your bean, and that understanding generalises immediately to `@Cacheable`,
+`@Async` and `@Retryable` all failing the same way. Interviewers use
+self-invocation as their go-to probe precisely because it separates people who
+have debugged Spring from people who have configured it.
+
+**"Rollback is on unchecked exceptions only by default, so a checked exception
+commits unless I set `rollbackFor`."**
+
+Specific, surprising to most candidates, and it is a genuine production bug
+generator. Follow it with the second half if you want the full effect: "and
+catching the exception inside the transactional method means nothing rolls back at
+all, because the proxy never sees it."
+
+**"I'd keep the transaction boundary at the service layer and out of the
+controller, so the HTTP concern and the atomicity concern do not get tangled."**
+
+Signals that you think about where a boundary belongs rather than where an
+annotation compiles. It also sets up a good follow-up you can answer: what happens
+when a transaction spans a remote call, and why you would move the call outside the
+boundary.
+
+**"`REQUIRED` for almost everything. `REQUIRES_NEW` when I need the work to
+survive the caller rolling back — an audit row or a failure record."**
+
+Naming a concrete use case for `REQUIRES_NEW` is the difference between having read
+the propagation table and having chosen from it. Almost everybody can list the
+propagation levels; very few can say why they picked one.
+
+**"I'd turn off `open-in-view`, because it hides lazy loading in the view layer
+and turns a serialisation bug into a performance bug you find in production."**
+
+An opinionated configuration choice with a stated reason. Opinions with reasons are
+what seniority sounds like.
+
+## Persistence and query behaviour
+
+**"I'd confirm it's N+1 before fixing it — Hibernate statistics, or a test that
+asserts the query count."**
+
+Everybody can fix N+1. Saying you would measure first puts you in a different
+category, because it is the habit rather than the knowledge that predicts how you
+behave on an unfamiliar system.
+
+**"`JOIN FETCH` for one collection. Batch fetching when there are two, because a
+join across both multiplies rows."**
+
+The row-multiplication detail is the tell. It is the thing you only think about
+after you have shipped a `JOIN FETCH` across two collections and watched the result
+set explode.
+
+**"For a read-only endpoint I'd project straight to a DTO, so no entity is loaded
+and there is nothing to be lazy about."**
+
+Reframes a performance fix as a design decision. It also opens the door to
+discussing read and write models separately, which is a conversation you want.
+
+**"The default isolation level is Read Committed, so a lost update is still
+possible — two reads of the same row and the second write wins."**
+
+Precise, correct, and it contradicts the common assumption that Read Committed is
+"safe". Have the fix ready in the same breath: "so if it matters I take
+`SELECT ... FOR UPDATE`, or better, an optimistic version column so I am not
+holding a row lock across the business logic."
+
+**"I'd use optimistic locking here — a `@Version` column. Pessimistic locking
+means holding a row lock for the duration of the request, which I would rather not
+do on a hot row."**
+
+Names both options and the cost of the one you rejected. Every strong answer in
+this round has that shape.
+
+**"That will be a full scan. The composite index is on `(tenant_id, created_at)`
+and this query filters on `created_at` alone, so there is no leftmost prefix to
+use."**
+
+Specific enough that it can only come from having read a real execution plan. See
+[indexing](/sql/3-indexing-performance) for the underlying material.
+
+**"I'd replace the `OFFSET` with keyset pagination, because `OFFSET 200000` still
+has to walk and discard 200,000 rows."**
+
+Names the mechanism rather than the symptom. "Offset is slow" is an observation;
+"offset still walks the rows" is an explanation.
+
+## Concurrency
+
+**"`volatile` gives me visibility and ordering, not atomicity — so it fixes a
+stale-read bug and does nothing for `count++`."**
+
+Draws the line in the right place in one sentence. Most candidates either overstate
+`volatile` or cannot say what it excludes.
+
+**"The queue has to be bounded. An unbounded queue does not remove the
+backpressure, it just converts a slow consumer into an OutOfMemoryError later."**
+
+One of the best sentences available in this round, because it shows you think about
+failure modes over time rather than at the moment of the API call. It applies
+identically to thread pools, to message consumers, and to any buffer in a design
+interview.
+
+**"I'd wait in a `while` loop, not an `if` — spurious wakeups are allowed, and
+with several waiters the first one to reacquire the monitor consumes the item."**
+
+Two reasons, not one. Naming only spurious wakeups is the common half-answer and
+interviewers notice.
+
+**"Cores plus one for CPU-bound work. For IO-bound I size from the target
+throughput and measured wait time, and I always bound the queue."**
+
+Concrete, and the qualifier "measured" does a lot of work.
+
+**"I'd rather make the operation idempotent than make the retry smarter."**
+
+A design instinct rather than a fact, and it transfers directly into the
+[system design round](/system-design/15-microservice-reliability-patterns).
+
+**"That's a shared mutable field on a singleton bean. Spring guarantees one
+instance, not that the instance is safe."**
+
+Catches a real and very common bug, and it shows you understand what the container
+does and does not promise.
+
+## Operations, observability and configuration
+
+**"I'd alert on consumer lag rather than error rate, because the failure mode here
+is falling behind silently, not throwing."**
+
+This sentence is worth more than its length suggests. It shows you choose a signal
+by reasoning about how the system actually fails, which is the core skill in
+on-call work. The generalised version — "I pick the metric that moves first when
+this breaks" — is reusable anywhere.
+
+**"Percentiles, not averages. A p99 of two seconds and a mean of 80 milliseconds
+are the same system, and only one of those numbers describes a user's
+experience."**
+
+Standard among people who have run services, rare among candidates.
+
+**"Secrets come from the environment, never from a committed file. My own project
+has a JWT signing secret sitting in `application.yml` and that is the first thing I
+would fix."**
+
+Volunteering a flaw in your own work is disarming and it is read as honesty rather
+than weakness, provided you name the fix. It also pre-empts the interviewer finding
+it and asking you about it on worse terms. See
+[Spring Boot configuration](/java/7-spring-boot-configuration-quick-reference) for
+how to actually externalise it.
+
+**"`ddl-auto` is `validate` in production. Schema changes go through migrations, so
+they are reviewed and reversible."**
+
+An operational boundary stated as a default. Says you have thought about what
+happens on a deploy at 2am.
+
+**"I'd expose `health` and `info` publicly and keep the rest of actuator behind
+internal access — `env` and `heapdump` leak configuration and memory contents."**
+
+Names the specific endpoints and the specific risk, which is what turns a security
+platitude into a decision.
+
+**"`@ConfigurationProperties` over `@Value`, because a typo in a `@Value` key
+either fails at startup or silently uses the default, and the typed object can be
+validated."**
+
+Small, concrete, and it demonstrates a preference formed by consequences.
+
+**"I size the connection pool small on purpose. Ten connections that are always
+busy beat a hundred that queue inside the database."**
+
+Counter-intuitive and correct, which is an ideal combination. It reliably produces
+a good follow-up about where queueing should happen.
+
+## Saying you do not know
+
+**"I haven't used that in production. What I'd expect is roughly this, and here's
+the thing I'd check first."**
+
+This belongs on a list of phrases that signal seniority, because it is one of the
+strongest. Confident guessing is the most expensive failure in a technical round —
+one confident wrong claim makes an interviewer distrust everything you said before
+it. Bounding your knowledge accurately and then reasoning forward from it costs you
+almost nothing and is read as calibration.
+
+The version to avoid is the bare "I don't know", which ends the exchange. Always
+attach what you would do to find out.
+
+<Callout type="tip" title="How to actually use this page">
+Pick five sentences that are true of work you have genuinely done and say them out
+loud until they sound like you rather than like a script. Then throw the list away
+and practise on the [practice problems](/java/practice-producer-consumer) instead.
+The sentences are a demonstration of a pattern — mechanism, boundary condition,
+what you do about it — and the pattern is what you want to internalise, because it
+generates answers for questions no reference sheet lists.
+</Callout>
+
+### Where this connects
+
+- [Quick Reference: Junior vs Senior Answers](/java/quick-reference-what-seniors-say-in-interviews) — the companion diagnostic, comparing shallow and deep answers to the same 24 questions.
+- [5. Transaction Management (@Transactional)](/java/5-transaction-management-transactional) — the source material for the proxy and rollback sentences.
+- [3. The N+1 Problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) — the detection-before-fixing habit, worked through properly.
+- [4. Transactions & Isolation Levels](/sql/4-transactions-isolation-levels) — where the lost-update claim comes from.
+- [7. Spring Boot Configuration Quick Reference](/java/7-spring-boot-configuration-quick-reference) — secrets, profiles and actuator exposure.

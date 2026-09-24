@@ -1,0 +1,334 @@
+---
+title: "6. Databases"
+topic: "system-design"
+order: 206
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [databases, sql, nosql, replication, sharding, b-tree, lsm]
+format: "mdx"
+summary: "Choosing a datastore from access patterns rather than hype — B-tree vs LSM, replication lag and the read-your-writes problem, sharding and everything it breaks, and how to defend PostgreSQL."
+---
+
+## Layer 1 — The mental model
+
+"SQL or NoSQL?" is the wrong question and interviewers ask it to see whether you
+know that. There is no category of database that is better; there are **storage
+engines with different trade-offs**, and your job is to name the access pattern
+first and let the choice follow.
+
+The four questions that actually decide it:
+
+1. **What is the access pattern?** "Get one row by primary key" and "aggregate
+   six joined tables by month" want completely different machines.
+2. **What is the read:write ratio?** A B-tree is optimised for reads, an LSM
+   tree for writes. This is the single most under-used distinction in
+   interviews.
+3. **What consistency do you need, and for which operation?** Usually not the
+   same answer everywhere in one system.
+4. **How big does it get, and does it need to be on more than one machine?**
+
+Notice what isn't on the list: scale as a generic property. "NoSQL scales
+better" is false as stated — a sharded MySQL runs some of the largest systems on
+earth, and DynamoDB will happily fall over if you give it a hot partition key.
+What's true is narrower and worth saying precisely:
+
+> **NoSQL stores scale horizontally more easily because they dropped the
+> features that make distribution hard — joins, multi-key transactions, and
+> secondary indexes that span partitions.** You aren't buying scale, you're
+> selling those features to buy easier scale.
+
+That trade is the entire topic.
+
+---
+
+## Layer 2 — The mechanism
+
+### The storage engine layer: B-tree vs LSM
+
+Almost every database is one of these two underneath, and knowing which one
+explains its personality.
+
+**B-tree** (Postgres, MySQL/InnoDB, Oracle). A balanced tree of fixed-size
+pages, updated **in place**.
+
+```
+Read:  O(log n) — 3–4 page reads to find any row, predictable
+Write: find the page, modify it in place, write it back
+       → a random write to disk, plus a write-ahead log entry
+       → the same data is written twice (WAL + page)
+```
+
+**LSM tree — log-structured merge** (Cassandra, RocksDB, LevelDB, HBase; also
+MongoDB's WiredTiger optionally). Writes go to an in-memory sorted table, which
+is flushed to an immutable file, and background **compaction** merges files.
+
+```
+Write: append to memtable (RAM) + a commit log — sequential, very fast
+Read:  check memtable, then several SSTables newest-first
+       → may touch multiple files; Bloom filters skip the ones
+         that definitely don't have the key
+```
+
+The consequences, which is what you actually use in an interview:
+
+| | B-tree | LSM tree |
+|---|---|---|
+| Writes | Slower — random I/O, write twice | **Much faster** — sequential appends |
+| Reads | **Faster and predictable** | Slower, variable (multiple files) |
+| Space | Fragmentation from partial pages | Better compression; needs headroom to compact |
+| Surprise | — | Compaction competes with live traffic for I/O |
+
+So "Cassandra is good for writes" isn't a vendor claim, it's a consequence of
+appending sequentially instead of updating pages in place. Being able to say
+*why* — and to note that the cost is read amplification and compaction pressure
+— puts you well past the comparison-table answer.
+
+### The database taxonomy, by access pattern
+
+| Type | Examples | The access pattern it's built for |
+|---|---|---|
+| **Relational** | Postgres, MySQL | Joins, ad-hoc queries, integrity, transactions |
+| **Key-value** | Redis, DynamoDB | Get/put by a single known key. Nothing else. |
+| **Wide-column** | Cassandra, HBase | Huge writes; query by partition, ordered within it |
+| **Document** | MongoDB | Whole-object reads where the object is the unit |
+| **Search** | Elasticsearch | Full-text, fuzzy matching, faceting |
+| **Time-series** | Timescale, InfluxDB | Append-only by timestamp, queried by range |
+| **Graph** | Neo4j | Traversals — "friends of friends of friends" |
+
+The useful habit is going the other way: state the pattern, then name the type.
+*"I need the last 50 messages in a conversation, ordered, no joins, at 20K
+writes/sec — that's a wide-column store partitioned by conversation."* That
+sentence is a better answer than any comparison table, because it shows the
+reasoning that produced the choice.
+
+**Polyglot persistence** is normal and worth proposing when it's justified:
+Postgres for users and orders, Redis for sessions, Elasticsearch for search,
+S3 for blobs. The caveat to voice — otherwise it sounds like résumé-driven
+design — is that every extra store is another thing to operate, back up, monitor
+and keep consistent. Adding one should buy something specific.
+
+### Defending PostgreSQL
+
+Reach for this when an interviewer pushes "wouldn't NoSQL be better?", because
+a well-argued boring choice scores higher than an unjustified trendy one:
+
+- Postgres does **JSONB with indexes**, so schema flexibility isn't a reason to
+  leave.
+- It does **full-text search**, adequate up to a real scale.
+- It does **`LISTEN`/`NOTIFY`**, so it can be a small queue.
+- It scales to **tens of terabytes vertically** and much further with read
+  replicas and partitioning.
+- Unlike most alternatives it gives you **real transactions and joins**, which
+  you will otherwise reimplement in application code, badly.
+
+The honest limits: a single writer node, painful manual sharding, and
+connection-per-backend memory cost that makes a pooler like PgBouncer mandatory
+at scale.
+
+### Replication
+
+One copy of the data is one machine's worth of reads and one fire away from
+gone. Replication fixes both, and creates the problems the rest of this section
+is about.
+
+**Leader–follower** (the default, and what RDS Multi-AZ plus read replicas is):
+writes go to one leader, which ships its log to followers; reads can go to any
+replica.
+
+- **Synchronous** — the leader waits for the follower to confirm. No data loss
+  on failover, but the leader's write latency now includes the slowest follower,
+  and if that follower dies, writes stall.
+- **Asynchronous** — the leader acks immediately. Fast, but a failover **loses
+  the writes the old leader hadn't shipped yet**. This is the default almost
+  everywhere, which means most systems accept a small data-loss window on
+  failover and most engineers don't know it.
+- **Semi-synchronous** — wait for one follower, not all. The usual compromise.
+
+<Callout type="pitfall" title="Replication lag: the bug your users report and you can't reproduce">
+A user updates their profile (write → leader), the page reloads (read →
+replica), and their change isn't there. They refresh and it appears. This is
+**replication lag**, and it produces the most maddening bug reports you'll ever
+get, because on your machine the lag is 2 ms.
+
+The guarantee you need is **read-your-own-writes**, and there are three standard
+fixes:
+
+1. **Read from the leader** for a short window after a user writes (simple,
+   usually right).
+2. **Route by session** — a user who has written recently is pinned to the
+   leader.
+3. **Track the log position** — remember the write's position, and only read
+   from a replica that has caught up past it.
+
+Two related guarantees are worth naming because they have specific names:
+**monotonic reads** (never see time go backwards by hitting a more-lagged
+replica on the next request — fix by pinning a user to one replica) and
+**consistent prefix reads** (never see an answer before its question). See
+[CAP and consistency models](/system-design/7-cap-theorem-consistency-models)
+for where these sit in the hierarchy.
+</Callout>
+
+**Multi-leader and leaderless** (Cassandra, DynamoDB) accept writes anywhere,
+which buys write availability and forces you to resolve conflicts — last-write-
+wins with its clock-skew hazards, vector clocks, or CRDTs. That's the
+availability side of the CAP trade, made concrete.
+
+**Failover is the dangerous part**, not the steady state. Promoting a follower
+means deciding the leader is truly dead, and getting that wrong gives you
+**split-brain**: two nodes both accepting writes, diverging. The guard is a
+quorum-based decision plus fencing the old leader. If you mention automatic
+failover, mention split-brain — it's the follow-up.
+
+### Partitioning and sharding
+
+Replication gives every node **all** the data. Sharding gives each node **some**
+of it. You shard when one machine can't hold the data, can't serve the write
+volume, or when the working set no longer fits in RAM.
+
+| Strategy | How | Good | Bad |
+|---|---|---|---|
+| **Range** | `A–F`, `G–M`… | Range scans are cheap | Hot shards — sequential IDs all land on the last shard |
+| **Hash** | `hash(key) % N` | Even distribution | Range queries must hit every shard |
+| **Consistent hashing** | Hash onto a ring | Adding a node moves ~1/N of keys | More complex; still can't fix a hot *key* |
+| **Directory** | A lookup service maps key → shard | Total flexibility, easy rebalance | The directory is a SPOF and a hop |
+| **Geographic / tenant** | By region or customer | Data residency, isolation | Uneven sizes; a whale tenant breaks it |
+
+**Never use `hash(key) % N`** in a system that will grow. Changing N from 4 to 5
+remaps almost every key, which means moving almost all your data.
+[Consistent hashing](/system-design/13-consistent-hashing) exists precisely to
+fix this, and knowing the modulo trap is the reason it exists.
+
+**Choosing the shard key is the decision you can't undo.** It must spread load
+evenly *and* match your most common query, and those two goals fight. Shard a
+chat app by `userId` and "all messages in a conversation" becomes a scatter-gather
+across every shard; shard by `conversationId` and one huge group chat becomes a
+hot shard.
+
+**What sharding costs you** — this list is the real answer to "what are the
+downsides?":
+
+- **Joins across shards** stop working. You denormalise or you join in the
+  application.
+- **Transactions across shards** need two-phase commit (slow, blocking) or a
+  [saga](/system-design/15-microservice-reliability-patterns) with
+  compensations.
+- **Secondary indexes** are either local to a shard (queries must scatter) or
+  global (a distributed write on every insert).
+- **`AUTO_INCREMENT` breaks.** You need Snowflake-style IDs or UUIDs.
+- **Rebalancing** moves live data around while serving traffic.
+- **Operations multiply** — backups, migrations and schema changes across N
+  clusters.
+
+Which leads to the advice worth voicing in an interview: **shard last.** Read
+replicas, caching, better indexes, connection pooling, archiving old rows and
+vertical scaling are all cheaper and reversible. Saying "I'd shard, but only
+after X, Y and Z, because it costs me joins and transactions" is a much stronger
+answer than reaching for it immediately.
+
+### Indexes and isolation, briefly
+
+Both get full treatment in the SQL track — [indexing and
+performance](/sql/3-indexing-performance) and [transactions and isolation
+levels](/sql/4-transactions-isolation-levels) — so here is only what you need
+for a design discussion.
+
+**Indexes** trade write throughput and storage for read speed. Every index is
+another structure to update on every insert, so "add an index" is never free,
+and a table with twelve indexes is a slow table to write. The two design-level
+points that come up: a **covering index** (one that contains every column the
+query needs) avoids touching the table at all, and a **composite index on
+(a, b)** serves queries filtering on `a` or on `a AND b`, but not on `b` alone —
+the leftmost-prefix rule.
+
+**Isolation** matters in design when you claim "strong consistency." Be ready
+for: Postgres's default is **Read Committed**, not Serializable — so two
+concurrent transactions can both read a value, both increment it, and one update
+is lost. If a design depends on that not happening you need
+`SELECT … FOR UPDATE`, an optimistic `@Version` check, or an atomic
+`UPDATE … SET n = n + 1`.
+
+### B — What breaks first
+
+- **Connections.** Postgres forks a backend per connection; a few hundred is a
+  lot. You hit this before you hit CPU. Use a pooler.
+- **A single hot row** — a counter, an inventory count. Serialised by locking no
+  matter how big the machine.
+- **Unbounded table growth** making indexes exceed RAM, at which point every
+  lookup becomes disk I/O and latency falls off a cliff.
+- **The N+1 query.** The most common real performance bug, and an ORM makes it
+  invisible.
+- **A long-running transaction** holding locks and blocking vacuum, so dead rows
+  accumulate and the table bloats.
+- **Schema migrations on large tables** locking writes. Use online migration
+  tools and always add columns as nullable first.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"SQL or NoSQL?"** Start from the access pattern, not the category. Name the
+   pattern, then the store, then the trade you accepted.
+2. **"Why does NoSQL scale better?"** It doesn't inherently. It dropped joins,
+   multi-key transactions and cross-partition indexes, which are the features
+   that make distribution hard.
+3. **"Why is Cassandra fast at writes?"** LSM tree — sequential appends to a
+   memtable and commit log instead of in-place random page writes. The cost is
+   read amplification and compaction I/O.
+4. **"When is a B-tree the better engine?"** Read-heavy workloads that need
+   predictable latency and range scans.
+5. **"A user updates their profile and doesn't see the change."** Replication
+   lag. Fix with read-your-own-writes: read from the leader briefly after a
+   write, pin the session, or track the log position.
+6. **"Sync or async replication?"** Async is the default and loses recent writes
+   on failover. Sync costs write latency and stalls if a follower dies.
+   Semi-sync is the compromise.
+7. **"What's split-brain?"** Two nodes both believe they're leader after a bad
+   failover and both accept writes. Prevent with quorum decisions and fencing.
+8. **"How do you shard?"** Range, hash, consistent hashing, or a directory.
+   Never `hash % N` — growing the cluster remaps everything.
+9. **"How do you choose the shard key?"** It must distribute evenly *and* match
+   the dominant query. When those conflict, pick the query and mitigate the hot
+   shard.
+10. **"What breaks when you shard?"** Joins, cross-shard transactions, secondary
+    indexes, auto-increment IDs — plus rebalancing and N× the operations.
+11. **"When would you shard?"** Last. After replicas, caching, indexes, pooling,
+    archiving and vertical scaling.
+12. **"Defend choosing Postgres at scale."** JSONB, full-text, real transactions
+    and joins, tens of TB vertically. Admit the limits: one writer, manual
+    sharding, connection cost.
+13. **"What's Postgres's default isolation level?"** Read Committed — so lost
+    updates are possible. Use `FOR UPDATE`, an optimistic version column, or an
+    atomic increment.
+14. **"What fails first in a relational database under load?"** Connections,
+    then a hot row, then indexes no longer fitting in RAM.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **"NoSQL because scale."** Unjustified, and interviewers probe it every time.
+- **`hash(key) % N`** as a sharding function in a cluster that will grow.
+- **Choosing a shard key that matches the load but not the query**, turning
+  every read into a scatter-gather.
+- **Assuming replicas are current.** They are not, and your user will notice
+  before your monitoring does.
+- **Assuming a transaction gives you serializability.** The default almost never
+  does.
+- **Adding indexes without counting the write cost.**
+- **Sharding before exhausting the reversible options.**
+</Callout>
+
+### Where this connects
+
+- [7. CAP and consistency models](/system-design/7-cap-theorem-consistency-models)
+  — replication lag is eventual consistency, and read-your-writes is a named
+  point on that spectrum.
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — the fix for
+  the modulo-rebalance problem.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — the cheaper thing to do before sharding.
+- [SQL: indexing and performance](/sql/3-indexing-performance) and
+  [transactions and isolation levels](/sql/4-transactions-isolation-levels) —
+  the depth this lesson deliberately skips.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — sagas, for when a transaction no longer fits on one machine.

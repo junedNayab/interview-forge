@@ -1,0 +1,349 @@
+---
+title: "Practice: LRU Cache"
+topic: "java"
+order: 900
+group: "Practice Problems"
+difficulty: "medium"
+estimatedMinutes: 18
+tags: [practice, lru-cache, linkedhashmap, doubly-linked-list, caching, concurrency]
+format: "mdx"
+summary: "Both LRU implementations with the reasoning for every pointer move, plus the follow-up chain interviewers actually ask: why not singly-linked, when LinkedHashMap is the right answer, how to make it thread-safe, and what changes when the cache is distributed."
+---
+
+## Why this problem is asked
+
+LRU cache (LeetCode 146) is asked constantly, and not because caches are hard. **It
+is the cleanest problem where the answer requires composing two data structures,
+because neither one alone can meet the constraints.** A hash map gives O(1) lookup
+but no notion of order. A linked list gives O(1) removal at a known position but O(n)
+search. The requirement is O(1) for both, so you need both structures pointing at the
+same nodes. A candidate who derives that from the complexity constraints has
+demonstrated exactly what the question exists to measure.
+
+## The problem
+
+`get(key)` returns the value if present and marks it most recently used, otherwise
+`-1`. `put(key, value)` inserts or updates, evicting the least recently used entry
+first if at capacity. Both must be O(1).
+
+## The naive attempt, and why it fails
+
+The first instinct is a `HashMap` plus a timestamp, scanning for the oldest on
+eviction.
+
+```java
+// Does not meet the requirement
+Map<Integer, Entry> map = new HashMap<>();   // Entry holds value + lastAccessed
+
+void put(int key, int value) {
+    if (map.size() >= capacity) {
+        int lruKey = map.entrySet().stream()
+                .min(Comparator.comparingLong(e -> e.getValue().lastAccessed))
+                .get().getKey();                  // O(n) scan on every eviction
+        map.remove(lruKey);
+    }
+    map.put(key, new Entry(value, System.nanoTime()));
+}
+```
+
+Eviction is O(n), so the cache degrades exactly when it starts being useful. The
+usual second wrong turn is a `PriorityQueue` keyed on timestamp: eviction drops to
+O(log n), but `get` gets worse, because updating an element's priority means locating
+it in the heap, which is O(n). A heap finds the minimum, not an arbitrary element.
+
+**The insight: you never need to search for the least recently used item if you keep
+it in a known position.** A list ordered by recency always has the victim at one end,
+and a hash map from key to list node lets you jump into the middle without
+traversing.
+
+## Solution 1: `LinkedHashMap` with access order
+
+```java
+static class LRUCache<K, V> extends LinkedHashMap<K, V> {
+    private final int capacity;
+
+    public LRUCache(int capacity) {
+        super(capacity, 0.75f, true); // accessOrder = true
+        this.capacity = capacity;
+    }
+
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > capacity;
+    }
+}
+```
+
+`LinkedHashMap` already is a hash map threaded with a doubly-linked list — that is
+its design. The third constructor argument switches that list from insertion order to
+access order, so every `get` moves the entry to the tail. `removeEldestEntry` is a
+hook called after each insertion; returning `true` evicts the head. Say this out loud
+even when asked for the manual version: knowing the standard library solves it is a
+point in your favour, and being unable to implement it is what is being tested.
+
+## Solution 2: `HashMap` plus a doubly-linked list
+
+```java
+static class LRUCacheManual {
+    private final int capacity;
+    private final Map<Integer, Node> map;
+    private final Node head; // sentinel: head.next = most recent
+    private final Node tail; // sentinel: tail.prev = least recent
+
+    static class Node {
+        int key, value;
+        Node prev, next;
+
+        Node(int key, int value) {
+            this.key = key;
+            this.value = value;
+        }
+    }
+
+    public LRUCacheManual(int capacity) {
+        this.capacity = capacity;
+        this.map = new java.util.HashMap<>();
+        this.head = new Node(0, 0);
+        this.tail = new Node(0, 0);
+        head.next = tail;
+        tail.prev = head;
+    }
+
+    public int get(int key) {
+        if (!map.containsKey(key)) return -1;
+        Node node = map.get(key);
+        moveToHead(node);
+        return node.value;
+    }
+
+    public void put(int key, int value) {
+        if (map.containsKey(key)) {
+            Node node = map.get(key);
+            node.value = value;
+            moveToHead(node);
+        } else {
+            Node newNode = new Node(key, value);
+            map.put(key, newNode);
+            addToHead(newNode);
+
+            if (map.size() > capacity) {
+                Node lru = tail.prev;
+                removeNode(lru);
+                map.remove(lru.key);
+            }
+        }
+    }
+
+    private void addToHead(Node node) {
+        node.next = head.next;
+        node.prev = head;
+        head.next.prev = node;
+        head.next = node;
+    }
+
+    private void removeNode(Node node) {
+        node.prev.next = node.next;
+        node.next.prev = node.prev;
+    }
+
+    private void moveToHead(Node node) {
+        removeNode(node);
+        addToHead(node);
+    }
+}
+```
+
+### The parts that are not obvious
+
+**The map's value is the node, not the value.** The most important line in the class.
+If the map held `Integer` values, a `get` would have the value but no way to find the
+node to reorder without walking the list. Storing the node is what makes both the
+lookup and the reordering O(1).
+
+**Both sentinels exist to delete the null checks.** Without permanent dummy head and
+tail nodes, `removeNode` has four cases — only node, first, last, middle — each with
+different null checks, and that is where off-by-one bugs appear under pressure. With
+sentinels every real node has both neighbours, so removal is unconditionally two
+assignments. Worth saying out loud in exactly those terms.
+
+**The order of the four assignments in `addToHead` matters.** The new node's pointers
+are set first, while `head.next` still refers to the old first node; only then is that
+node's `prev` rewired, and only last is `head.next` moved. Reassigning `head.next`
+before reading it would lose the rest of the list.
+
+**Eviction reads `lru.key` after detaching the node, which is why the node stores its
+key.** With the doomed node in hand and no key on it, you would have to scan the map
+to find which entry points at it. It is the mirror image of why the map stores nodes:
+each structure must locate the other's entry in O(1).
+
+**Update and insert are genuinely different paths.** An update must not create a
+second node for the same key, or the map and the list disagree and the cache leaks.
+The capacity check belongs only in the insert branch, since an update does not change
+the size.
+
+## Verifying it
+
+```java
+public static void main(String[] args) {
+    System.out.println("=== Solution 1: LinkedHashMap-based LRU ===");
+    LRUCache<Integer, String> cache1 = new LRUCache<>(3);
+    cache1.put(1, "one");
+    cache1.put(2, "two");
+    cache1.put(3, "three");
+    System.out.println("After adding 1,2,3: " + cache1);   // {1=one, 2=two, 3=three}
+
+    cache1.get(1);  // access key 1 → moves to end (most recent)
+    System.out.println("After get(1): " + cache1);          // {2=two, 3=three, 1=one}
+
+    cache1.put(4, "four");  // evicts key 2 (least recently used)
+    System.out.println("After put(4): " + cache1);          // {3=three, 1=one, 4=four}
+    System.out.println("Contains 2? " + cache1.containsKey(2));  // false (evicted)
+
+    System.out.println("\n=== Solution 2: Manual HashMap + Doubly Linked List ===");
+    LRUCacheManual cache2 = new LRUCacheManual(2);
+    cache2.put(1, 10);
+    cache2.put(2, 20);
+    System.out.println("get(1) = " + cache2.get(1));   // 10 (moves 1 to most recent)
+    cache2.put(3, 30);                                   // evicts key 2
+    System.out.println("get(2) = " + cache2.get(2));   // -1 (evicted)
+    System.out.println("get(3) = " + cache2.get(3));   // 30
+
+    System.out.println("\nAll tests passed!");
+}
+```
+
+Volunteer the `cache2` case before being asked: a `get` that changes which key is
+evicted. An implementation that never reorders on read still passes an insert-only
+test, so testing `put` alone does not test LRU at all.
+
+## Complexity
+
+| Operation | Time | Why |
+|---|---|---|
+| `get` | O(1) average | Map lookup, then two constant-time rewires |
+| `put` (update) | O(1) average | Map lookup, field assignment, `moveToHead` |
+| `put` (insert, evicting) | O(1) average | `tail.prev` names the victim with no search |
+| Space | O(capacity) | A node plus a map entry per item, plus two sentinels |
+
+Two honesty points. The map operations are O(1) *average*, not worst case — a
+treeified bucket is O(log n) — and saying "O(1) average, and the list work is O(1)
+worst case" costs one clause and is more precise. And the space constant is worse
+than it looks: a `Node` with two references and two ints, plus the `HashMap.Node`
+pointing at it, plus boxed keys. At millions of entries that is the difference
+between fitting in heap and not, which is why production caches use array-based
+layouts.
+
+The only amortisation here is inherited from `HashMap`: resizing is O(n) when it
+happens, amortised O(1) per insertion. Since the cache is bounded you can avoid it by
+sizing the table up front, which is what Solution 1's constructor argument does.
+
+## The follow-up questions
+
+### Why doubly-linked and not singly-linked?
+
+Because removal from the middle needs the predecessor. Given only a `next` pointer you
+would walk from the head to find whoever points at the node, which is O(n) — and
+moving a node to the front on every `get` is the core operation. The known trick of
+copying the successor's contents and deleting the successor does not help here,
+because the map holds pointers to nodes, so relocating data between nodes invalidates
+the map's references. The extra pointer is eight bytes per entry for unconditional
+O(1) removal.
+
+### When `LinkedHashMap`, and when the manual version?
+
+`LinkedHashMap` in production, unless you need something it does not offer: per-entry
+TTL, weight-based eviction, an eviction callback, or a different policy. The manual
+version is for interviews and for those cases.
+
+The honest production answer is neither — use Caffeine or Guava, because you also
+want hit-ratio metrics, refresh-ahead and a better policy. Caffeine defaults to
+Window-TinyLFU, which resists the scan problem LRU has: a single pass over a large
+dataset evicts your entire hot set under LRU, and a frequency-aware policy does not.
+Naming that, and saying you would export hit ratio as a metric, is the answer of
+someone who has operated a cache rather than implemented one.
+
+### How would you make it thread-safe?
+
+Two concurrent `put` calls can interleave inside `addToHead` and corrupt the list
+permanently. Worse, `get` mutates the list, so **even a read-only workload needs
+mutual exclusion** — which rules out the obvious `ReadWriteLock` with `get` taking
+the read lock.
+
+A single exclusive lock around every operation is the right answer here, and the
+reason is worth stating: every operation mutates two structures that must stay
+consistent with each other, and the critical section is a handful of pointer
+assignments. Finer-grained locking buys very little and costs correctness.
+`Collections.synchronizedMap` around Solution 1 gets you there in one line.
+
+If measurement shows the lock is genuinely the bottleneck, the escalation is a
+different design, not finer locks: shard into N independently locked segments keyed by
+hash, or stop maintaining exact order. Caffeine records reads into per-thread buffers
+and reconciles eviction order asynchronously, so readers never touch a shared list.
+**Approximate LRU with lock-free reads beats exact LRU behind a global lock for
+almost every real workload.**
+
+### What changes for a distributed LRU?
+
+Both local assumptions disappear: no shared memory, and pointers are meaningless. In
+practice you use Redis with `maxmemory-policy allkeys-lru` — and Redis's LRU is
+deliberately sampled rather than exact, because maintaining global order over millions
+of keys costs more than the accuracy is worth. Same trade as Caffeine's, and worth
+noticing out loud.
+
+The remaining questions are design questions: which node owns a key (consistent
+hashing, so adding a node moves few keys), what a node failure costs (a burst of
+misses the database must absorb), how you avoid a thundering herd when a hot key
+expires (lock-on-miss or probabilistic early refresh), and whether the cache is
+invalidated or written through, which is the consistency question and the one most
+likely to be pushed on.
+
+### What would LFU change?
+
+LFU evicts the least *frequently* used, so you track counts, and a naive version loses
+O(1) because finding the minimum count is a search. The O(1) design (LeetCode 460)
+keeps the key-to-node map, plus a map from frequency to a doubly-linked list of nodes
+at that frequency, plus a minimum-frequency pointer. Incrementing moves a node between
+frequency lists; eviction takes the tail of the minimum list.
+
+The trade-off is the discussion, not the code. LFU wins on stable access
+distributions and loses when popularity shifts, because yesterday's hot item keeps a
+high count and refuses to leave. Real policies therefore decay counts or combine both
+signals, which is what TinyLFU does with a frequency sketch that decides whether a
+candidate deserves to displace the LRU victim.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **Why both a hash map and a linked list?** The map gives O(1) lookup but no order;
+   the list gives O(1) removal at a known position but O(n) search. LRU needs both.
+2. **Why is the map's value a node?** Otherwise `get` would walk the list to find the
+   node to reorder, making it O(n).
+3. **Why doubly-linked?** Detaching a node needs its predecessor, and every `get`
+   performs a detach.
+4. **Why store the key in the node?** On eviction you hold the node and must remove
+   its map entry; without the key you would scan the map.
+5. **Why sentinel head and tail?** Every real node then has both neighbours, so
+   insertion and removal are unconditional assignments with no special cases.
+6. **Space complexity?** O(capacity), but the constant is a node plus a map entry plus
+   boxing — which is why large production caches are array-based.
+7. **The five-line version?** Extend `LinkedHashMap` with `accessOrder` true and
+   override `removeEldestEntry`.
+8. **Thread-safe how, and why not a read-write lock?** One exclusive lock everywhere,
+   because `get` mutates the list, so no operation is read-only.
+9. **If the lock is a bottleneck?** Shard into independently locked segments, or take
+   approximate LRU with lock-free reads, as Caffeine does.
+10. **What breaks when distributed?** No shared memory, no valid pointers. Redis with
+    `allkeys-lru`, sampled not exact, and the real questions become ownership, failure
+    behaviour and invalidation.
+11. **LFU instead — how, and is it better?** Frequency-to-list map plus a minimum
+    pointer keeps O(1). Better for stable popularity, worse when it shifts, hence
+    decay or hybrid policies.
+12. **One test that proves it is really LRU?** A `get` that changes the eviction
+    victim.
+</Callout>
+
+### Where this connects
+
+- [2. Collections Framework — Deep Dive](/java/2-collections-framework-deep-dive) — what `HashMap` and `LinkedHashMap` do internally, and why the map operations are average rather than worst case.
+- [5. Caching (your strongest topic — you already use Redis)](/system-design/5-caching-your-strongest-topic-you-already-use-redis) — eviction policies, thundering herd and the distributed follow-up above.
+- [3. Concurrency — Senior Must-Have](/java/3-concurrency-senior-must-have) — the locking discussion, and why a `ReadWriteLock` is the wrong instrument.
+- [Pattern 6 — Linked List](/dsa/pattern-6-linked-list) — drills that make the sentinel pattern automatic.
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — key ownership for the distributed version.

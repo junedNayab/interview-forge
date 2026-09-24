@@ -1,0 +1,175 @@
+---
+title: "6-week DSA sprint (pairs with the Master Roadmap, Phase 1–2)"
+topic: "dsa"
+order: 118
+difficulty: "easy"
+estimatedMinutes: 15
+tags: [plan, practice, spaced-repetition, schedule]
+format: "mdx"
+summary: "A six-week pattern-by-pattern schedule with a weekly rhythm, spaced repetition built in, and an explicit 'done' check per week — designed around 75 problems understood rather than 300 skimmed."
+---
+
+## The principle this plan is built on
+
+> **Understanding 75 problems deeply beats skimming 300.** Deeply means you can
+> re-solve it from scratch a week later, name the pattern, and explain why the
+> approach is correct — not that you recognise it.
+
+That distinction is the whole design of this plan, because recognition is a
+trap. Reading a solution produces a strong feeling of understanding that
+disappears completely under interview conditions. The only reliable test is
+**re-solving from scratch after enough delay that you've forgotten the code**,
+which is why spaced repetition is built into every week below rather than left
+as a suggestion.
+
+The plan assumes roughly **8–10 hours a week** — about 1.5 hours on weekdays
+and a longer weekend session. If you have less, stretch it to eight or ten
+weeks rather than cutting the review, because the review is where the learning
+actually happens.
+
+---
+
+## The schedule
+
+| Week | Patterns | New problems | Review |
+|---|---|---|---|
+| 1 | [Arrays & Hashing](/dsa/pattern-1-arrays-hashing), [Two Pointers](/dsa/pattern-2-two-pointers) | 10 | — |
+| 2 | [Sliding Window](/dsa/pattern-3-sliding-window), [Stack](/dsa/pattern-5-stack), [Binary Search](/dsa/pattern-4-binary-search) | 12 | 3 from week 1 |
+| 3 | [Linked List](/dsa/pattern-6-linked-list), [Trees](/dsa/pattern-7-trees-dfs-bfs) | 12 | 3 from weeks 1–2 |
+| 4 | [Tries](/dsa/pattern-8-tries-prefix-trees), [Heaps](/dsa/pattern-9-heaps-priority-queue), [Backtracking](/dsa/pattern-10-backtracking) | 12 | 4 from weeks 1–3 |
+| 5 | [Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find), [Intervals](/dsa/pattern-14-intervals) | 12 | 4 from weeks 1–4 |
+| 6 | [DP](/dsa/pattern-12-dynamic-programming), [Greedy](/dsa/pattern-13-greedy), [Bit & Math](/dsa/pattern-15-bit-manipulation-math) | 14 | 4 from weeks 1–5 |
+| 7+ | Weak patterns, hards, timed mocks | ongoing | ongoing |
+
+Two things about the ordering. **Arrays and hashing come first** because
+practically every later pattern uses a hash map inside it. **Dynamic
+programming comes last** because it's the hardest to build intuition for and
+because several DP problems are easier once you've internalised recursion from
+the trees and backtracking weeks.
+
+The review column is not optional. **It is the part that converts practice into
+retained skill**, and it's the first thing people cut.
+
+---
+
+## The weekly rhythm
+
+```
+Mon   Read the pattern lesson. Solve 2 easy problems in it.
+Tue   3 mediums. Timer on.
+Wed   3 mediums. Timer on.
+Thu   2 mediums + 1 hard attempt (30 min, then read the solution).
+Fri   Light: re-solve 2 problems from earlier weeks, from scratch.
+Sat   Longer session: 3 mediums under timed conditions, out loud.
+Sun   Off, or write up the week's pattern in your own words.
+```
+
+That Sunday write-up is worth more than it looks. **Explaining a pattern in
+your own words, in writing, exposes the parts you only think you understand** —
+it's the same mechanism as the out-loud test, applied to the pattern rather
+than to a single problem.
+
+### How to run one problem
+
+1. **Timer on: 25 minutes for a medium.** Untimed practice trains a skill you
+   don't get to use.
+2. **Solve it out loud**, alone, as if someone were listening. This is the
+   single highest-return habit and almost nobody does it.
+3. **If you're stuck at 25 minutes**, take a targeted look — the approach only,
+   not the code — and then close it and implement it yourself.
+4. **If you're still stuck at 40 minutes**, read the full solution, then
+   **close it and reimplement from scratch.** Reading is not practice.
+5. **Write one line in your mistake log**: the problem, the pattern, and what
+   specifically went wrong.
+6. **Add it to the review queue** for one week out.
+
+### The mistake log
+
+One line per problem, in a plain text file:
+
+```
+Sep 14  Longest Substring No Repeat  sliding window
+        forgot to move left past the previous index, moved by 1
+Sep 15  Koko Eating Bananas          binary search on answer
+        didn't recognise the answer space was monotone — wasted 15 min
+```
+
+Read it before every session. Within two weeks the patterns in **your own**
+errors become obvious, and they're far more actionable than a problem count.
+Most people find their errors cluster into two or three recurring habits — an
+off-by-one in the shrink condition, or failing to spot that the answer space is
+searchable — and fixing a habit is worth twenty problems.
+
+---
+
+## What "done" looks like each week
+
+Don't advance on the calendar. Advance on the check.
+
+| Week | You're done when you can, from scratch |
+|---|---|
+| 1 | Write the complement-hash-map solution and the prefix-sum-plus-map solution without reference, and explain why the prefix sum works |
+| 2 | Write the variable sliding-window template and explain the amortised `O(n)` argument; write all three binary search forms |
+| 3 | Reverse a linked list iteratively, explain why Floyd's second phase finds the cycle start, and write all four tree traversals |
+| 4 | Write the backtracking choose/explore/un-choose template and explain the duplicate-skip condition; explain why k-th largest uses a min-heap |
+| 5 | Write BFS and DFS on a grid, do a topological sort both ways, and state the difference between directed and undirected cycle detection |
+| 6 | Take an unfamiliar DP problem and correctly state the state definition and recurrence, even if you can't finish the code |
+
+**If you fail the check, repeat the week.** Advancing on schedule while failing
+the check is how people arrive at week six having learned nothing durable.
+
+---
+
+## Week 7 and beyond
+
+The sprint builds coverage. What follows builds reliability:
+
+- **Timed full mocks.** Two problems in 45 minutes, with another person.
+  [Coding-round survival tips](/dsa/coding-round-survival-tips) covers the
+  tactics; this is where you practise them under real pressure.
+- **Your weakest two patterns**, from the mistake log. Almost always DP and
+  graphs.
+- **Hard problems**, but only in patterns where your mediums are solid. Hards in
+  a weak pattern teach you nothing except that it's weak.
+- **Re-solve the full set on a spaced schedule** — anything you got wrong at one
+  week, two weeks, one month.
+
+<Callout type="tip" title="The honest signal that you're ready">
+Not a problem count. This:
+
+**Pick a random medium in a pattern you covered four weeks ago. Solve it out
+loud, on a timer, in a plain editor, without hints, in under 25 minutes —
+including stating the complexity and testing it yourself.**
+
+Do that successfully three times in a row across three different patterns and
+you are ready for the coding round. If you can't, the number of problems you've
+seen is not the missing ingredient.
+</Callout>
+
+<Callout type="pitfall" title="How this plan usually fails">
+- **Skipping the review column** because new problems feel more productive.
+  They aren't; review is where retention comes from.
+- **Reading solutions instead of solving.** Reading produces recognition, which
+  evaporates under pressure.
+- **Practising untimed and silently**, then being surprised by the interview.
+- **Chasing a problem count.** 300 skimmed leaves you worse off than 75
+  understood, and it takes longer.
+- **Advancing on the calendar rather than the check.**
+- **Starting with dynamic programming** because it's scary. It's last for a
+  reason.
+- **Stopping DSA entirely once you move to system design.** Two problems a week
+  maintains it; zero loses it in a month.
+</Callout>
+
+### Where this connects
+
+- [How to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+  — the method to practise on every problem here.
+- [Coding-round survival tips](/dsa/coding-round-survival-tips) — the tactics
+  for week 7's mocks.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  reference to keep open throughout.
+- [The master roadmap](/roadmap) — how this sprint interleaves with the other
+  three tracks, which should keep moving in parallel rather than waiting.
+- [System design](/system-design) — where your time should shift once mediums
+  are reliable.

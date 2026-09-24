@@ -1,0 +1,378 @@
+---
+title: "Case 4 — Design a Chat System (WhatsApp/Messenger)"
+topic: "system-design"
+order: 304
+group: "Case Studies"
+difficulty: "hard"
+estimatedMinutes: 23
+tags: [case-study, websocket, stateful, presence, ordering, cassandra]
+prerequisites: [1-the-framework-how-to-drive-a-45-minute-design-interview]
+format: "mdx"
+summary: "The one design where servers are stateful: connection routing, exactly-once-feeling delivery over at-least-once transport, per-conversation ordering, presence at scale, and why group chat is a different problem."
+---
+
+## Layer 1 — The mental model
+
+Every other case study in this track is **request/response and stateless** — any
+server can handle any request, so you scale by adding boxes behind a load
+balancer.
+
+Chat is the one that breaks that, and it's why it's asked.
+
+The server must **push** to a client that isn't asking for anything, which means
+holding a live connection per online user. That connection lives on **one
+specific server**, so to deliver a message you must first answer: *which of my
+500 gateway servers is holding Bob's socket right now?* You've introduced
+routing, a registry, and stateful boxes — and everything hard about this design
+follows from that.
+
+```
+Alice's phone ══websocket══► Gateway 7 ──┐
+                                          │  "where is Bob?"
+                                          ▼
+                                    Registry (Redis)
+                                    bob → Gateway 42
+                                          │
+Bob's phone   ══websocket══► Gateway 42 ◄─┘  push to Bob's socket
+```
+
+Three consequences worth stating up front:
+
+1. **Servers are stateful**, so deploys and failures disconnect real users.
+2. **Delivery is at-least-once at best**, so the client must deduplicate.
+3. **Ordering is per-conversation**, not global — and you need it to actually be
+   per-conversation, not per-server.
+
+---
+
+## Layer 2 — Driving it with R-E-A-H-D-B
+
+### R — Requirements
+
+**Functional:** 1:1 messaging, group messaging, online presence, delivery and
+read receipts, message history, offline delivery.
+
+**Non-functional:**
+
+- **Real-time**: end-to-end delivery under ~200 ms for online users.
+- **No message loss**, ever. This is the requirement users notice most, and it
+  outranks latency.
+- **Ordered within a conversation.** Nobody cares about ordering across
+  different chats.
+- Millions of concurrent persistent connections.
+- **Out of scope:** voice/video calling, media transcoding, end-to-end
+  encryption implementation (mention the concept, don't design the protocol),
+  spam detection.
+
+### E — Estimate
+
+```
+Users:       50M DAU, assume ~10M concurrent connections at peak
+Messages:    50M × 40/day = 2e9/day  ÷ 86,400 ≈ 23,000 msg/sec  (peak ~70K)
+Storage:     2e9 × 200 bytes ≈ 400 GB/day → ~146 TB/year
+Connections: 10M concurrent
+             at ~10K sockets/server → 1,000 gateway servers
+             (each socket costs memory for buffers; this is a RAM problem)
+```
+
+**The conclusions to state out loud:**
+
+- 23K messages/sec is real but not extreme. **The connections are the hard
+  part**, not the message rate.
+- 146 TB/year means storage is genuinely large and growing linearly — this needs
+  a horizontally scalable store and a retention policy, unlike the URL
+  shortener.
+- 10 million sockets across 1,000 servers means **connection routing is
+  unavoidable**, which is the core of the design.
+
+### A — API
+
+Two different protocols, which is itself a design point:
+
+```
+WebSocket (persistent, bidirectional) — the real-time path
+  → { type: "send",     conversationId, clientMsgId, text }
+  ← { type: "ack",      clientMsgId, serverMsgId, seq }
+  ← { type: "message",  conversationId, serverMsgId, seq, senderId, text }
+  ← { type: "receipt",  serverMsgId, status: "delivered" | "read" }
+
+REST (request/response) — everything that isn't real-time
+  GET  /v1/conversations/{id}/messages?before=<seq>&limit=50
+  POST /v1/conversations            { participantIds[] }
+```
+
+**`clientMsgId` is the load-bearing detail.** The client generates a UUID before
+sending. It's what makes retries safe: if the network drops after the server
+persisted the message but before the ack arrived, the client resends, and the
+server recognises the ID and returns the original ack instead of creating a
+duplicate. This is the
+[idempotency key](/system-design/15-microservice-reliability-patterns) pattern in
+a different costume, and it's the answer to "how do you avoid duplicate
+messages?"
+
+### Why WebSocket
+
+Be able to justify the transport, because it's an easy early question:
+
+| Approach | How | Why not |
+|---|---|---|
+| Short polling | Request every N seconds | Latency = poll interval; mostly empty responses |
+| Long polling | Hold the request open until data | Works, but a new connection per message and awkward at scale |
+| **WebSocket** | One upgraded TCP connection, bidirectional | **The answer** |
+| Server-Sent Events | Server→client stream over HTTP | One-directional; fine for feeds, not chat |
+
+WebSocket starts as an HTTP request with `Upgrade: websocket`, then the
+connection becomes a raw bidirectional frame channel. Note the practical detail:
+intermediaries drop idle connections, so you need **heartbeats** (ping/pong every
+~30 s) both to keep the connection alive and to detect death — which conveniently
+doubles as your presence signal.
+
+Mobile reality worth mentioning: a phone can't hold a socket while backgrounded.
+Offline and backgrounded users are reached via **APNs/FCM push notifications**,
+not WebSocket. Real systems are always both.
+
+### H — High-level design
+
+```
+            ┌──────────────────────────────────────────┐
+  Alice ════│ Gateway 7 (stateful: holds sockets)      │
+            └───────────────┬──────────────────────────┘
+                            │ 1. persist
+                            ▼
+                    ┌──────────────┐    ┌────────────────────┐
+                    │ Chat service │───►│ Cassandra          │
+                    └──────┬───────┘    │ (messages by conv) │
+                           │            └────────────────────┘
+              2. who has Bob?           ┌────────────────────┐
+                           ├───────────►│ Redis: session reg │
+                           │            │ bob → gateway-42   │
+              3. route     │            └────────────────────┘
+                           ▼
+            ┌──────────────────────────────────────────┐
+  Bob   ════│ Gateway 42                               │
+            └──────────────────────────────────────────┘
+                           │ offline?
+                           └──► offline queue → APNs/FCM push
+```
+
+**Persist before delivering.** The order matters: write the message durably,
+*then* ack the sender, *then* attempt delivery. If you ack first and the write
+fails, you've told the user their message was sent and lost it — the one failure
+they will never forgive. Delivery can be retried; the ack cannot be taken back.
+
+**The session registry** maps `userId → gatewayId`, in Redis with a TTL
+refreshed by heartbeats. A dead gateway's entries expire on their own, which is
+much better than trying to clean up after a crash.
+
+Larger deployments put a **message queue between gateways** instead of direct
+gateway-to-gateway calls: the chat service publishes to a topic partitioned by
+recipient, and each gateway consumes the partitions for the users it holds. That
+decouples gateways from each other and gives you buffering when one is slow.
+
+### D — Storage
+
+The access pattern is narrow and that's what justifies the choice: *"give me the
+last 50 messages in conversation X, before sequence N."* Always by conversation,
+always in order, never a join, never an aggregate.
+
+```
+Cassandra:
+  PRIMARY KEY ((conversation_id), seq DESC)
+    partition key = conversation_id   → all of a conversation on one node
+    clustering key = seq DESC         → stored sorted; pagination is a slice
+```
+
+That gives writes distributed across the cluster by conversation, and reads that
+are a single-partition sequential scan — the best case for a wide-column store.
+Justify it that way (massive write volume, one simple access pattern, no joins)
+rather than saying "NoSQL scales."
+
+<Callout type="pitfall" title="The unbounded partition problem">
+A busy group chat running for years grows one Cassandra partition without limit,
+and huge partitions are a known operational failure — slow reads, compaction
+pressure, and eventually a node that can't be repaired.
+
+**Fix: add a time bucket to the partition key** — `((conversation_id, month), seq
+DESC)`. Reads usually want the newest bucket; paginating further back walks
+earlier buckets. This is the kind of detail that shows you've operated a
+wide-column store rather than just read its name, and interviewers who know
+Cassandra ask for it specifically.
+</Callout>
+
+### Ordering — subtler than it looks
+
+"Use timestamps" is the wrong answer, and knowing why is the point. Clocks on
+different gateway servers disagree by milliseconds to seconds, so two messages
+sent a moment apart can be stored out of order — and clock skew can even move
+messages *backwards* in a conversation.
+
+**Assign a per-conversation monotonic sequence number** at a single point of
+authority:
+
+- Redis `INCR conv:{id}:seq` — fast, and per-conversation so there's no global
+  bottleneck. Note the durability caveat from
+  [CAP](/system-design/7-cap-theorem-consistency-models): a Redis failover can
+  roll the counter back, so either persist it or accept occasional collisions
+  and break ties deterministically.
+- Or route all messages for a conversation through **one partition** of a log
+  (Kafka keyed by `conversationId`), which gives ordering by construction — the
+  same trick as
+  [keying by customer](/system-design/14-kafka-and-event-streaming).
+
+The client then orders by `seq`, not by arrival time, and can detect gaps: seeing
+`seq` 1, 2, 4 means 3 is missing, so request it. **That gap detection is what
+turns at-least-once transport into a correct-looking conversation**, and it's a
+strong thing to volunteer.
+
+### Delivery semantics and receipts
+
+Three states, each requiring a round trip:
+
+```
+sent      → server persisted it       (✓)
+delivered → recipient's device has it (✓✓)
+read      → recipient opened the chat (✓✓ blue)
+```
+
+Receipts are just lightweight messages flowing the other way, and they
+**double your message volume** — worth noting in the estimate. For a 100-person
+group, "delivered" receipts from everyone are 100 events per message, which is
+why group receipts are usually aggregated or dropped.
+
+Delivery is at-least-once: the server retries until the device acks. Combined
+with `clientMsgId` and `seq`, the client deduplicates and orders, producing
+exactly-once *appearance* over at-least-once transport. That framing — "I can't
+get exactly-once delivery, so I make the client idempotent" — is the same
+conclusion as the [Kafka lesson](/system-design/14-kafka-and-event-streaming),
+and saying so shows you're applying a principle rather than reciting a design.
+
+### Presence at scale
+
+Naive presence is a surprisingly good trap. Each client heartbeats every 30
+seconds; store `presence:{userId} = online` in Redis with a 60-second TTL. If
+heartbeats stop, the key expires and the user is offline. Simple.
+
+**The problem is fan-out, not storage.** If you push every status change to
+everyone who has that user in their contacts, a user with 1,000 contacts
+generates 1,000 notifications per transition — and users toggle constantly as
+phones move between networks. At 50M DAU this dwarfs actual message traffic.
+
+Mitigations to name:
+
+- **Only notify people currently looking at that conversation**, not all
+  contacts. This is the big one.
+- **Debounce transitions.** Don't broadcast "offline" until the user has been
+  gone for a minute; most disconnections are transient.
+- **Poll on demand** for contact lists, rather than pushing every change.
+- Consider whether you need real-time presence at all — "last seen 5 min ago" is
+  cheap and usually sufficient.
+
+### Group chat is a different problem
+
+1:1 is a lookup and a push. Groups are **fan-out**, which makes this the same
+decision as [the news feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline):
+
+- **Small groups** (WhatsApp caps around 1,024): write once, fan out to each
+  member's connection. Fine.
+- **Large groups / channels** (Slack, Discord, Telegram at 200K members): fan-out
+  per message becomes a storm. Switch to a **pull model** — one copy of the
+  message, members read from the conversation log when they open it, with
+  real-time push only to members who currently have that channel open.
+
+The hybrid is the same shape as the feed: push for the common small case, pull
+for the large case. Recognising that two different case studies share one
+underlying decision is exactly the kind of connection interviewers listen for.
+
+### B — Bottlenecks and failure modes
+
+- **Stateful gateways make deploys disruptive.** Restarting one drops 10,000
+  connections; all those clients reconnect at once — a **thundering herd** that
+  can knock over the next server. Mitigate with slow connection draining,
+  randomised reconnect backoff with jitter, and rolling deploys.
+- **Connection memory is the scaling limit.** Each socket needs read/write
+  buffers, so gateways are RAM-bound. This is where Erlang/Elixir (WhatsApp) and
+  Go earn their reputation.
+- **Load balancing is by connection, not request.** A least-connections balancer
+  is right here; round-robin distributes *connections* evenly but not *activity*,
+  so one gateway can end up holding all the busy users.
+- **The session registry is a SPOF** on the delivery path. Replicate it, and fall
+  back to "treat as offline and push" if it's unavailable — degraded but not
+  broken.
+- **Hot conversation.** A 200K-member channel is one partition and one
+  sequence counter. Same hot-key problem as everywhere else.
+- **Storage growth** at 146 TB/year needs tiering (recent in Cassandra, archive
+  to object storage) and a retention policy.
+
+<Callout type="note" title="End-to-end encryption, in one paragraph">
+If asked, don't design the protocol — describe the consequence. With E2EE
+(Signal protocol: X3DH for key agreement, Double Ratchet for forward secrecy),
+**the server stores ciphertext it cannot read.** That kills server-side search,
+server-side spam filtering, and any server-generated previews — search must
+happen on-device over a local index. Group E2EE means encrypting per recipient
+device, so a 100-person group with 2 devices each is 200 encryptions per message.
+Knowing the *architectural* consequences is what's being tested, not the
+cryptography.
+</Callout>
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why WebSocket over polling?"** Server-initiated push with one connection;
+   polling trades latency against wasted empty requests.
+2. **"How do you find which server holds a user's connection?"** A session
+   registry (`userId → gatewayId`) in Redis, TTL-refreshed by heartbeats so dead
+   gateways clean themselves up.
+3. **"Persist first or deliver first?"** Persist, then ack, then deliver. You can
+   retry delivery; you can't un-ack a lost message.
+4. **"How do you guarantee ordering?"** Per-conversation sequence numbers from a
+   single authority, or a log partitioned by conversation ID. Never wall-clock
+   timestamps — clock skew reorders messages.
+5. **"How does the client detect a missing message?"** Gaps in `seq`. Seeing 1,
+   2, 4 means fetch 3.
+6. **"How do you prevent duplicates?"** Client-generated `clientMsgId`; the
+   server returns the original ack on a retry.
+7. **"What about offline users?"** Store in an offline queue, deliver on
+   reconnect, and send a push notification via APNs/FCM.
+8. **"Why Cassandra?"** Huge write volume, one access pattern (by conversation,
+   ordered), no joins. Partition by conversation, cluster by sequence — **and
+   bucket by time** so partitions stay bounded.
+9. **"How does presence scale?"** Heartbeat with a TTL key. The cost is fan-out,
+   not storage — only notify open conversations, and debounce transitions.
+10. **"Group chat with 200,000 members?"** Stop fanning out. Switch to pull: one
+    copy, members read the log, push only to those with the channel open.
+11. **"You deploy a gateway. What happens?"** 10,000 clients reconnect at once.
+    Drain slowly, reconnect with jittered backoff.
+12. **"How do you load balance persistent connections?"** Least-connections, and
+    accept that connection count is a poor proxy for load.
+13. **"What does E2EE cost you?"** Server-side search, spam filtering and
+    previews. Search moves on-device.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Ordering by timestamp.** Clock skew across gateways reorders conversations.
+- **Acking before persisting.** The one bug users never forgive.
+- **No reconnect jitter.** Every client returns simultaneously after a blip and
+  finishes the job the blip started.
+- **Unbounded Cassandra partitions.** A years-old group chat becomes an
+  unrepairable node.
+- **Broadcasting presence to all contacts.** Presence traffic exceeds message
+  traffic.
+- **Assuming WebSocket is always available.** Mobile backgrounding, captive
+  portals and corporate proxies all break it; you need a push fallback.
+</Callout>
+
+### Where this connects
+
+- [Case 3: news feed](/system-design/case-3-design-a-news-feed-twitter-instagram-timeline)
+  — group chat is the same push/pull fan-out decision.
+- [14. Kafka](/system-design/14-kafka-and-event-streaming) — partition-per-key is
+  how you get ordering for free.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — `clientMsgId` is an idempotency key; jittered backoff prevents the reconnect
+  storm.
+- [Networking](/cs-fundamentals/1-networking) — the WebSocket upgrade handshake
+  and what keeps a TCP connection alive.
+- [Case 5: notification system](/system-design/case-5-design-a-notification-system-email-sms-push)
+  — the push path for offline users.

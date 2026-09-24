@@ -1,0 +1,219 @@
+---
+title: "Coding-round survival tips"
+topic: "dsa"
+order: 119
+difficulty: "easy"
+estimatedMinutes: 16
+tags: [interview-tactics, communication, time-management, java]
+format: "mdx"
+summary: "The tactical layer — how to spend 45 minutes, what to do when you blank, the Java habits that matter without an IDE, and the behaviours that lose points even when the code is right."
+---
+
+## The premise
+
+[How to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+gives you the method. This is the tactical layer: the things that decide the
+outcome once you're actually in the room and the clock is running.
+
+> Most failed coding rounds are not failures of algorithmic knowledge. They are
+> failures of **time management, communication, or nerves** — three things you
+> can practise directly, and most people never do.
+
+---
+
+## Managing the clock
+
+A 45-minute round has a shape, and knowing it prevents the most common
+disaster: spending twenty-five minutes thinking and having no working code.
+
+```
+0–5    clarify and example       ← never skip, it's the cheapest insurance
+5–10   brute force + optimise
+10–30  code
+30–35  test and fix
+35–45  follow-ups, or the second problem
+```
+
+**The rule that saves rounds: at the 15-minute mark you should be typing.** Not
+necessarily the optimal solution — the brute force is fine — but typing. An
+elegant idea that never became code scores close to nothing.
+
+Two derived habits:
+
+- **If you're 10 minutes in with no approach, commit to the brute force out
+  loud** and start writing. You can optimise afterwards, and you've removed the
+  risk of finishing empty.
+- **If they give you two problems, budget 20 minutes each.** Sacrificing the
+  second problem entirely to perfect the first is usually the wrong trade.
+
+## Communicate continuously
+
+**Silence reads as stuck**, even when you're thinking productively. The
+interviewer cannot see your reasoning and has to write down what they observed.
+
+So narrate. Not a monologue — just the decisions:
+
+- *"I'm considering a hash map here because I need O(1) lookups."*
+- *"Let me think about whether this handles duplicates."* (Then a short pause is
+  fine, because they know what the pause is for.)
+- *"I'm going to write the helper first and come back to the main loop."*
+
+When you genuinely need to think, **say that you're thinking about**: *"Give me
+thirty seconds to work out the invariant here."* A labelled silence is
+completely acceptable. An unexplained one is not.
+
+## What to do when you blank
+
+It happens to everyone, and the recovery is a procedure rather than a feeling:
+
+1. **Say something true.** *"Let me re-read the constraints."* Speaking breaks
+   the freeze and buys time legitimately.
+2. **Shrink the input.** Solve it for n equals 1, then 2, then 3. The general
+   structure usually appears from the small cases.
+3. **Read the input shape for a pattern.** Sorted suggests binary search or two
+   pointers. Contiguous suggests a sliding window. "All possible" suggests
+   backtracking. "Minimum cost" or "number of ways" suggests DP. A grid or tree
+   suggests DFS/BFS. `n <= 20` suggests exponential is intended.
+4. **Ask a specific question**, not "can I have a hint." *"I'm thinking of
+   sorting first, but that loses the original indices — is there a reason to
+   keep them?"* Targeted questions cost you very little and often unlock the
+   problem.
+
+## Writing Java without an IDE
+
+Many interviews use a plain editor with no autocomplete and no compiler.
+Practise that occasionally, because the muscle memory is different.
+
+The things people fumble under pressure:
+
+```java
+// Know these cold — no autocomplete to save you
+Map<String, Integer> map = new HashMap<>();
+map.getOrDefault(key, 0);
+map.computeIfAbsent(key, k -> new ArrayList<>()).add(v);
+map.merge(key, 1, Integer::sum);          // frequency counting in one line
+
+Deque<Integer> stack = new ArrayDeque<>();   // not Stack (legacy, synchronized)
+stack.push(x); stack.pop(); stack.peek();
+
+PriorityQueue<int[]> pq =
+    new PriorityQueue<>((a, b) -> a[1] - b[1]);   // min-heap by default
+
+Arrays.sort(arr);
+Arrays.sort(intervals, (a, b) -> Integer.compare(a[0], b[0]));  // avoid overflow
+Collections.sort(list, Comparator.comparingInt(Foo::getX));
+
+int[] copy = Arrays.copyOfRange(arr, from, to);
+char[] chars = s.toCharArray();
+new StringBuilder(s).reverse().toString();
+```
+
+Four Java-specific traps that produce wrong answers rather than compile errors,
+which makes them worse:
+
+- **`==` on boxed `Integer`s** compares references outside the −128 to 127
+  cache. Use `.equals()` or unbox to `int`.
+- **`a - b` as a comparator overflows** for large values. Use
+  `Integer.compare(a, b)`.
+- **Integer division truncates**, and `(lo + hi) / 2` can overflow. Use
+  `lo + (hi - lo) / 2`.
+- **`String` concatenation in a loop** is `O(n^2)`. Use `StringBuilder`.
+
+And write **compilable** code. Missing semicolons and undeclared variables are
+noise that distracts from your actual reasoning; if the platform runs your code,
+they're fatal.
+
+## Edge cases to mention proactively
+
+Naming these before you're asked is a cheap, reliable signal. Run down the list
+mentally on every problem:
+
+| Category | Cases |
+|---|---|
+| Size | Empty input, one element, two elements |
+| Values | Duplicates, negatives, zero, all identical |
+| Bounds | Maximum and minimum values, `int` overflow |
+| Structure | Null, an unbalanced tree, a cycle, a disconnected graph |
+| Result | No valid answer, multiple valid answers |
+
+You don't need to *handle* all of them — you need to **say** which ones matter
+and which the constraints rule out. *"The constraints say the array is
+non-empty, so I won't guard against that, but I do need to handle duplicates."*
+
+## Behaviours that lose points with correct code
+
+<Callout type="pitfall" title="Correct answer, poor score">
+- **Coding immediately** without clarifying. You may build the wrong thing, and
+  you've skipped the cheapest points available.
+- **Silence** for long stretches.
+- **Arguing with a hint.** Interviewers give hints because they want you to
+  pass. Take it, and say why it helps.
+- **Ignoring a stated constraint** and solving a different problem.
+- **Single-letter variable names everywhere.** Legibility is scored.
+- **Saying "I've seen this one"** and reciting a memorised solution. Interviewers
+  probe memorised answers immediately, and the follow-up exposes it. Solve it
+  again, out loud, even if you remember.
+- **Not testing**, or asking *"does that look right?"* instead of verifying it
+  yourself.
+- **Giving up on the follow-up** after solving the main problem. The follow-up
+  is often where the level decision is made.
+- **No questions at the end.** You have five minutes and they're free.
+</Callout>
+
+## Online assessments are a different game
+
+The automated first round has different rules, because there's no human to
+score your reasoning:
+
+- **Only the tests matter.** Nobody reads your narration, so optimise for
+  passing cases.
+- **Read every constraint** — they tell you the required complexity, and an
+  `O(n^2)` solution will time out at `n = 10^5`.
+- **Handle input parsing carefully.** A surprising share of failures are parsing
+  bugs, not algorithm bugs.
+- **Partial credit usually exists.** A brute force that passes the small cases
+  beats an empty submission, so submit something before you optimise.
+- **Watch for overflow and off-by-one**, since hidden tests are built to find
+  exactly those.
+
+## Practising so this holds under pressure
+
+The gap between solving a problem at home and solving one in an interview is
+almost entirely about conditions, so change the conditions:
+
+- **Always use a timer.** 30–40 minutes per medium. Untimed practice trains a
+  skill you won't get to use.
+- **Always speak out loud**, alone, as if someone were listening. This feels
+  ridiculous and is the single highest-return change you can make.
+- **Do some sessions in a plain text editor** with no autocomplete.
+- **Do real mocks** with another person — Pramp, interviewing.io, or a friend.
+  There is no substitute for being interrupted by someone else.
+- **Keep a mistake log**, one line per problem: what you got wrong and why. Read
+  it before each session. Patterns in your own errors appear within two weeks
+  and are far more useful than a problem count.
+- **Re-solve from scratch**, a week later, without looking. Recognising a
+  solution is not the same as being able to produce one, and only re-solving
+  tells them apart.
+
+<Callout type="tip" title="The single best practice habit">
+Record yourself solving one problem out loud, then watch it back.
+
+It is uncomfortable and it is the fastest feedback available. You will hear the
+long silences you didn't notice, the point where you stopped explaining, and the
+moment you started coding without a plan. Nothing else surfaces those as
+quickly, and all three are directly scored.
+</Callout>
+
+### Where this connects
+
+- [How to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+  — the seven-step method these tactics support.
+- [6-week DSA sprint](/dsa/6-week-dsa-sprint-pairs-with-the-master-roadmap-phase-1-2)
+  — the practice schedule.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — reading
+  the constraints to infer the intended complexity.
+- [Collections deep dive](/java/2-collections-framework-deep-dive) — the Java
+  data structures you'll reach for, and their real costs.
+- Once you clear mediums consistently, shift weight to
+  [system design](/system-design) — the round that most often decides the
+  level.

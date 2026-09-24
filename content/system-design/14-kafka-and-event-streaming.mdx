@@ -1,0 +1,316 @@
+---
+title: "14. Kafka & event streaming"
+topic: "system-design"
+order: 210.2
+group: "Fundamentals"
+difficulty: "hard"
+estimatedMinutes: 18
+tags: [kafka, messaging, streaming, durability, exactly-once]
+prerequisites: [8-asynchronous-processing-message-queues]
+format: "mdx"
+summary: "Partitions, offsets and consumer groups; what acks and ISR actually guarantee; why exactly-once is real inside Kafka and a lie outside it; and the operational failures interviewers ask about."
+---
+
+## Layer 1 — The mental model
+
+A traditional queue *deletes* a message once someone consumes it. Kafka does
+not. Kafka is an **append-only log** that clients read by position, and
+retention is a separate policy from consumption.
+
+That one difference produces everything else:
+
+- **Many independent consumers** can read the same messages, each tracking its
+  own position. Adding an analytics consumer to an existing order stream changes
+  nothing for the order-processing consumer.
+- **Replay is free.** Reset your position to yesterday and reprocess. With a
+  queue, that data is gone.
+- **Ordering is a real guarantee**, because a log has a fixed sequence — but
+  only *within a partition*, which is the single most consequential detail in
+  this lesson.
+
+```
+Topic "orders", 3 partitions — each an independent append-only log:
+
+ P0 │ 0 │ 1 │ 2 │ 3 │ 4 │        ← producers append at the end
+ P1 │ 0 │ 1 │ 2 │              ← consumers read at their own offset
+ P2 │ 0 │ 1 │ 2 │ 3 │
+              ▲       ▲
+        consumer-A  consumer-B    (different groups, independent offsets)
+```
+
+Think of it as "a distributed, replicated, durable `ArrayList` you can only
+append to, that many readers scan at their own pace."
+
+---
+
+## Layer 2 — The mechanism
+
+### Partitions decide everything
+
+A topic is split into partitions; a partition is the unit of ordering,
+parallelism and placement.
+
+**Which partition does a message go to?** If the producer sets a key:
+`murmur2(key) % partitionCount`. If not, messages are batched round-robin across
+partitions.
+
+This makes the key choice a design decision with consequences:
+
+| Key | Result |
+|---|---|
+| `orderId` | Perfect spread; **no ordering** between events for one order |
+| `customerId` | All of one customer's events ordered; skew if one customer is huge |
+| `null` | Maximum throughput, no ordering at all |
+
+The rule to internalise: **ordering is per-partition, so anything that must be
+processed in order must share a key.** If a "payment captured" event can overtake
+its own "order created" event, you have a bug that only shows up under load.
+
+<Callout type="pitfall" title="Partition count is nearly irreversible">
+Adding partitions to an existing keyed topic **breaks ordering permanently**:
+`murmur2(key) % 10` and `% 20` send the same key to different partitions, so a
+key's history is now split across two logs with no ordering between them. There
+is no rebalance that fixes it.
+
+So partition count must be chosen for future load, and the ceiling matters:
+consumer parallelism in a group can never exceed the partition count. Ten
+partitions means at most ten useful consumers, forever.
+
+But over-provisioning isn't free either — each partition costs file handles,
+memory for buffers, and leader-election time on broker failure. Thousands of
+partitions per broker slows failover measurably. The usual heuristic: target
+throughput divided by per-consumer throughput, then round up generously —
+typically 12–100 for a busy service topic, not 3 and not 5,000.
+</Callout>
+
+### Consumer groups and rebalancing
+
+A **consumer group** is a set of consumers sharing a `group.id`. Kafka assigns
+each partition to **exactly one** consumer in the group. Different groups get
+independent copies of the stream.
+
+When members join or leave, the group **rebalances** and partitions are
+reassigned. This is where most production pain lives:
+
+- **Eager rebalancing** (the old default) is stop-the-world: every consumer
+  revokes every partition, then reassignment happens. The whole group stops
+  processing for the duration.
+- **Cooperative incremental rebalancing** (`CooperativeStickyAssignor`) revokes
+  only the partitions that actually need to move. Use it; the reason it exists
+  is that eager rebalances at scale cause multi-second outages on every deploy.
+
+Two timeouts drive rebalances, and confusing them is a classic:
+
+- `session.timeout.ms` (default 45s) — how long the broker waits for a
+  **heartbeat**. Heartbeats come from a background thread, so they continue even
+  while your code is busy.
+- `max.poll.interval.ms` (default 5 min) — how long between calls to `poll()`.
+  This one covers **your processing time**. Exceed it and the broker concludes
+  you're dead and rebalances, even though you're heartbeating fine.
+
+The classic failure: a consumer processes a batch of 500 records, each making a
+slow HTTP call. Processing takes 6 minutes, the broker evicts it, another
+consumer picks up the partition and reprocesses the same batch, also takes 6
+minutes, and the group never makes progress. This is a **rebalance storm**, and
+the fix is reducing `max.poll.records` or raising `max.poll.interval.ms` — not
+adding consumers.
+
+### Replication, ISR, and what `acks` really means
+
+Each partition has one **leader** and some **followers**. All reads and writes go
+to the leader; followers replicate from it. The **ISR** (in-sync replica set) is
+the replicas currently caught up within `replica.lag.time.max.ms`.
+
+`acks` is the producer's durability knob:
+
+| `acks` | Waits for | Loses data when |
+|---|---|---|
+| `0` | nothing | anything at all; fire-and-forget |
+| `1` | leader's local write | leader dies before a follower replicates |
+| `all` | every replica in the ISR | see below |
+
+`acks=all` alone is **not** sufficient, and this is the follow-up that catches
+people. If two of three replicas fall behind, the ISR shrinks to just the
+leader — and `acks=all` now means "acknowledged by one replica." You get
+`acks=1` durability while believing you have three.
+
+The complete durable configuration:
+
+```properties
+# Producer
+acks=all
+enable.idempotence=true       # dedup on retry; also pins acks=all, retries=MAX
+max.in.flight.requests.per.connection=5   # safe to keep >1 with idempotence
+
+# Topic / broker
+replication.factor=3
+min.insync.replicas=2         # reject writes if fewer than 2 replicas are in sync
+unclean.leader.election.enable=false      # never promote an out-of-sync replica
+```
+
+`min.insync.replicas=2` with `replication.factor=3` is the standard: it survives
+one broker loss and **refuses writes** rather than silently degrading durability
+when it can't guarantee two copies. `unclean.leader.election.enable=false` is the
+other half — promoting a stale replica to leader means truncating committed
+writes, which is exactly the "lost acknowledged write" failure from
+[CAP](/system-design/7-cap-theorem-consistency-models).
+
+Note what this means in CAP terms: with `min.insync.replicas=2`, Kafka chooses
+**CP** for that partition. Losing two of three brokers makes it unavailable for
+writes by design.
+
+### Delivery semantics, honestly
+
+**At-most-once.** Commit the offset before processing. A crash mid-processing
+loses the message. Rarely what anyone wants.
+
+**At-least-once.** Process, then commit the offset. A crash after processing but
+before committing reprocesses the message. **This is the default and the correct
+target for almost every system.**
+
+**Exactly-once.** Two very different claims hide behind this phrase, and
+distinguishing them is a senior signal:
+
+*Inside Kafka*, it's real. The **idempotent producer** gives each producer a PID
+and a per-partition sequence number, so the broker discards duplicates from
+retries. **Transactions** (`transactional.id`, plus consumers reading with
+`isolation.level=read_committed`) make "consume from topic A, produce to topic B,
+commit offset" a single atomic unit. Consume-transform-produce pipelines really
+do get exactly-once.
+
+*Outside Kafka*, it is not. The moment your consumer writes to Postgres or calls
+a payment API, Kafka's transaction cannot cover that write. There is no atomic
+commit across Kafka and your database.
+
+So the honest engineering answer, and the one to give: **at-least-once delivery
+plus idempotent consumers is equivalent to exactly-once processing, and is how
+it's actually done.** Make the write idempotent — a natural unique key, an
+upsert, or a processed-messages table keyed by event ID:
+
+```java
+// Idempotent consumer: the DB, not the broker, provides the guarantee.
+@Transactional
+public void handle(OrderEvent event) {
+    if (processedRepo.existsById(event.id())) return;   // already done
+    orderRepo.save(toOrder(event));
+    processedRepo.save(new Processed(event.id(), Instant.now()));
+}
+```
+
+### Retention and compaction
+
+**Time/size retention** (`retention.ms`, `retention.bytes`) deletes whole
+segments once they age out. Default 7 days.
+
+**Log compaction** (`cleanup.policy=compact`) is different and often
+misunderstood: it keeps the **latest value for each key** forever, garbage
+collecting superseded versions. A `null` value is a **tombstone**, marking the
+key deleted.
+
+This turns a topic into a durable, replayable snapshot of current state — the
+foundation of Kafka Streams' state stores, Debezium CDC streams, and
+event-sourced systems that need to rebuild state from scratch. If asked "how
+would a new service bootstrap its copy of all customer data?", a compacted topic
+is the answer.
+
+### Why it's fast
+
+Worth being able to explain, because it's a common "do you know how this works"
+probe:
+
+- **Sequential disk I/O.** Appending to a log is sequential; spinning disks do
+  hundreds of MB/s sequentially and single-digit MB/s randomly. Even on SSDs,
+  sequential writes avoid write amplification.
+- **The page cache does the caching.** Kafka keeps no application-level object
+  cache; it reads and writes through the OS page cache, so a consumer reading
+  recent data never touches disk. This is also why Kafka brokers want lots of
+  RAM but a small JVM heap.
+- **Zero-copy.** `sendfile()` moves bytes from page cache straight to the socket
+  without passing through user space. Note the caveat: **TLS defeats zero-copy**,
+  because the data must be encrypted in user space. So does re-compression on
+  the broker.
+- **Batching and compression.** Producers accumulate a batch
+  (`linger.ms`, `batch.size`) and compress it as a unit, so compression ratios
+  are far better than per-message and the per-request overhead amortises.
+
+### Kafka vs the alternatives
+
+| | Kafka | RabbitMQ | SQS |
+|---|---|---|---|
+| Model | Partitioned log, consumer-driven | Broker-routed queues, push | Managed queue |
+| Retention after read | Yes — time/size policy | No, deleted on ack | Up to 14 days |
+| Ordering | Per partition | Per queue (lost with competing consumers) | FIFO queues only |
+| Replay | Native | No | No |
+| Routing | Dumb broker, smart consumer | Rich (exchanges, topics, headers) | Minimal |
+| Per-message ops | No TTL, no priority, no nack-to-front | Yes | Visibility timeout |
+| Throughput | Very high | Moderate | High, managed |
+
+The decision rule to state: **Kafka when you want an event log with replay and
+multiple independent consumers; RabbitMQ when you want per-message routing,
+priorities, and task-queue semantics; SQS when you want neither and would rather
+not run a broker.** Using Kafka as a work queue with per-message retries and
+priorities fights the design the whole way.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Kafka guarantees ordering — true?"** Only within a partition. Global
+   ordering requires a single partition, which caps throughput at one consumer.
+2. **"How do you get ordering for one customer?"** Key by `customerId`. All their
+   events land in one partition and are consumed in order.
+3. **"Can you add partitions later?"** Physically yes, but it rehashes keys and
+   breaks per-key ordering permanently. Size up front.
+4. **"Consumers outnumber partitions — what happens?"** The extras sit idle.
+   Partition count is the parallelism ceiling.
+5. **"Does `acks=all` mean three copies?"** No — it means all *currently in-sync*
+   replicas, which can be one. You need `min.insync.replicas=2` and
+   `unclean.leader.election.enable=false`.
+6. **"Is exactly-once real?"** Inside Kafka, yes (idempotent producer plus
+   transactions). Across Kafka and an external database, no. Use at-least-once
+   plus idempotent consumers.
+7. **"Consumer group stops making progress. Diagnose."** Processing exceeds
+   `max.poll.interval.ms`, so the broker evicts the consumer and rebalances
+   forever. Cut `max.poll.records` or move work off the poll thread.
+8. **"Consumer lag is growing. Options?"** More partitions and consumers (if
+   headroom exists), faster processing, batch the downstream writes, or shed load.
+   Establish whether it's skew (one partition) or global first.
+9. **"A message always fails and blocks the partition."** Poison pill. Retry with
+   backoff, then route to a dead-letter topic and commit, so the partition
+   advances. Blocking forever is the wrong default.
+10. **"How would a new service get a full copy of existing state?"** Compacted
+    topic — latest value per key, replayable from the beginning.
+11. **"What replaced ZooKeeper?"** KRaft — Kafka's own Raft implementation for
+    metadata, removing the separate ZooKeeper cluster. Production-ready from 3.3,
+    ZooKeeper support removed in 4.0.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Auto-commit with manual processing.** `enable.auto.commit=true` commits on a
+  timer regardless of whether your handler succeeded, silently converting
+  at-least-once into "sometimes-never-once." Commit explicitly after processing.
+- **Consumer lag measured in messages, alerted on as if it were time.** 10,000
+  messages of lag is meaningless without throughput. Alert on
+  lag ÷ consumption rate — i.e. *time behind*.
+- **One slow downstream call inside the poll loop.** Blocks the partition and
+  eventually triggers eviction. Parallelise inside the handler, but then track
+  offsets carefully — committing an offset marks everything before it done.
+- **Rebalancing on every deploy.** With eager assignment, a rolling restart
+  stops the group repeatedly. Use `CooperativeStickyAssignor` and static group
+  membership (`group.instance.id`).
+- **Unbounded retention on a high-volume topic.** Disk fills, broker halts, and
+  the cluster cascades. Retention is not optional.
+</Callout>
+
+### Where this connects
+
+- [8. Asynchronous processing & message queues](/system-design/8-asynchronous-processing-message-queues)
+  — why you'd decouple in the first place.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — the outbox pattern is what makes "save to DB and publish an event" atomic.
+- [7. CAP theorem](/system-design/7-cap-theorem-consistency-models) —
+  `min.insync.replicas` *is* a quorum choice, and `unclean.leader.election` is
+  literally the "lose acknowledged writes" tradeoff.
+- [Case 5: notification system](/system-design/case-5-design-a-notification-system-email-sms-push)
+  — the canonical place to use all of this.

@@ -1,0 +1,353 @@
+---
+title: "7. Spring Boot Configuration Quick Reference"
+topic: "java"
+order: 607
+group: "Java + SQL"
+difficulty: "medium"
+estimatedMinutes: 14
+tags: [reference, spring-boot, configuration, profiles, actuator, secrets, auto-configuration]
+format: "mdx"
+summary: "Property precedence, profiles, typed binding, relaxed binding rules, secret externalisation, which actuator endpoints to expose, and how @ConditionalOn* decides what auto-configuration gives you."
+---
+
+Configuration is where Spring Boot questions stop being about annotations and start being
+about how a service behaves across environments. The questions asked are consistently
+practical: where does this value come from when the same key is defined in four places, how
+do you run the same jar in staging and production, and where does the database password
+live.
+
+## Property precedence
+
+Boot reads properties from many sources and later sources win. The full list has
+about seventeen entries; the ones that matter in practice, from highest priority
+to lowest:
+
+1. Command-line arguments (`--server.port=9090`)
+2. `SPRING_APPLICATION_JSON` — a JSON blob in an environment variable
+3. JVM system properties (`-Dserver.port=9090`)
+4. Operating system environment variables
+5. Profile-specific files *outside* the jar, then inside it
+6. `application.properties` or `application.yml` outside the jar, then inside it
+7. `@PropertySource` on a configuration class
+8. Defaults set programmatically via `SpringApplication.setDefaultProperties`
+
+Two consequences are worth committing to memory, because they are the ones that
+get asked.
+
+**Environment variables beat everything in your files.** This is the mechanism behind
+twelve-factor configuration: you ship one immutable artefact and the environment
+differentiates it. `SPRING_DATASOURCE_PASSWORD` set in the container overrides whatever is in
+`application.yml`, with no code change and nothing committed.
+
+**A file outside the jar beats the one inside it.** Boot looks in the current directory and
+in a `./config` subdirectory before falling back to the classpath, so an operator can drop a
+file next to the jar to override packaged defaults.
+
+One trap: if `application.properties` and `application.yml` both exist in the same location,
+the `.properties` file wins. Pick one format per project.
+
+## Profiles
+
+A profile is a named set of configuration activated at runtime. The convention is one
+baseline file plus one per environment, named `application-<profile>.yml` — so
+`application-dev.yml`, `application-prod.yml`.
+
+The baseline `application.yml` holds everything that is the same everywhere; the profile
+file holds only the differences and is merged on top rather than replacing the baseline.
+Activate with `--spring.profiles.active=prod` or `SPRING_PROFILES_ACTIVE=prod`, preferring
+the environment variable so the profile is part of the environment rather than the start
+command.
+
+```yaml
+# application.yml — baseline, same in every environment
+spring:
+  application:
+    name: url-shortener
+  jpa:
+    open-in-view: false
+
+---
+# a profile-specific document in the same file, separated by ---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: update
+```
+
+Three details that come up as follow-ups. `spring.config.activate.on-profile`
+replaced the older `spring.profiles` key in Boot 2.4, so older examples you find
+online use a key that no longer works. Profile groups let one activated profile
+switch on several others, which is how you keep `prod` meaning "cloud plus
+metrics plus real mail" in one place. And a `@Profile("!prod")` annotation on a
+bean is the mechanism for beans that should not exist in production at all — a
+data seeder, or a stub mail sender.
+
+**No profile means the `default` profile, which is why a project with a single
+`application.yml` and development values in it will happily start in production
+with development settings.** That is the most common configuration failure in
+small services.
+
+## `@ConfigurationProperties` versus `@Value`
+
+Both read properties. They are not equivalent, and the difference is worth being
+able to argue.
+
+```java
+// @Value — one key, no validation, no grouping
+@Service
+public class TokenService {
+    @Value("${app.jwt.expiration-ms}")
+    private long expirationMs;
+}
+
+// @ConfigurationProperties — a typed, validated, discoverable group
+@ConfigurationProperties(prefix = "app.jwt")
+@Validated
+public record JwtProperties(
+        @NotBlank String secret,
+        @Positive long expirationMs) {}
+```
+
+Prefer `@ConfigurationProperties`, for four reasons that are each individually sufficient.
+
+**It fails fast and precisely.** With `@Validated` and bean-validation annotations, a missing
+or malformed value stops startup with a message naming the key. A `@Value` with a typo either
+throws a placeholder-resolution error deep in bean creation or, if a default was supplied,
+silently uses the default — and silently wrong configuration is the expensive kind.
+
+**It is typed and immutable.** Constructor binding onto a `record` gives a final object, so
+configuration cannot be mutated at runtime and the type is checked once at the boundary.
+
+**It groups.** One class shows the entire shape of a subsystem's configuration, which is
+documentation that cannot drift. Scattered `@Value` fields require grepping to discover what a
+component is configurable by.
+
+**It supports structure.** Nested objects, `List<String>` and `Map<String, String>` bind
+naturally; `@Value` handles a comma-separated list awkwardly and nested structure not at all.
+
+Register it with `@EnableConfigurationProperties(JwtProperties.class)` or
+`@ConfigurationPropertiesScan` on the application class. `@Value` remains reasonable for a
+single unrelated value, and it can do SpEL, which typed binding cannot. That is the whole of
+its remaining territory.
+
+## Relaxed binding
+
+Boot deliberately accepts several spellings of the same key so that each
+environment can use its natural convention. All of these bind to a `baseUrl`
+property:
+
+| Form | Where you use it |
+|---|---|
+| `app.base-url` | Kebab case — the canonical form in `.yml` and `.properties` |
+| `app.baseUrl` | Camel case |
+| `app.base_url` | Underscore |
+| `APP_BASEURL` or `APP_BASE_URL` | Upper case with underscores — environment variables |
+
+The environment-variable rule is the one to know cold, because it is how you
+override anything in a container: **take the property name, upper-case it, and
+replace every dot and dash with an underscore.** So `app.jwt.secret` becomes
+`APP_JWT_SECRET` and `spring.datasource.password` becomes
+`SPRING_DATASOURCE_PASSWORD`. Index into a list with an underscore and the index:
+`APP_ALLOWED_ORIGINS_0`.
+
+Relaxed binding applies to `@ConfigurationProperties` only. `@Value` takes the key
+literally, which is one more reason to prefer typed binding.
+
+## Externalising configuration and secrets
+
+The rule is short. **Configuration that differs by environment comes from the
+environment. Secrets never live in a committed file, in any environment.**
+
+The anti-example is worth looking at because it is in your own project. The
+`url-shortener` service's `src/main/resources/application.yml` contains, committed
+to the repository:
+
+```yaml
+spring:
+  datasource:
+    password: <redacted>        # a literal password, in source control
+  jpa:
+    hibernate:
+      ddl-auto: update          # schema mutated by the application at startup
+    show-sql: true              # every query logged, in every environment
+
+app:
+  jwt:
+    secret: <redacted>          # a literal HS256 signing key, in source control
+```
+
+The two literal values are redacted here deliberately — they are live credentials, and copying
+them into a second repository would widen the exposure rather than document it.
+
+The JWT signing secret is the serious one. Anyone who can read the repository can mint a valid
+token for any user, so the value is compromised the moment it is committed and rotating it is
+the only remedy; there is no cheap way to un-publish it from git history. The database password
+is the same class of problem with a smaller blast radius. `ddl-auto: update` means the
+application rewrites the schema on startup, acceptable locally and dangerous anywhere with data
+you care about. And `show-sql: true` logs every statement unconditionally, which costs
+throughput and can put parameter values into log aggregation.
+
+The fixed version, with no secret in the file and no environment-specific value in the
+baseline:
+
+```yaml
+# application.yml — placeholders resolved from the environment, no defaults for secrets
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate        # schema owned by migrations, not by Hibernate
+    show-sql: false
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}       # no default: startup must fail if it is absent
+    expiration-ms: 86400000
+```
+
+Note the deliberate absence of defaults on the secrets. `${JWT_SECRET}` with no fallback fails
+at startup if the variable is missing, which is exactly what you want — a service that cannot
+sign tokens should not accept traffic. Writing `${JWT_SECRET:changeme}` reintroduces the
+original bug in a form that also passes review.
+
+Beyond environment variables, `spring.config.import` pulls configuration from a secret manager
+or config server at startup and the same placeholder syntax resolves against it. Whichever you
+use, read the property in exactly one place through a typed properties class, so rotating the
+source does not touch application code.
+
+## Actuator, and which endpoints to expose
+
+Actuator publishes operational endpoints. Almost all of them are dangerous on a
+public interface, and the exposure list is opt-in for that reason.
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true          # adds /health/liveness and /health/readiness
+  server:
+    port: 9090                 # management traffic on a separate, non-public port
+```
+
+| Endpoint | Exposure | Why |
+|---|---|---|
+| `health` | Public, without details | Load balancers and orchestrators need it. Details reveal dependency topology, so gate them. |
+| `health/liveness`, `health/readiness` | Internal | Kubernetes probes; readiness failing should remove the pod from rotation without restarting it. |
+| `info` | Public | Build and version information, useful for confirming what is deployed. |
+| `metrics`, `prometheus` | Internal only | Endpoint names and traffic volumes are reconnaissance. |
+| `env`, `configprops` | Never exposed | Dumps the resolved configuration. Boot masks obvious secret-looking keys, but a key it does not recognise is printed in full. |
+| `heapdump`, `threaddump` | Never exposed | A heap dump contains credentials, tokens and user data in memory. |
+| `loggers` | Internal, authenticated | Writable: it can change log levels at runtime, which is useful and also a denial-of-service lever. |
+| `shutdown` | Disabled | Stops the application over HTTP. Disabled by default; keep it that way. |
+| `conditions` | Internal, development | Shows which auto-configurations matched and why, which is the best debugging tool Boot has. |
+
+Running management on a separate port is the cleanest control, because it lets
+network policy do the enforcement rather than relying on every endpoint being
+configured correctly.
+
+## Auto-configuration properties worth knowing
+
+The properties that come up most often, with the reasoning rather than just the
+key.
+
+```properties
+# DataSource — HikariCP is the default pool
+spring.datasource.hikari.maximum-pool-size=10
+# Small on purpose. Ten busy connections beat a hundred queueing inside the
+# database; the queue belongs in the application where you can see it.
+spring.datasource.hikari.connection-timeout=30000
+spring.datasource.hikari.leak-detection-threshold=60000
+# Logs a stack trace when a connection is held longer than this. Finds the
+# forgotten close that eventually exhausts the pool.
+
+# JPA / Hibernate
+spring.jpa.hibernate.ddl-auto=validate
+# none or validate in production. update in production risks silent schema
+# mutation; create-drop is for tests only.
+spring.jpa.open-in-view=false
+# Default is true, and it is the wrong default. Leaving it on keeps the
+# persistence context open through view rendering, which hides N+1 queries
+# behind lazy loading in the serialisation layer.
+spring.jpa.properties.hibernate.default_batch_fetch_size=25
+# Turns N lazy loads into N/25 queries. The cheapest N+1 mitigation available.
+spring.jpa.show-sql=false
+spring.jpa.properties.hibernate.format_sql=true
+
+# Jackson
+spring.jackson.default-property-inclusion=non_null
+spring.jackson.deserialization.fail-on-unknown-properties=false
+# Tolerant readers: a new field from a producer should not break a consumer.
+spring.jackson.serialization.write-dates-as-timestamps=false
+# ISO-8601 strings instead of epoch numbers, so payloads are readable.
+
+# Logging
+logging.level.root=INFO
+logging.level.org.hibernate.SQL=DEBUG
+logging.level.org.hibernate.orm.jdbc.bind=TRACE
+# The pair above is how you see queries with bound parameters. Never in
+# production: parameters are user data.
+logging.file.name=/var/log/app/application.log
+```
+
+## How auto-configuration decides: `@ConditionalOn*`
+
+Auto-configuration is not magic and interviewers like to confirm you know that. It
+is a set of ordinary `@Configuration` classes listed in an
+`AutoConfiguration.imports` file, each guarded by conditions that are evaluated at
+startup.
+
+| Annotation | Meaning | Where you see it |
+|---|---|---|
+| `@ConditionalOnClass` | A class is on the classpath | `DataSourceAutoConfiguration` only runs if a JDBC driver is present |
+| `@ConditionalOnMissingBean` | You have not defined your own | The reason defining a `DataSource` bean silently disables Boot's |
+| `@ConditionalOnProperty` | A property has a given value | Feature flags, and most `enabled` switches |
+| `@ConditionalOnBean` | Another bean exists | Ordering-sensitive; relies on auto-configuration ordering |
+| `@ConditionalOnWebApplication` | Servlet or reactive context | Web-only configuration in a shared library |
+
+`@ConditionalOnMissingBean` is the one to be able to explain, because it is the
+mechanism behind Boot's entire override story: **Boot configures a sensible default
+only if you have not provided one, so "overriding auto-configuration" is just
+defining the bean yourself.** That single annotation is why Boot can be opinionated
+without being restrictive.
+
+When something is configured differently from what you expected, do not guess. Run
+with `--debug` or open the `conditions` actuator endpoint, and you get a report of
+every auto-configuration class with the condition that matched or did not.
+
+<Callout type="interview" title="Questions to rehearse out loud">
+1. The same property is set in `application.yml`, in an environment variable and on
+   the command line. Which wins, and why is that order the right one?
+2. Why is `@ConfigurationProperties` better than `@Value`? Give two reasons that
+   are about failure behaviour rather than style.
+3. What does `APP_JWT_SECRET` bind to, and what is the rule?
+4. Where does a database password belong, and what do you do about one that has
+   already been committed?
+5. Which actuator endpoints would you expose to the internet, and name two you
+   would never expose and what each leaks.
+6. What does `spring.jpa.open-in-view=false` prevent, and why is the default
+   wrong?
+7. How does Boot know not to create a `DataSource` when you have defined one?
+8. You run the jar with no profile active. What configuration is in effect, and why
+   is that a production risk?
+</Callout>
+
+### Where this connects
+
+- [8. Spring internals — the container, bean lifecycle & AOP proxies](/java/8-spring-internals-ioc-beans-and-aop-proxies) — how the conditions above fit into context startup.
+- [1. JDBC Fundamentals](/java/1-jdbc-fundamentals) — what the Hikari pool settings actually control.
+- [3. The N+1 Problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) — why `open-in-view` and batch fetch size appear in this list.
+- [4. Security](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements) — secret handling and token signing beyond configuration.
+- [Case 1 — Design a URL Shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one) — the project whose `application.yml` is the anti-example above.

@@ -1,0 +1,370 @@
+---
+title: "Pattern 1 — Arrays & Hashing"
+topic: "dsa"
+order: 103
+difficulty: "easy"
+estimatedMinutes: 27
+tags: [arrays, hashing, hashmap, prefix-sum, frequency-map, cyclic-sort]
+format: "mdx"
+summary: "The complement trick, frequency maps, prefix-sum plus hashmap for subarray sums, canonical-key grouping, and the in-place tricks that replace the map entirely — with the reason hashing is O(1) on average and O(n) in the worst case."
+---
+
+## Layer 1 — When you reach for this
+
+Arrays and hashing is the first pattern for a reason: it is the one that turns a
+brute-force nested loop into a single pass more often than any other technique,
+and almost every later pattern uses it as a component.
+
+> The whole pattern is one trade. **A nested scan re-derives what you already
+> saw; a hash map remembers it.** You spend O(n) memory so that the question
+> "have I seen something that pairs with this?" costs O(1) instead of another
+> loop.
+
+The recognition signals, stated as the phrases that actually appear in problem
+statements:
+
+- **"Does the array contain a duplicate"**, "is it unique", "first repeating" —
+  a `HashSet` of what you have seen.
+- **"Two numbers that sum to a target"**, "a pair whose difference is k" — the
+  complement trick. Anything of the form "find `x` and `y` such that `f(x, y)`
+  is fixed" can be rewritten as "for each `y`, does the required `x` exist?"
+- **"Count", "frequency", "how many times", "most common", "k most frequent"** —
+  a frequency map from value to count.
+- **"Group the anagrams", "group by", "which strings are equivalent"** — a
+  canonical key: a function mapping every member of a group to the same string,
+  so the grouping falls out of a map.
+- **"Subarray that sums to k"**, "subarray with equal numbers of 0s and 1s" —
+  prefix sums plus a map. Worth memorising, because it does not look like a
+  hashing problem at first.
+- **"In O(n) time"** stated as a constraint on a problem you can obviously solve
+  in O(n²) is close to an instruction to use a map.
+
+The anti-signals matter just as much, because reaching for a map when something
+cheaper works is a real interview mistake:
+
+- **The input is already sorted.** Then two pointers solves the pair problems in
+  O(1) extra space, and the interviewer asked about sorting for a reason. See
+  [two pointers](/dsa/pattern-2-two-pointers).
+- **The subarray must be contiguous and the condition is monotone** — longest
+  substring with at most k distinct characters, smallest subarray with sum at
+  least k. That is [sliding window](/dsa/pattern-3-sliding-window), and it keeps
+  the map but moves two indices instead of storing every prefix.
+- **"K-th largest" or "top k from a stream"** wants a
+  [heap](/dsa/pattern-9-heaps-priority-queue) once the stream is unbounded.
+- **The values are bounded in a small known range**, such as 1 to n or the 26
+  lowercase letters. An `int[26]` or an `int[n + 1]` is a hash map with a
+  perfect hash function, and it is several times faster. Use it.
+- **The interviewer says O(1) extra space.** That is a deliberate ban on the
+  map, and it is the signal for the in-place tricks at the end of Layer 2.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+Every variation of this pattern maintains the same invariant, and saying it out
+loud is what separates a memorised template from an adaptable one:
+
+> **At the moment I am about to process index `i`, the map contains exactly the
+> summary I need of the prefix `nums[0..i-1]`.**
+
+That is why every template in this lesson has the same shape: look up first,
+then insert. The lookup asks a question about the past; the insert extends the
+past to include the current element. Getting the order wrong is the single most
+common bug in the pattern, and it is the reason Two Sum does not accidentally
+pair an element with itself.
+
+### Why the complexity drops
+
+A brute-force pair search compares every element against every later element,
+which is `n(n-1)/2` comparisons, or O(n²). The map changes the question being
+asked. Instead of "for each pair, do they match?", you ask, for each element
+separately, "does the one partner that would complete this element exist among
+the elements I have already stored?" That is one question per element and each
+question costs O(1), so the work is n lookups plus n insertions: **O(n)**. The
+reduction is possible because the target constrains the partner uniquely — you
+never need to enumerate pairs, only to test for membership.
+
+### Why hashing is O(1) on average and O(n) in the worst case
+
+The map stores each entry in a bucket chosen by `hash(key) & (capacity - 1)`.
+With a well-distributed hash function and a load factor held near 0.75, the
+expected chain length in a bucket is a small constant, so a lookup inspects
+roughly one node. That is the average case.
+
+The worst case is what happens when every key lands in the same bucket, either
+because the hash function is bad or because an adversary chose the keys.
+Then the chain is the whole map and a lookup is O(n), which makes the algorithm
+O(n²) again. Java defends against this by converting a bucket to a red-black
+tree once its chain reaches eight nodes, bounding the worst case at O(log n) per
+lookup. In an interview, saying "O(n) average, O(n²) in a pathological
+worst case, though `HashMap` treeifies long chains so it is really O(n log n)"
+is a strong answer. The mechanism is covered in detail in
+[the collections framework deep dive](/java/2-collections-framework-deep-dive).
+
+### The canonical template
+
+```java
+// The complement trick. Two Sum: return the indices of the pair summing to target.
+public int[] twoSum(int[] nums, int target) {
+    Map<Integer, Integer> seen = new HashMap<>();   // value -> index it was seen at
+    for (int i = 0; i < nums.length; i++) {
+        int need = target - nums[i];                // the one partner that completes i
+        if (seen.containsKey(need)) {               // LOOK UP FIRST: only the prefix is in the map
+            return new int[] { seen.get(need), i };
+        }
+        seen.put(nums[i], i);                       // THEN INSERT: extend the prefix
+    }
+    return new int[] { -1, -1 };
+}
+```
+
+Look up before you insert. If you inserted first, `nums[i]` would be in the map
+when you search for its own complement, and a target of `2 * nums[i]` would
+return a bogus pair of `i` with itself.
+
+### The four variants of the template
+
+**Frequency map.** The map holds value to count instead of value to index. Build
+it in one pass, then answer questions from it. `merge` and `getOrDefault` keep
+it to one line.
+
+```java
+Map<Character, Integer> freq = new HashMap<>();
+for (char c : s.toCharArray()) freq.merge(c, 1, Integer::sum);
+// Decrement while scanning the second string; a negative count means "not an anagram".
+```
+
+For lowercase letters use `int[26]` indexed by `c - 'a'`. It is the same
+algorithm with a perfect hash, and it is what you should write when the
+alphabet is fixed.
+
+**Seen set.** When you only need membership and not a payload, a `HashSet` says
+it more clearly. Contains Duplicate is three lines this way.
+
+**Prefix sum plus map.** This is the variant that carries the most weight and is
+taught the least. Define `P[i]` as the sum of the first `i` elements, so
+`P[0] = 0`. The sum of the subarray from `j` to `i - 1` is `P[i] - P[j]`. You
+want that to equal `k`, so you want `P[j] = P[i] - k`. **The question "is there
+a subarray ending here that sums to k?" is exactly the complement trick applied
+to prefix sums** — and that sentence is the entire insight.
+
+```java
+// Subarray Sum Equals K: count subarrays summing to k.
+public int subarraySum(int[] nums, int k) {
+    Map<Integer, Integer> countOfPrefix = new HashMap<>();
+    countOfPrefix.put(0, 1);            // the empty prefix; without this, subarrays
+    int sum = 0, answer = 0;            // starting at index 0 are missed
+    for (int x : nums) {
+        sum += x;                                            // sum is now P[i+1]
+        answer += countOfPrefix.getOrDefault(sum - k, 0);    // how many valid starts
+        countOfPrefix.merge(sum, 1, Integer::sum);
+    }
+    return answer;
+}
+```
+
+The map stores counts rather than indices because several prefixes can share a
+sum and each one is a distinct subarray. If the question asked for the *longest*
+such subarray, you would store the **earliest** index for each prefix sum and
+never overwrite it, because the earliest start gives the longest span.
+
+**Canonical key grouping.** Two things belong together when some normalising
+function maps them to the same key. For anagrams, the key is either the sorted
+characters, which costs O(L log L) per word, or a 26-slot count signature
+rendered as a string, which costs O(L). Use the count signature when the words
+are long; mention both, because the interviewer is checking whether you noticed
+the sort is the expensive part.
+
+```java
+Map<String, List<String>> groups = new HashMap<>();
+for (String w : words) {
+    int[] count = new int[26];
+    for (char c : w.toCharArray()) count[c - 'a']++;
+    String key = Arrays.toString(count);              // same key for every anagram
+    groups.computeIfAbsent(key, unused -> new ArrayList<>()).add(w);
+}
+```
+
+### Worked example: Longest Consecutive Sequence
+
+Given an unsorted array, find the length of the longest run of consecutive
+integers, in O(n). Sorting would be O(n log n), so it is banned by the
+constraint.
+
+Put everything in a `HashSet`. Now "is `x + 1` present?" is O(1), so you could
+walk a run from any element. The trap is that walking every run from every
+element is O(n²) on an input like a single long run. **The fix is to only start
+walking from an element that begins a run** — that is, one for which `x - 1` is
+not in the set. Every element is then visited at most twice overall, once as a
+candidate start and once during the single walk of its run, so the total is
+O(n).
+
+```java
+Set<Integer> set = new HashSet<>();
+for (int x : nums) set.add(x);
+int best = 0;
+for (int x : set) {
+    if (set.contains(x - 1)) continue;   // not a run start; skip, this is the O(n) guard
+    int len = 1;
+    while (set.contains(x + len)) len++;
+    best = Math.max(best, len);
+}
+```
+
+### In-place tricks: hashing without a hash map
+
+When extra space is banned, the array itself can act as the map, because an
+array of n slots is already a perfect hash table for the keys 1 to n.
+
+**Marking by negation.** If values are in `1..n` and you only need a present or
+absent bit, use the sign of `nums[v - 1]` as that bit. A second pass reads the
+signs off. Find All Numbers Disappeared in an Array is exactly this. It destroys
+the input, so say so, and offer to restore the signs afterwards.
+
+**Cyclic sort.** If the values are a permutation of `1..n` (possibly with one
+missing or duplicated), repeatedly swap `nums[i]` to its home index `nums[i] - 1`
+until index `i` holds the right value, then advance. A second pass finds the one
+index whose value is wrong. Each swap places at least one element permanently,
+so the total number of swaps is at most n and the whole thing is O(n) time and
+O(1) space. This is the intended solution for Missing Number, Find the Duplicate
+Number's array variant, and First Missing Positive.
+
+```java
+for (int i = 0; i < n; i++) {
+    // while the value at i belongs elsewhere and that home is not already correct
+    while (nums[i] >= 1 && nums[i] <= n && nums[nums[i] - 1] != nums[i]) {
+        int home = nums[i] - 1;
+        int tmp = nums[home]; nums[home] = nums[i]; nums[i] = tmp;
+    }
+}
+```
+
+The loop condition must compare **values, not indices** — writing
+`nums[i] != i + 1` instead of `nums[nums[i] - 1] != nums[i]` spins forever when
+the array contains duplicates.
+
+### Edge cases and traps
+
+- **Inserting before looking up**, which lets an element pair with itself.
+- **Forgetting to seed the prefix-sum map with `(0, 1)`.** Every subarray that
+  starts at index 0 is then missed, and the bug only shows on some inputs.
+- **Integer overflow in a running sum** over a large array of large values. Use
+  `long` for the accumulator when the constraints allow values near `2^31`.
+- **Autoboxing comparisons.** `Integer` values outside the cache range compare
+  false under `==`. Always `.equals()` or unbox to `int`.
+- **Mutating a key after inserting it.** The entry becomes unreachable, which
+  matters when keys are lists or arrays. Note also that arrays use identity
+  hashing, so `int[]` is never a valid key — convert it to a `String` or a
+  `List`.
+- **Using a map when the alphabet is 26 letters.** Correct, but slower and more
+  verbose than an array, and the interviewer notices.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity?"** O(n) time and O(n) space, where the O(1) hash
+   lookup is an average — a degenerate hash makes it O(n) per lookup.
+2. **"When is it actually O(n²)?"** When every key collides into one bucket.
+   Java mitigates this by treeifying a bucket at eight nodes, so the realistic
+   floor is O(n log n).
+3. **"What if the array were sorted?"** Then use two pointers from both ends:
+   still O(n) time but O(1) space, and no hashing at all.
+4. **"Can you do Two Sum in O(1) space?"** Only by sorting first, which costs
+   O(n log n) and loses the original indices — so you would sort index-value
+   pairs if the indices are required.
+5. **"What if the input doesn't fit in memory?"** Shard by `hash(key) % m` into
+   m files, each of which fits, and process the shards independently. Every key
+   that could pair lands in a predictable shard. This is the map-reduce answer.
+6. **"What if it's a stream?"** A `HashSet` still works for membership, but
+   memory grows without bound, so you switch to a bounded structure: a Bloom
+   filter if false positives are tolerable, or a count-min sketch for
+   frequencies.
+7. **"Extend Two Sum to 3Sum."** Sort, fix the first element, and two-pointer
+   the remainder — O(n²). The hash-map version is the same complexity but the
+   duplicate handling is much harder.
+8. **"Top k frequent elements — what's the best complexity?"** Bucket sort by
+   frequency gives O(n), because a frequency cannot exceed n. A heap gives
+   O(n log k), which is better when k is small and the stream is long.
+9. **"Why do you seed the prefix map with zero?"** So a prefix that itself sums
+   to k is counted; that corresponds to a subarray starting at index 0.
+10. **"Does prefix sum plus hashing work with negative numbers?"** Yes, and
+    that is precisely why you cannot use a sliding window here — a window needs
+    the sum to be monotone in the window size, which negatives break.
+11. **"Group Anagrams: sorted key or count key?"** Sorted is O(L log L) per
+    word; a 26-count signature is O(L). Prefer the count signature for long
+    words, and mention the trade.
+12. **"Why is an `int[26]` better than a `HashMap`?"** It is a perfect hash with
+    no boxing, no collisions, and contiguous memory, so it wins on constants
+    even though the Big-O is identical.
+13. **"Find the duplicate without modifying the array, in O(1) space."** Treat
+    the array as a function `i -> nums[i]` and run Floyd's cycle detection on it,
+    as in [linked lists](/dsa/pattern-6-linked-list).
+14. **"How would you make the hash resistant to adversarial input?"** Salt the
+    hash with a per-process random seed, so an attacker cannot precompute
+    colliding keys.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Inserting before the lookup**, producing a self-pair.
+- **Missing the `(0, 1)` seed** in the prefix-sum map.
+- **Overwriting the earliest index** when the problem asks for the longest
+  subarray. Store the first occurrence of each prefix sum and never replace it.
+- **Comparing boxed `Integer` keys with `==`.** True below 128, false above it.
+- **Using `int[]` or a mutable list as a map key.** Arrays hash by identity;
+  a mutated list becomes unreachable.
+- **`int` overflow** in a running sum or in `target - nums[i]` when values are
+  near the extremes.
+- **Destroying the input** with sign-marking or cyclic sort without saying so.
+  State it as a trade and offer to restore.
+- **Counting characters with a `HashMap` when the alphabet is fixed** — correct
+  but unnecessarily slow.
+</Callout>
+
+### Problems to drill
+
+**Easy** — build the reflex until the template is automatic.
+
+- **Two Sum** — the complement trick in its purest form.
+- **Contains Duplicate** — the seen-set, and the "set versus sort" trade.
+- **Valid Anagram** — frequency counting, and why `int[26]` beats a map here.
+- **Missing Number** — three valid solutions (sum formula, XOR, cyclic sort);
+  knowing all three is the point.
+
+**Medium** — where the pattern is actually tested.
+
+- **Group Anagrams** — canonical keys, and the cost of the key function.
+- **Top K Frequent Elements** — frequency map plus bucket sort for O(n).
+- **Subarray Sum Equals K** — prefix sums plus a map; the key insight of this
+  lesson.
+- **Longest Consecutive Sequence** — the set, plus the "only start from a run
+  start" guard that keeps it linear.
+- **Product of Array Except Self** — prefix and suffix products with no
+  division; the prefix idea without the hashing.
+- **Contiguous Array** — map 0 to -1 and it becomes "prefix sums equal to zero",
+  which is the same template in disguise.
+
+**Hard**
+
+- **First Missing Positive** — cyclic sort under an O(1)-space constraint, and
+  the reason the answer must lie in `1..n+1`.
+- **Longest Substring with At Most K Distinct Characters** — the bridge to
+  sliding window; a frequency map that moves instead of accumulating.
+
+### Where this connects
+
+- [Two pointers](/dsa/pattern-2-two-pointers) — the O(1)-space alternative once
+  the input is sorted.
+- [Sliding window](/dsa/pattern-3-sliding-window) — the frequency map made
+  mobile, for contiguous ranges.
+- [Heaps and priority queues](/dsa/pattern-9-heaps-priority-queue) — the right
+  answer for "top k" on a stream.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  what `HashMap` actually does on `put`, and where the worst case comes from.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  costs you quote when asked.
+- [How to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+  — the script for narrating the brute force before you optimise it.

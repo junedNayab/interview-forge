@@ -1,0 +1,503 @@
+---
+title: "Part 2 — SOLID principles (the heart of every LLD interview)"
+topic: "lld"
+order: 403
+difficulty: "hard"
+estimatedMinutes: 27
+tags: [lld, solid, srp, ocp, lsp, isp, dip, java]
+format: "mdx"
+summary: "Each principle with a before-and-after in Java and the cost-of-change argument — including LSP's actual precondition and postcondition rules, and the difference between DIP, dependency injection and IoC."
+---
+
+## Layer 1 — The mental model
+
+SOLID is taught as five rules to memorise, which is why most candidates can
+recite all five and apply none. The five are not independent commandments. They
+are five answers to one question.
+
+> **Every SOLID principle is an answer to: "when this requirement changes, how
+> much code do I have to reopen?"** Not "how clean is this", not "how elegant" —
+> how many already-working, already-tested files do I have to edit, and how
+> likely am I to break one of them while I do it.
+
+That framing is the difference between a candidate who says "I used SRP here"
+and one who says "I split this because the pricing rules change every quarter
+and the allocation logic has not changed in two years — they have different
+change rates, so they should not live in the same file."
+
+| Principle | The question it answers |
+|---|---|
+| **S**ingle Responsibility | Which changes force me to open *this* file? |
+| **O**pen/Closed | Can I add a case without editing the existing cases? |
+| **L**iskov Substitution | Can I pass a subtype anywhere the base type is expected, without the caller noticing? |
+| **I**nterface Segregation | Am I forcing implementers to supply methods they have no meaning for? |
+| **D**ependency Inversion | Which direction does the compile-time dependency point? |
+
+There is a real cost on the other side, and this lesson closes with it honestly:
+applied dogmatically, SOLID produces a codebase of one-method interfaces that
+nobody can navigate. Knowing *where not to apply it* is the senior signal.
+
+---
+
+## Layer 2 — The mechanism
+
+### S — Single Responsibility: "one reason to change", not "does one thing"
+
+The common reading — "a class should do one thing" — is wrong in a way that
+actively damages designs, because "one thing" has no fixed granularity. Is
+`saveOrder` one thing? It validates, persists, charges and emails. Is `validate`
+one thing? It checks eight fields. You can subdivide forever and the rule gives
+you no place to stop.
+
+Robert Martin's actual formulation is about *people*: a class should have one
+reason to change, where a reason means **one group of stakeholders who can
+request a change**. That gives you a place to stop, because stakeholders are
+finite and identifiable.
+
+```java
+// BAD — three stakeholders, one file.
+class Order {
+    private List<LineItem> items;
+
+    double total() { ... }                        // the business owns this rule
+    boolean isValid() { ... }                     // ...and this one
+
+    void saveToDatabase(Connection c) { ... }     // the DBA owns the schema
+    String toJson() { ... }                       // the API team owns the contract
+    void emailConfirmation(String to) { ... }     // marketing owns the copy
+}
+```
+
+A schema migration, an API version bump and a change to the email template all
+force someone to open `Order.java`. Three teams editing one file means merge
+conflicts, means a change to the email template can break order totalling,
+means every change requires re-testing all of it.
+
+```java
+// GOOD — one stakeholder per file. Each can change without touching the others.
+public record Order(OrderId id, List<LineItem> items) {
+    public Order { items = List.copyOf(items); }          // compact constructor
+    public Money total() {
+        return items.stream().map(LineItem::subtotal)
+                    .reduce(Money.ZERO, Money::plus);      // business rule only
+    }
+}
+
+public interface OrderRepository { void save(Order order); }   // persistence
+public final class OrderJsonMapper { public String toJson(Order o) { ... } }
+public final class OrderConfirmationMailer { public void send(Order o, Email to) { ... } }
+```
+
+The cost-of-change argument to say out loud: *"Right now a change to the email
+copy and a change to the discount rule both recompile and re-test the same
+class. Splitting them means each team's change is isolated, and the test suite
+for each is small enough to actually run."*
+
+Two guardrails, because SRP is the principle most often taken too far:
+
+- **A class with one method and no state is usually a function that lost its
+  home.** If `OrderTotalCalculator` has one method that takes an `Order` and
+  returns a `Money`, ask why it is not a method on `Order`. Behaviour belongs
+  with the data it operates on unless a separate stakeholder owns it.
+- **"Reason to change" is judged against the *actual* change history of your
+  system**, not a hypothetical one. In an interview you do not have a change
+  history, so you ask: *"how often does pricing change versus the floor
+  layout?"* The question itself scores.
+
+### O — Open/Closed: add a file, don't reopen one
+
+Open for extension, closed for modification. The mechanism is polymorphism;
+the version you show in an interview is almost always replacing a growing
+conditional with a set of types.
+
+```java
+// BAD — every new shipping option edits a method that already works.
+class ShippingCalculator {
+    double cost(Order o, String method) {
+        if ("STANDARD".equals(method))  return 40;
+        if ("EXPRESS".equals(method))   return 40 + 2.5 * o.weightKg();
+        if ("SAME_DAY".equals(method))  return 150 + 4.0 * o.weightKg();
+        throw new IllegalArgumentException(method);
+    }
+}
+
+// GOOD — a new option is a new file. Nothing existing is reopened.
+public interface ShippingPolicy {
+    Money cost(Order order);
+}
+
+public final class StandardShipping implements ShippingPolicy {
+    @Override public Money cost(Order o) { return Money.rupees(40); }
+}
+
+public final class ExpressShipping implements ShippingPolicy {
+    @Override public Money cost(Order o) {
+        return Money.rupees(40).plus(Money.rupees(2.5 * o.weightKg()));
+    }
+}
+
+public final class ShippingCalculator {
+    private final Map<ShippingMethod, ShippingPolicy> policies;   // injected
+    public ShippingCalculator(Map<ShippingMethod, ShippingPolicy> policies) {
+        this.policies = Map.copyOf(policies);
+    }
+    public Money cost(Order o, ShippingMethod method) {
+        ShippingPolicy policy = policies.get(method);
+        if (policy == null) throw new UnsupportedShippingMethodException(method);
+        return policy.cost(o);
+    }
+}
+```
+
+Why this matters beyond aesthetics: **editing working code is how regressions
+are introduced, and adding new code is not.** The `if`-chain version has to be
+re-tested in full after every addition, because the change is inside the same
+method that handles every other case. The polymorphic version's existing classes
+are bit-for-bit unchanged, so their tests still mean what they meant yesterday.
+
+The critical judgement call is **which axis you open up**. A class can be open
+for extension along exactly the axes you anticipated, and closed everywhere
+else. Open the wrong axis and you have paid for an abstraction you never use
+while still having to edit five files for the change that actually arrives. This
+is why the first question in an LLD round should be *"what is likely to change
+here?"* — the answer selects your abstractions.
+
+Note also that the `Map` lookup in `ShippingCalculator` has quietly reintroduced
+a place that knows about all the options. That is fine and it is deliberate:
+something must wire implementations to keys, and concentrating that knowledge in
+one injectable map (or a Spring configuration class) is far better than
+spreading it through the logic. **Open/Closed does not mean nothing knows the
+full list. It means the *behaviour* does not.**
+
+### L — Liskov Substitution, with real teeth
+
+Liskov is the principle with the most content and the least accurate folk
+understanding. The folk version is "a subtype must be an is-a". The real version
+is a contract about what a subtype may and may not do to the base type's
+promises:
+
+> A subtype may **weaken preconditions** (demand less of the caller) and
+> **strengthen postconditions** (promise more to the caller), and must
+> **preserve all invariants** of the base type. It may never do the reverse.
+
+The asymmetry has a reason worth understanding. A caller holding a base-type
+reference wrote its code against the base type's contract. If a subtype demands
+*more* than the base promised to accept, code that was correct against the base
+now breaks — the caller never agreed to that stricter requirement. If the
+subtype demands *less*, every existing caller still satisfies it, so nothing
+breaks. The same logic runs backwards for postconditions.
+
+Here is the canonical violation, and it compiles perfectly:
+
+```java
+// The base type's contract: setWidth changes only the width.
+class Rectangle {
+    protected int width, height;
+    public void setWidth(int w)  { this.width = w; }
+    public void setHeight(int h) { this.height = h; }
+    public int area() { return width * height; }
+}
+
+// BAD — Square "is-a" Rectangle in geometry, but it breaks the contract:
+// setWidth now also changes the height. The base promised it would not.
+class Square extends Rectangle {
+    @Override public void setWidth(int w)  { this.width = w; this.height = w; }
+    @Override public void setHeight(int h) { this.width = h; this.height = h; }
+}
+
+// Perfectly reasonable code written against Rectangle:
+void resize(Rectangle r) {
+    r.setWidth(5);
+    r.setHeight(4);
+    assert r.area() == 20;        // holds for Rectangle, FAILS for Square (16)
+}
+```
+
+`resize` is not wrong. It was written against a documented contract. `Square`
+broke it, and the compiler had nothing to say because **LSP is a semantic
+contract, not a type-system one** — this is exactly why it gets asked. Java can
+check the signatures; only you can check the meaning.
+
+The fix is not a cleverer `Square`. It is recognising that mutable `Rectangle`
+and mutable `Square` are not in a subtype relationship at all. Make them
+immutable and the problem dissolves, because there is no setter to break:
+
+```java
+// GOOD — no mutation, so no contract to violate.
+public interface Shape { int area(); }
+public record Rectangle(int width, int height) implements Shape {
+    public int area() { return width * height; }
+}
+public record Square(int side) implements Shape {
+    public int area() { return side * side; }
+}
+```
+
+**Immutability makes most LSP violations impossible**, which is a genuinely
+useful thing to say in an interview and a genuinely useful habit in code.
+
+Two more violations you will meet in real Java, both of which are worth naming
+because they show the principle is not academic:
+
+```java
+// Violation 1 — strengthening a precondition.
+class FileStore {
+    /** Accepts any non-null path. */
+    void write(String path, byte[] data) { ... }
+}
+class S3Store extends FileStore {
+    @Override void write(String path, byte[] data) {
+        if (!path.startsWith("s3://"))                    // demands MORE
+            throw new IllegalArgumentException("must be an s3 path");
+        ...
+    }
+}
+// Every existing caller of FileStore.write now potentially throws. Broken.
+
+// Violation 2 — weakening a postcondition, from the JDK itself.
+List<String> fixed = Arrays.asList("a", "b");
+fixed.add("c");        // UnsupportedOperationException at runtime
+// List.add promises to add. This implementation refuses. It is in the JDK,
+// it is a known wart, and it is the reason List.of / copyOf are documented
+// as immutable up front rather than pretending.
+```
+
+The second example is the honest note to include: the JDK itself violates LSP in
+the collections API, and the cost is real — you cannot tell from a `List`
+reference whether `add` will work. When a design forces implementers to throw
+`UnsupportedOperationException`, that is usually Interface Segregation failing
+first and Liskov failing as a consequence.
+
+The practical detector, and the sentence to use in an interview: **"if I have to
+write `if (x instanceof Square)` in the caller, my subtype is not
+substitutable."** Type checks in the caller are LSP violations with a costume
+on.
+
+### I — Interface Segregation: no method should be a lie
+
+A fat interface forces implementers to provide methods that are meaningless for
+them, and the only way to provide a meaningless method is to lie — return null,
+do nothing, or throw.
+
+```java
+// BAD — a "worker" interface that assumes every worker is human.
+interface Worker {
+    void work();
+    void eat();
+    void takeLeave(int days);
+}
+
+class RobotWorker implements Worker {
+    @Override public void work() { ... }
+    @Override public void eat() { /* nothing to do?? */ }              // a lie
+    @Override public void takeLeave(int d) { throw new UnsupportedOperationException(); }
+}
+```
+
+The damage is to the *caller*, not the implementer. A method that takes a
+`Worker` and calls `eat()` cannot be safely given a `RobotWorker`, so the
+interface no longer means what it says, and every caller has to know which
+implementations are "real". That is the same failure as LSP, arrived at from the
+interface side.
+
+```java
+// GOOD — split along the lines that actually vary between implementers.
+interface Workable  { void work(); }
+interface Feedable  { void eat(); }
+interface LeaveEligible { void takeLeave(int days); }
+
+final class HumanWorker implements Workable, Feedable, LeaveEligible { ... }
+final class RobotWorker implements Workable { ... }
+
+// A caller now states exactly what it needs:
+void runShift(Workable w) { w.work(); }       // accepts robots and humans honestly
+```
+
+The guardrail: **segregate along axes that genuinely vary, not into one method
+per interface.** If every implementer of an interface implements all of its
+methods meaningfully, the interface is not fat, however many methods it has.
+`Collection` has fifteen methods and is not a violation for `ArrayList`. The
+test is whether an implementer is forced to lie, not the method count.
+
+A second, subtler benefit that is worth mentioning because it shows depth:
+smaller interfaces mean fewer recompilations and fewer reasons for a client to
+be affected by a change. A class that depends on `Workable` is not rebuilt or
+retested when `takeLeave`'s signature changes.
+
+### D — Dependency Inversion, versus DI, versus IoC
+
+These three get used interchangeably and they are three different things.
+Distinguishing them cleanly is a reliable senior signal because most candidates
+cannot.
+
+**Dependency Inversion Principle** is a statement about the *direction of
+compile-time dependencies*: high-level policy should not depend on low-level
+detail; both should depend on an abstraction. And critically, **the abstraction
+should be owned by the high-level module**, not by the detail.
+
+```
+   Without DIP                        With DIP
+   ───────────                        ────────
+
+   OrderService                       OrderService ───► OrderRepository
+        │                                                 (interface, owned
+        ▼                                                  by the domain)
+   PostgresOrderRepo                                          ▲
+   (a detail — the                                            │
+    domain now imports                            PostgresOrderRepo
+    a JDBC concern)                                (the detail depends
+                                                    on the abstraction)
+```
+
+The arrow from the database class to the interface is the "inversion": it used
+to point the other way. The consequence is that your domain package compiles
+with no reference to JDBC, JPA, Kafka or HTTP — which is what lets you test it
+in milliseconds and swap the store without touching business rules.
+
+**Dependency Injection** is a *technique*: give an object its collaborators
+rather than letting it construct them. It is one sentence of code.
+
+```java
+// Not injected — OrderService has welded itself to a concrete detail.
+class OrderService {
+    private final OrderRepository repo = new PostgresOrderRepository();  // BAD
+}
+
+// Injected — the collaborator is handed in.
+final class OrderService {
+    private final OrderRepository repo;
+    OrderService(OrderRepository repo) { this.repo = repo; }             // GOOD
+}
+```
+
+**Inversion of Control** is the broader *architectural pattern* in which the
+framework calls your code rather than your code calling the framework. A
+Spring container creating your beans and wiring them is IoC; so is a servlet
+container invoking your handler; so is a test runner invoking your `@Test`
+method. Dependency injection is one specific form of IoC.
+
+The relationships, stated so you can say them in one breath: **DIP is the
+principle (point dependencies at abstractions that the policy owns), DI is a
+technique for satisfying it (pass collaborators in), and IoC is the general
+pattern that DI belongs to (the framework drives).** You can follow DIP with no
+framework at all — `new OrderService(new PostgresOrderRepository())` in a `main`
+method is textbook DIP and textbook DI, with zero Spring. That is exactly what
+you will write in a machine-coding round, and saying so demonstrates that you
+understand the principle rather than the annotation.
+
+One detail that catches people: the *location* of the interface matters. If
+`OrderRepository` lives in the persistence package alongside its
+implementation, you have dependency injection but not dependency inversion — the
+domain still points at the persistence layer. Put the interface in the domain
+package, and the dependency genuinely inverts. See
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) for what
+the container is actually doing when it satisfies this for you.
+
+### The honest closing note: SOLID has costs
+
+Every principle above buys flexibility with indirection, and indirection is not
+free. It costs a file, a name, a level of stack, and a jump for the reader
+trying to follow a call path.
+
+Applied without judgement, SOLID produces the codebase everyone has met: forty
+interfaces with one implementation each, a `Factory` for every `Factory`, and a
+feature that takes six files to follow. That codebase is *harder* to change than
+the one it replaced, which means the principles have failed on their own terms.
+
+The three questions that keep you honest:
+
+1. **Is this an axis that will actually change?** Pricing, yes. The concept of a
+   parking floor, no. Build for the change you have evidence for.
+2. **What does the indirection cost a reader?** If the answer is "they now have
+   to open three files to understand one behaviour", the abstraction had better
+   be earning it.
+3. **Can I defer it?** Concrete first, abstract at the second requirement, is a
+   defensible rule. The second time you need a variation, you know the shape of
+   the axis; the first time, you are guessing.
+
+**An interviewer respects "I'd apply Open/Closed here because pricing is the
+axis of change, and I'd deliberately not apply it to the floor layout because
+that has one form and adding an interface would just be noise" far more than
+five principles applied uniformly.** Naming a place where you chose *not* to
+abstract is one of the strongest things you can say in an LLD round, because
+only someone who has maintained an over-abstracted codebase says it.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Explain SRP."** One reason to change, where a reason is a stakeholder who
+   can request a change. Not "does one thing" — that has no stopping point.
+2. **"Give an SRP violation from your own code."** Have one ready. A controller
+   that validates, maps and calls the database is the easiest honest example.
+3. **"How do you satisfy Open/Closed in Java?"** Polymorphism. Replace the
+   conditional that branches on kind with an interface and one class per kind,
+   and inject the mapping from key to implementation.
+4. **"Doesn't something still need to know all the implementations?"** Yes —
+   the wiring. Concentrating that in a configuration class or an injected map is
+   the point; the *behaviour* stops knowing.
+5. **"State LSP precisely."** A subtype may weaken preconditions and strengthen
+   postconditions, never the reverse, and must preserve the base type's
+   invariants.
+6. **"Why can't the compiler catch an LSP violation?"** It is a contract about
+   meaning, not signatures. `Square` overriding `setWidth` type-checks fine.
+7. **"Give a real LSP violation in the JDK."** `Arrays.asList(...).add(...)`
+   throws `UnsupportedOperationException` — a postcondition weakened to nothing.
+8. **"How would you detect an LSP violation in review?"** Look for `instanceof`
+   or type checks in callers, and for overrides that throw where the base did
+   not.
+9. **"Fix the Rectangle/Square problem."** Remove mutation. Immutable `Rectangle`
+   and `Square` implementing a `Shape` interface have no contract to violate.
+10. **"When is a big interface acceptable?"** When every implementer implements
+    every method meaningfully. The test is whether someone is forced to throw
+    `UnsupportedOperationException`, not the method count.
+11. **"Difference between DIP, DI and IoC?"** DIP is the principle about
+    dependency direction and who owns the abstraction; DI is the technique of
+    passing collaborators in; IoC is the general pattern where the framework
+    calls you. DI is one form of IoC and a common way to achieve DIP.
+12. **"Can you have DI without a framework?"** Yes — constructing the service
+    with an in-memory repository in `main` is textbook DI and textbook DIP with
+    zero Spring. That is what you write in a machine-coding round.
+13. **"Where should the repository interface live?"** In the domain package. If
+    it lives with the implementation, you have injection but not inversion.
+14. **"Is SOLID always right?"** No. Each principle trades indirection for
+    flexibility. Over-applied it produces a codebase of one-method interfaces
+    that is harder to navigate and harder to change. Name an axis where you
+    deliberately would not abstract.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Reciting the acronym without an example.** Every interviewer has heard the
+  definitions. What distinguishes you is the before-and-after and the cost
+  argument attached to it.
+- **Splitting by noun instead of by stakeholder.** `OrderValidator`,
+  `OrderMapper`, `OrderPrinter`, `OrderCalculator` can all change for the same
+  reason, in which case you have four files and one responsibility.
+- **An interface per class, by reflex.** `FooServiceImpl` as the eternal sole
+  implementation of `FooService` is ceremony. Spring has not required it since
+  CGLIB proxying became the default.
+- **Treating LSP as "is-a".** The geometry is irrelevant; the contract is
+  everything. A `Square` is a rectangle and still not a `Rectangle`.
+- **Anaemic domain models.** Pushing all behaviour into `*Service` classes and
+  leaving entities as field bags looks like SRP and is usually procedural code
+  wearing OOP syntax. Behaviour belongs with its data unless a separate
+  stakeholder owns it.
+- **Abstracting on the first occurrence.** The first time you see a variation
+  you are guessing at the axis. The second time you know it.
+</Callout>
+
+### Where this connects
+
+- [Part 1 — the OOP pillars](/lld/part-1-the-foundation-oop-the-4-pillars-applied)
+  — polymorphism is the mechanism that makes Open/Closed physically possible.
+- [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) —
+  Strategy is Open/Closed with a name; Adapter is how you obey DIP against a
+  third-party SDK.
+- [Part 5 — the parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — every principle here, landed on a concrete design, with the reasoning for
+  where each one applies and where it does not.
+- [OOP and design principles](/java/5-oop-design-principles) — the Java-side
+  companion treatment.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — what
+  an IoC container is actually doing when it satisfies DIP for you.

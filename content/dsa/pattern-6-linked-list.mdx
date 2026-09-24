@@ -1,0 +1,420 @@
+---
+title: "Pattern 6 — Linked List"
+topic: "dsa"
+order: 108
+difficulty: "medium"
+estimatedMinutes: 29
+tags: [linked-list, dummy-head, reversal, floyd-cycle-detection, fast-slow-pointers]
+format: "mdx"
+summary: "The dummy head that deletes half the edge cases, three-pointer and recursive reversal, the algebra behind why Floyd's second phase lands exactly on the cycle start, fast/slow for the middle, k-group reversal, and the interleaving trick for copying a list with random pointers."
+---
+
+## Layer 1 — When you reach for this
+
+Nobody chooses a linked list in production Java. `ArrayList` beats it at almost
+everything, and `ArrayDeque` beats it at the queue case it was supposed to own.
+So the honest question is why interviewers keep asking about it.
+
+> A linked list question is a **pointer manipulation test under artificial
+> scarcity**. There is no random access, no length, and no way to look backwards,
+> so every algorithm has to be expressible as a small number of pointers moving
+> forward exactly once. **The constraint is the exercise.** It checks whether you
+> can hold a mutable structure in your head precisely enough to rewire it
+> without losing a reference or creating a cycle.
+
+Signals that you are in this pattern:
+
+- **"In place", "O(1) extra space", "without using extra memory"** attached to a
+  list question. Copying into an `ArrayList`, solving there, and rebuilding is
+  always possible and always what the interviewer is trying to rule out.
+- **"Reverse"**, in whole, in part, or in groups of k.
+- **"Detect a cycle", "find where the cycle begins", "is it a palindrome"** —
+  all fast and slow pointers.
+- **"Find the middle", "remove the n-th node from the end"** — the fixed-gap
+  variant, which is how you count from the end without knowing the length.
+- **"Merge two sorted lists", "merge k lists", "sort a list"** — the
+  pointer-per-sequence template from
+  [two pointers](/dsa/pattern-2-two-pointers), applied to nodes.
+- **"Deep copy a structure with arbitrary pointers."**
+- **An LRU cache or any design needing O(1) removal of an arbitrary element**,
+  which is the one place a doubly linked list is genuinely the right production
+  choice.
+
+Anti-signals:
+
+- **You need the k-th element repeatedly.** That is O(n) every time, so either
+  the data structure is wrong or you should index it once.
+- **You need sorting by value with random access**, which a list cannot give;
+  merge sort is the list-friendly sort precisely because it never indexes.
+- **"Most recent" or "matching brackets" on a sequence** is a
+  [stack](/dsa/pattern-5-stack) even if the input happens to be a list.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+Almost every list algorithm maintains one of two invariants, and naming which
+one you are using is how you avoid losing a node:
+
+> **Rewiring invariant:** at every step, each node in the list is reachable from
+> exactly one of the pointers I am holding.
+
+> **Prefix invariant:** everything before `current` is already in its final
+> state, and everything from `current` onwards is untouched input.
+
+The practical consequence of the first is a rule: **before you overwrite a
+`next` pointer, save it.** Every lost-node bug in this pattern is a violation of
+that one line.
+
+### The dummy head, which deletes half the edge cases
+
+The recurring annoyance in list code is that the head is special. Deleting the
+head means reassigning the caller's reference; inserting before the head means a
+different code path; a list that becomes empty needs its own branch. A **dummy
+node placed before the real head makes the head an ordinary node**, because now
+every node has a predecessor.
+
+```java
+ListNode dummy = new ListNode(0);
+dummy.next = head;
+ListNode prev = dummy;
+while (prev.next != null) {
+    if (prev.next.val == target) prev.next = prev.next.next;  // deletion needs no special case
+    else prev = prev.next;
+}
+return dummy.next;   // the head may have changed, and we did not have to notice
+```
+
+**Use a dummy whenever the head might be removed or replaced, or whenever you
+are building a new list.** Remove Nth Node From End, Remove Duplicates, Merge
+Two Sorted Lists, Partition List, and Reverse Nodes in k-Group all become
+noticeably shorter. Returning `dummy.next` instead of `head` is the other half
+of the trick: the original head may no longer be the head.
+
+### Reversal, the one thing to know cold
+
+```java
+// Iterative three-pointer reversal. O(n) time, O(1) space.
+ListNode prev = null, cur = head;
+while (cur != null) {
+    ListNode next = cur.next;   // SAVE before overwriting; this line is the whole algorithm
+    cur.next = prev;            // flip the link backwards
+    prev = cur;                 // advance both pointers
+    cur = next;
+}
+return prev;                    // cur is null; prev is the new head
+```
+
+The invariant is: **`prev` heads a fully reversed list of everything seen so
+far, and `cur` heads the untouched remainder.** Say that and the four lines
+write themselves in any order-of-assignment question the interviewer throws at
+you.
+
+The recursive version is worth knowing because it is frequently asked as
+"now do it recursively", and because it exposes the base case clearly:
+
+```java
+ListNode reverse(ListNode head) {
+    if (head == null || head.next == null) return head;   // empty or single node
+    ListNode newHead = reverse(head.next);   // reverse everything after head
+    head.next.next = head;                   // the node after head now points back at head
+    head.next = null;                        // and head becomes the new tail
+    return newHead;                          // the deepest node, unchanged all the way up
+}
+```
+
+It is O(n) time but **O(n) stack space**, which makes it strictly worse for a
+million-node list — say that when you present it, because it is the follow-up.
+
+### Fast and slow pointers
+
+Advance one pointer by one node and another by two. Two facts fall out.
+
+**Finding the middle.** When `fast` reaches the end, `slow` is at the middle.
+The only decision is which middle you get for an even-length list, and it is
+controlled by the loop guard: `while (fast != null && fast.next != null)` leaves
+`slow` at the **second** middle, while `while (fast.next != null && fast.next.next != null)`
+leaves it at the first. Pick deliberately, because Reorder List and palindrome
+checking want different ones.
+
+**Detecting a cycle.** If there is a cycle, both pointers eventually enter it.
+Once both are inside, consider the gap from `fast` to `slow` measured forward
+around the cycle: every step, `fast` gains one on `slow`, so the gap decreases
+by exactly one each step and must therefore hit zero. **They cannot step over
+each other, because the gap changes by one and not by two** — that is the
+precise reason a step size of two is chosen, and it is a real follow-up.
+
+### Why Floyd's second phase finds the cycle start
+
+This is the part that is usually presented as magic. The algebra is four lines
+and worth memorising.
+
+Let `F` be the distance from the head to the cycle start, `a` the distance from
+the cycle start to the meeting point measured forward around the cycle, and `C`
+the cycle length.
+
+When they meet, `slow` has travelled `F + a` (it cannot have lapped the cycle,
+since it entered the cycle at most `C` steps before the meeting and the gap
+closes within `C` steps). `fast` has travelled `F + a + nC` for some `n` at
+least 1, because it is at the same node but has gone around some whole number of
+extra laps. Since `fast` moves at twice the speed:
+
+```
+F + a + nC = 2(F + a)
+        nC = F + a
+         F = nC - a = (n - 1)C + (C - a)
+```
+
+Read the final line as a statement about walking. `C - a` is the distance from
+the **meeting point** forward to the cycle start. So a walker starting at the
+head and a walker starting at the meeting point, both moving one step at a
+time, cover the same distance to reach the cycle start, up to `(n - 1)` extra
+whole laps that land the second walker back where it would be anyway.
+**They therefore meet exactly at the cycle start.**
+
+```java
+ListNode slow = head, fast = head;
+while (fast != null && fast.next != null) {
+    slow = slow.next;
+    fast = fast.next.next;
+    if (slow == fast) {                       // phase 1: a cycle exists
+        ListNode p = head;
+        while (p != slow) { p = p.next; slow = slow.next; }   // phase 2: walk in lockstep
+        return p;                             // the cycle start
+    }
+}
+return null;                                  // fast hit the end: no cycle
+```
+
+The same algorithm solves Find the Duplicate Number, where the array is read as
+a function from index to index; recognising that an array can be a linked list
+is one of the more satisfying transfers in the whole catalogue.
+
+### The fixed-gap variant
+
+For "the n-th node from the end" with no length available, advance one pointer
+`n` steps first and then move both together. When the leader reaches the end,
+the follower is `n` from the end. Combine it with a dummy head so that removing
+the actual head needs no special case:
+
+```java
+ListNode dummy = new ListNode(0, head);
+ListNode lead = dummy, lag = dummy;
+for (int i = 0; i < n; i++) lead = lead.next;     // open a gap of n
+while (lead.next != null) { lead = lead.next; lag = lag.next; }
+lag.next = lag.next.next;                          // lag sits just before the target
+return dummy.next;
+```
+
+Starting both from `dummy` rather than `head` is what guarantees `lag` lands on
+the **predecessor** of the node to delete, which is the only position from which
+a singly linked list can delete anything.
+
+### Merge two sorted lists
+
+The two-pointer merge with a dummy head to accumulate the result:
+
+```java
+ListNode dummy = new ListNode(0), tail = dummy;
+while (a != null && b != null) {
+    if (a.val <= b.val) { tail.next = a; a = a.next; }
+    else                { tail.next = b; b = b.next; }
+    tail = tail.next;
+}
+tail.next = (a != null) ? a : b;    // append the remaining run in O(1); no loop needed
+return dummy.next;
+```
+
+Attaching the leftover in one assignment rather than looping is a small thing
+that reviewers notice. Use `<=` rather than `<` to keep the merge stable. Merge
+k Sorted Lists then has two good answers: a min-heap of the k current heads for
+O(N log k), or pairwise merging in log k rounds for the same bound with O(1)
+extra space. Being able to offer both, and to say that the heap is better when k
+is large and the lists arrive as a stream, is the complete answer. See
+[heaps](/dsa/pattern-9-heaps-priority-queue).
+
+### Reverse Nodes in k-Group
+
+The composition problem: count k nodes ahead to confirm a full group exists,
+reverse exactly that group, reconnect, and recurse or iterate onto the rest. The
+bookkeeping is the difficulty, and a dummy plus a `groupPrev` pointer is what
+keeps it manageable.
+
+```java
+ListNode dummy = new ListNode(0, head), groupPrev = dummy;
+while (true) {
+    ListNode kth = groupPrev;
+    for (int i = 0; i < k && kth != null; i++) kth = kth.next;
+    if (kth == null) break;                       // fewer than k remain: leave them as is
+    ListNode groupNext = kth.next;
+
+    ListNode prev = groupNext, cur = groupPrev.next;
+    while (cur != groupNext) {                     // standard reversal, bounded by groupNext
+        ListNode next = cur.next;
+        cur.next = prev; prev = cur; cur = next;
+    }
+    ListNode newGroupPrev = groupPrev.next;        // the old first node is now the group's tail
+    groupPrev.next = kth;                          // attach the reversed group
+    groupPrev = newGroupPrev;
+}
+return dummy.next;
+```
+
+Seeding `prev` with `groupNext` rather than `null` is the trick that reconnects
+the group's new tail to the rest of the list for free, instead of as a separate
+fix-up step.
+
+### Copy List with Random Pointer, and the interleaving trick
+
+Deep-copy a list where each node also has a `random` pointer to anywhere. The
+straightforward answer is a `HashMap` from original node to copy, built in one
+pass and wired in a second: O(n) time, O(n) space.
+
+The O(1)-extra-space answer is the interleaving trick, and it is elegant enough
+to be worth knowing. Splice each copy directly after its original, so the list
+reads original, copy, original, copy. Now **the copy of any node `x` is simply
+`x.next`**, which means the random pointers can be set with no map at all:
+`x.next.random = x.random.next`. A third pass unzips the two lists apart.
+
+```java
+for (Node x = head; x != null; x = x.next.next) {        // 1. interleave the copies
+    Node copy = new Node(x.val);
+    copy.next = x.next;
+    x.next = copy;
+}
+for (Node x = head; x != null; x = x.next.next)          // 2. wire randoms via position
+    if (x.random != null) x.next.random = x.random.next;
+// 3. unzip, restoring the original list's next pointers as you go
+```
+
+The map is the storage; interleaving replaces it by encoding the mapping in the
+structure itself. Restoring the original list in step three matters — leaving
+the input mutated is a correctness bug in most graders and a real one in
+production.
+
+### Edge cases and traps
+
+- **An empty list, and a single-node list.** Check them first; most list bugs
+  are here.
+- **A two-node list**, which is where fast/slow guards and k-group boundaries
+  break.
+- **Overwriting `next` before saving it.** The rest of the list is gone and
+  there is no way back.
+- **Creating a cycle by accident**, usually by failing to null out the new tail
+  after a reversal. The symptom is a hang, not an exception.
+- **Returning `head` instead of `dummy.next`** when the head was removed or
+  reversed.
+- **Which middle you land on** for even lengths, which silently changes Reorder
+  List and palindrome checks.
+- **`fast.next.next` without checking `fast.next`**, the standard
+  `NullPointerException` in cycle detection.
+- **Recursive solutions on long lists**, which throw `StackOverflowError`
+  somewhere around ten thousand frames.
+- **Comparing nodes by value rather than identity** when checking for an
+  intersection. Two lists intersect when they share a **node**, not a value, so
+  the comparison must be `==`.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity of reversal?"** O(n) time, O(1) space iteratively;
+   O(n) stack space recursively, which matters for long lists.
+2. **"Why a dummy head?"** It gives the head a predecessor, so deletion,
+   insertion at the front, and an emptied list all stop being special cases.
+3. **"Why does fast/slow detect a cycle?"** Once both are in the cycle the gap
+   shrinks by exactly one per step, so it must reach zero. A step size of two is
+   what makes the change exactly one.
+4. **"Why does the second phase find the cycle start?"** From `nC = F + a`, the
+   distance from the head to the start equals the distance from the meeting
+   point to the start, modulo whole laps.
+5. **"What if `fast` moved three steps at a time?"** It still detects a cycle,
+   but the gap changes by two per step so they can step over each other unless
+   the cycle length is coprime with the step, and the clean second-phase algebra
+   is lost.
+6. **"Can you find the cycle length?"** Yes: from the meeting point, walk until
+   you return to it and count the steps.
+7. **"Find the middle in one pass."** Fast and slow; state which middle you get
+   for even lengths and why.
+8. **"Remove the n-th node from the end in one pass."** Open a gap of n from a
+   dummy, then move both until the leader hits the end.
+9. **"Check if a list is a palindrome in O(1) space."** Find the middle, reverse
+   the second half, compare, and restore the list. The restore step is the part
+   people forget, and it is what makes the solution non-destructive.
+10. **"Merge k sorted lists."** A min-heap of the k heads for O(N log k), or
+    pairwise merging in log k rounds. The heap is better for a stream; pairwise
+    avoids the extra structure.
+11. **"Detect where two lists intersect."** Walk both, and when one ends,
+    restart it at the other's head. Both pointers then travel `lenA + lenB` and
+    meet at the intersection, or at null. It is the same trick as equalising
+    lengths, without needing the lengths.
+12. **"Copy a list with random pointers in O(1) extra space."** Interleave the
+    copies, wire randoms as `x.next.random = x.random.next`, then unzip and
+    restore the original.
+13. **"ArrayList or LinkedList in real code?"** `ArrayList` almost always —
+    contiguous memory is prefetched and a `LinkedList` node is a cache miss per
+    hop. The Big-O table misleads because it counts operations, not memory
+    locality.
+14. **"When is a linked list genuinely the right choice?"** When you hold a
+    reference to a node and need O(1) removal or splice — which is exactly the
+    doubly linked list inside an LRU cache.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Losing the rest of the list** by assigning `next` before saving it.
+- **Accidentally creating a cycle**, which hangs instead of throwing.
+- **`fast.next.next` without a null check on `fast.next`.**
+- **Returning `head` after the head has changed**, instead of `dummy.next`.
+- **Not handling the empty and single-node cases** before the main loop.
+- **Landing on the wrong middle** for even-length lists.
+- **Recursive reversal on a very long list**, giving `StackOverflowError`.
+- **Leaving the input mutated** after a palindrome check or a random-pointer
+  copy.
+- **Comparing by value when checking intersection**, which reports a false
+  match on equal values in disjoint lists.
+- **Reaching for `LinkedList` in production code** because the Big-O table
+  suggested it.
+</Callout>
+
+### Problems to drill
+
+**Easy** — the primitives, until the pointer moves are automatic.
+
+- **Reverse Linked List** — iterative and recursive; know both cold.
+- **Merge Two Sorted Lists** — dummy head plus the O(1) tail attachment.
+- **Linked List Cycle** — fast and slow, phase one only.
+- **Middle of the Linked List** — and which middle you get.
+
+**Medium** — composition and bookkeeping.
+
+- **Remove Nth Node From End of List** — the fixed gap, one pass.
+- **Linked List Cycle II** — phase two and the algebra behind it.
+- **Reorder List** — find the middle, reverse the second half, interleave;
+  three primitives composed.
+- **Copy List with Random Pointer** — the map version and the interleaving one.
+- **LRU Cache** — a doubly linked list plus a map, the one production-real use.
+
+**Hard**
+
+- **Reverse Nodes in k-Group** — reversal under a boundary condition.
+- **Merge k Sorted Lists** — the heap and the pairwise answers.
+- **Find the Duplicate Number** — Floyd's algorithm on an array read as a
+  function.
+
+### Where this connects
+
+- [Two pointers](/dsa/pattern-2-two-pointers) — fast/slow and the merge are the
+  same ideas without random access.
+- [Stacks](/dsa/pattern-5-stack) — the iterative alternative when a problem
+  wants the list processed backwards.
+- [Heaps and priority queues](/dsa/pattern-9-heaps-priority-queue) — the k-way
+  merge.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  why `ArrayList` beats `LinkedList` in practice, and what `ArrayDeque` replaced.
+- [Practice: LRU cache](/java/practice-lru-cache) — the doubly linked list plus
+  hash map, written from scratch.
+- [Trees, DFS and BFS](/dsa/pattern-7-trees-dfs-bfs) — the same pointer
+  discipline with two children instead of one.

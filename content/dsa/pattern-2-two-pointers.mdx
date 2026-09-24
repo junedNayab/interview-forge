@@ -1,0 +1,360 @@
+---
+title: "Pattern 2 — Two Pointers"
+topic: "dsa"
+order: 104
+difficulty: "medium"
+estimatedMinutes: 26
+tags: [two-pointers, sorted-array, in-place, 3sum, container-with-most-water]
+format: "mdx"
+summary: "The three two-pointer shapes — converging from both ends, fast/slow in the same direction, and one pointer per array — with the monotone-movement proof of O(n), the 3Sum duplicate-skipping logic, and the exchange-argument proof that moving the shorter wall is safe."
+---
+
+## Layer 1 — When you reach for this
+
+Two pointers is the cheapest optimisation in the catalogue. It needs no extra
+memory, it is four lines of code, and it converts a class of O(n²) scans into a
+single linear sweep. The cost is that it only works when the data has a
+structure you can exploit, and recognising that structure is the skill.
+
+> A nested loop wastes work because it re-examines pairs it has already
+> logically ruled out. **Two pointers works when each step lets you discard an
+> entire group of candidates at once**, so that neither pointer ever has to go
+> back.
+
+Signals in the problem statement:
+
+- **The word "sorted"** appears, or the array can be sorted without breaking the
+  question. This is the strongest signal in the entire pattern catalogue. If the
+  problem says "sorted" and asks about pairs, you are done thinking.
+- **"Find a pair / triplet / quadruplet that sums to a target."**
+- **"Palindrome", "reverse", "is it a mirror"** — compare from both ends inward.
+- **"Remove duplicates in place", "move all zeroes to the end", "partition the
+  array"** with an **O(1) extra space** requirement. These are same-direction
+  fast/slow, where one pointer reads and the other writes.
+- **"Merge two sorted arrays / lists"**, "intersection of two sorted arrays",
+  "is one string a subsequence of another" — one pointer per sequence.
+- **"Maximise something between two positions"**, as in container water or
+  trapping rain, where the quantity depends on both ends.
+
+Anti-signals, where it looks like two pointers but is not:
+
+- **The array is unsorted and sorting destroys the answer**, because indices are
+  part of the output. Two Sum returns indices, which is exactly why it is a
+  hashing problem and not a two-pointer problem. See
+  [arrays and hashing](/dsa/pattern-1-arrays-hashing).
+- **The quantity you track is not monotone in the pointer movement.** Sums of
+  positive numbers grow as the window grows; sums with negative numbers do not.
+  Subarray Sum Equals K on an array with negatives cannot be done with pointers
+  at all, and prefix sums plus a map is the answer.
+- **You need a window with a validity condition rather than a pair.** That is a
+  [sliding window](/dsa/pattern-3-sliding-window), which is technically two
+  pointers but has a different template and a different invariant. If you are
+  asking "is this window valid?" rather than "is this pair the answer?", switch.
+- **You are searching for one value in a sorted array.** That is
+  [binary search](/dsa/pattern-4-binary-search) at O(log n), which beats a
+  linear two-pointer sweep.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant, which is the whole lesson
+
+For the converging variant on a sorted array, the invariant is:
+
+> **Every pair that could still be the answer has both of its indices inside
+> `[left, right]`.**
+
+Everything follows from this. When `arr[left] + arr[right] < target`, the sum is
+too small. Because the array is sorted, `arr[right]` is the **largest** value
+still available to partner with `arr[left]`; every remaining partner for `left`
+is at most `arr[right]` and therefore gives a sum that is also too small.
+**So `left` cannot be part of any answer, and discarding it discards a whole
+row of the n-by-n pair matrix, not one cell.** The symmetric argument holds when
+the sum is too large: `right` is now too big for every partner that remains.
+
+That sentence is the proof of correctness, and it is what an interviewer is
+listening for. Notice where sorting enters: it is what licenses "every remaining
+partner is at most `arr[right]`". On unsorted data that claim is false, the
+discard is unjustified, and the algorithm is simply wrong.
+
+### Why the complexity drops
+
+Each iteration of the loop moves exactly one pointer, `left` only ever
+increases, `right` only ever decreases, and the loop stops when they meet.
+`left` can therefore move at most n times in total and `right` at most n times,
+so the loop body runs at most n times. **Total pointer movement is bounded by n,
+which is why a structure that looks like a nested loop is linear.** That
+monotone-movement argument is the same one that makes sliding window amortised
+O(n), and it is worth being able to state in one sentence.
+
+The cost is O(n) when the input arrives sorted and O(n log n) when you must sort
+it, in which case the sort dominates and the pointer sweep is free.
+
+### The canonical template
+
+```java
+// Converging pointers on a SORTED array: find a pair summing to target.
+int left = 0, right = arr.length - 1;
+while (left < right) {                 // strict: an element may not pair with itself
+    int sum = arr[left] + arr[right];
+    if (sum == target) return new int[] { left, right };
+    if (sum < target) left++;          // arr[left] is too small for every remaining partner
+    else right--;                      // arr[right] is too large for every remaining partner
+}
+return new int[] { -1, -1 };
+```
+
+### The three variants
+
+**1. Opposite ends, converging.** Requires sorted input, or a symmetric
+structure such as a palindrome where "sorted" is replaced by "the comparison is
+between mirror positions". Used for pair sums, palindrome checks, reversing in
+place, container water, and trapping rain water. The loop condition is
+`left < right` when the two must be distinct and `left <= right` when a single
+middle element still needs processing (reversal does not need it; some
+partitioning schemes do).
+
+**2. Same direction, fast and slow.** One pointer reads every element; the other
+marks the boundary of the region that is already correct. The invariant is
+**"everything before `slow` is the answer so far"**, and `fast` is the scan
+cursor. This is the in-place filtering family.
+
+```java
+// Remove duplicates from a sorted array in place; return the new length.
+int slow = 1;                                  // nums[0..slow-1] is the deduped prefix
+for (int fast = 1; fast < nums.length; fast++) {
+    if (nums[fast] != nums[slow - 1]) {        // a value we have not kept yet
+        nums[slow++] = nums[fast];
+    }
+}
+return slow;
+```
+
+Move Zeroes, Remove Element, and Sort Colors are all this shape. Sort Colors is
+the interesting one: it uses **three** pointers (a low boundary, a scan cursor,
+and a high boundary) and is the partition step of quicksort, which is why it is
+called the Dutch national flag problem.
+
+**3. One pointer per sequence.** Two sorted inputs, and you advance whichever
+pointer points at the smaller value. Merging, intersecting, and subsequence
+checking are all this. The invariant is that both pointers have consumed exactly
+the elements that can no longer contribute.
+
+```java
+// Is s a subsequence of t?
+int i = 0, j = 0;
+while (i < s.length() && j < t.length()) {
+    if (s.charAt(i) == t.charAt(j)) i++;       // matched: advance in s
+    j++;                                       // always advance in t
+}
+return i == s.length();
+```
+
+### Worked example: 3Sum, including the duplicate logic everyone gets wrong
+
+Find all unique triplets summing to zero. Sort the array, fix the first element,
+and two-pointer the rest. The algorithm is easy; **the uniqueness requirement is
+what the problem is actually testing**, and handling it with a `HashSet` of
+triplets at the end works but signals that you did not see the structure.
+
+```java
+Arrays.sort(nums);
+List<List<Integer>> result = new ArrayList<>();
+for (int i = 0; i + 2 < nums.length; i++) {
+    if (nums[i] > 0) break;                          // sorted: no way to reach zero now
+    if (i > 0 && nums[i] == nums[i - 1]) continue;   // skip a repeated FIRST element
+    int left = i + 1, right = nums.length - 1;
+    while (left < right) {
+        int sum = nums[i] + nums[left] + nums[right];
+        if (sum < 0) left++;
+        else if (sum > 0) right--;
+        else {
+            result.add(List.of(nums[i], nums[left], nums[right]));
+            left++; right--;                          // both must move off a found triplet
+            while (left < right && nums[left] == nums[left - 1]) left++;   // skip dupes
+            while (left < right && nums[right] == nums[right + 1]) right--;
+        }
+    }
+}
+```
+
+Three details carry the whole solution:
+
+- **The outer skip uses `nums[i] == nums[i - 1]`, not `nums[i] == nums[i + 1]`.**
+  Comparing forward would skip the *first* occurrence of a repeated value, so
+  the triplet `[-1, -1, 2]` would never be generated. Comparing backwards keeps
+  the first occurrence and skips only the later duplicates. This is the single
+  most common 3Sum bug.
+- **The inner skips run only after recording a hit**, and they compare against
+  the position the pointer just left. Skipping duplicates before recording
+  would drop valid triplets that legitimately contain repeated values.
+- **Both pointers move after a hit.** Moving only one guarantees the next sum
+  misses, so it is not incorrect, just wasteful — but if you forget to move
+  either one you have an infinite loop.
+
+The complexity is O(n²): the sort is O(n log n), and for each of n choices of
+the first element the inner sweep is O(n). Space is O(1) beyond the output, or
+O(log n) counting the sort's stack.
+
+### Worked example: Container With Most Water, and why the shorter wall moves
+
+Given heights, pick two lines forming a container of maximum area. Area is
+`(right - left) * min(h[left], h[right])`. Brute force is O(n²). The two-pointer
+solution starts at the widest pair and always moves the pointer at the **shorter
+line** inward.
+
+The proof that this is safe is an exchange argument, and it is a classic
+follow-up:
+
+> Suppose `h[left] <= h[right]`. Consider any container that uses `left` as one
+> of its walls. Its other wall is at some index `j` with `j < right`, so its
+> width is strictly smaller than `right - left`, and its height is
+> `min(h[left], h[j])` which is at most `h[left]`, which is the height of the
+> current container. Smaller width, no greater height, so **its area cannot
+> exceed the area we have already recorded**. Every container involving `left`
+> has therefore been accounted for, and moving `left` inward discards nothing.
+
+The asymmetry is the point: moving the taller wall could not be justified this
+way, because the height is capped by the shorter wall and shrinking the width
+while keeping the same cap can only lose area.
+
+```java
+int left = 0, right = height.length - 1, best = 0;
+while (left < right) {
+    best = Math.max(best, (right - left) * Math.min(height[left], height[right]));
+    if (height[left] <= height[right]) left++;   // the short wall bounds the area
+    else right--;
+}
+```
+
+Trapping Rain Water is the hard sibling and runs on the same idea. Water above
+index `i` is `min(maxLeft, maxRight) - height[i]`. Carrying running maxima from
+both ends lets you commit to whichever side has the smaller running maximum,
+because that side's answer is already determined regardless of what lies in the
+middle.
+
+### Edge cases and traps
+
+- **`left < right` versus `left <= right`.** For pair sums, `<` is required, or
+  an element pairs with itself. For a reversal, `<` is right because a middle
+  element needs no swap. Decide by asking whether the two pointers landing on
+  the same index is a meaningful state.
+- **Forgetting that sorting destroys the original indices.** If the answer must
+  be indices, either you cannot sort or you must sort pairs carrying the index.
+- **An empty or single-element array** where `right = length - 1` is `-1` or
+  `0`. The `while` guard handles both, but only if you wrote the guard first.
+- **Infinite loops** when a branch fails to move either pointer. Every path
+  through the loop body must advance something.
+- **Duplicate handling in 3Sum and 4Sum** as described above, in both the outer
+  fix and the inner sweep.
+- **Overflow when summing three `int` values** near `Integer.MAX_VALUE`. In
+  4Sum the standard fix is to accumulate into a `long`.
+- **In-place writes when the write pointer could pass the read pointer.** In the
+  same-direction variants `slow` never exceeds `fast`, which is why it is safe;
+  if you ever write a variant where it could, you need to copy.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why does this need a sorted array?"** Because the discard step relies on
+   `arr[right]` being the largest remaining partner. Without order that claim
+   is false and the algorithm drops valid answers.
+2. **"Prove it's O(n)."** Each iteration moves exactly one pointer, `left` only
+   rises and `right` only falls, so total movement is bounded by n.
+3. **"What if the array isn't sorted?"** Sort for O(n log n), or use a hash map
+   for O(n) time and O(n) space. The choice is a time-versus-space trade, and
+   sorting is disqualified if original indices are required.
+4. **"Two Sum on sorted input — which is better, this or binary search?"** Two
+   pointers is O(n); binary-searching each complement is O(n log n). Pointers
+   win, and the interviewer is checking that you noticed.
+5. **"Can you do it in O(1) space?"** Yes — that is the pattern's main selling
+   point, provided the input is already sorted.
+6. **"Extend to 3Sum. To 4Sum. To k-Sum."** Fix `k - 2` elements with nested
+   loops and two-pointer the last two: O(n^(k-1)). Mention that the
+   duplicate-skipping logic must be repeated at every level.
+7. **"Why move the shorter line in Container With Most Water?"** Because every
+   container using the shorter wall has width less than the current one and
+   height capped by that same wall, so none can beat what is already recorded.
+8. **"What if the input is a stream you can't index?"** Converging pointers are
+   impossible without random access, so you fall back to a hash-based single
+   pass, or buffer a window if the stream is bounded.
+9. **"What if the data is too big for memory?"** External merge sort into sorted
+   runs, then run the two-pointer merge over file streams. The merge variant is
+   exactly the pointer-per-sequence template.
+10. **"3Sum Closest instead of 3Sum — what changes?"** Nothing structural: you
+    track the minimum absolute difference and never return early, since no sum
+    is exactly right.
+11. **"Solve Trapping Rain Water in O(1) space."** Two pointers with running
+    left and right maxima; commit on whichever running maximum is smaller,
+    because that side's water level is already fixed.
+12. **"Valid Palindrome with non-alphanumerics and case folding."** Skip
+    invalid characters inside the loop with inner `while`s, and guard those
+    inner loops with `left < right` or they run off the end.
+13. **"Remove duplicates allowing each value at most twice."** Same fast/slow
+    template, comparing `nums[fast]` against `nums[slow - 2]` instead of
+    `nums[slow - 1]`. The generalisation to k is immediate.
+14. **"Merge two sorted arrays in place where the first has trailing space."**
+    Fill from the **back**, so you never overwrite an element you still need to
+    read. That reversal of direction is the whole trick.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Using `left <= right` for pair sums**, which lets one element pair with
+  itself.
+- **Skipping duplicates by comparing forward** (`nums[i] == nums[i + 1]`), which
+  drops the first occurrence of a repeated value.
+- **Moving only one pointer after recording a 3Sum hit**, which is wasteful and
+  one edit away from an infinite loop.
+- **Sorting when the answer is a set of indices.**
+- **Nested `while`s that skip characters without re-checking the outer bound**,
+  which reads past the end on inputs that are entirely punctuation.
+- **Assuming two pointers works on unsorted data** because the code compiles and
+  passes the sample case.
+- **Forgetting the empty-array case** before dereferencing `arr[right]`.
+- **Overflow when adding three or four `int` values.**
+</Callout>
+
+### Problems to drill
+
+**Easy** — get the two shapes into your fingers.
+
+- **Valid Palindrome** — converging pointers plus character filtering.
+- **Two Sum II, Input Array Is Sorted** — the template, unmodified.
+- **Remove Duplicates from Sorted Array** — the fast/slow write-pointer shape.
+- **Move Zeroes** — the same shape, with a swap instead of an overwrite.
+- **Merge Sorted Array** — pointer per sequence, and the fill-from-the-back
+  trick.
+
+**Medium** — where the reasoning is tested, not the template.
+
+- **3Sum** — fixing an element plus the duplicate-skipping logic.
+- **3Sum Closest** — the same sweep without an early exit.
+- **Container With Most Water** — the exchange-argument proof.
+- **Sort Colors** — three pointers; the quicksort partition in disguise.
+- **Longest Palindromic Substring** — expand-around-centre, which is two
+  pointers running outward instead of inward.
+
+**Hard**
+
+- **Trapping Rain Water** — the O(1)-space version, where you commit to the side
+  with the smaller running maximum.
+- **4Sum** — k-Sum generalisation, duplicate skipping at two levels, and the
+  overflow that forces `long`.
+
+### Where this connects
+
+- [Arrays and hashing](/dsa/pattern-1-arrays-hashing) — the O(n)-time,
+  O(n)-space alternative when the input cannot be sorted.
+- [Sliding window](/dsa/pattern-3-sliding-window) — the same two indices with a
+  validity invariant instead of a target sum.
+- [Binary search](/dsa/pattern-4-binary-search) — the other thing "sorted"
+  unlocks, and the faster choice for single-value lookup.
+- [Linked lists](/dsa/pattern-6-linked-list) — fast and slow pointers where
+  there is no random access at all.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  sorting costs that dominate these solutions.
+- [Coding round survival tips](/dsa/coding-round-survival-tips) — how to state a
+  correctness argument without stalling.

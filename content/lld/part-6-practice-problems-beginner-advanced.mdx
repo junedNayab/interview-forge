@@ -1,0 +1,306 @@
+---
+title: "Part 6 — Practice problems (beginner → advanced)"
+topic: "lld"
+order: 407
+difficulty: "medium"
+estimatedMinutes: 21
+tags: [lld, practice, problems, patterns, reference]
+format: "mdx"
+summary: "Fourteen classic LLD problems with the entities, the one design decision each is really testing, the expected pattern, the standard follow-up and the trap that catches beginners."
+---
+
+## How to use this list
+
+Each problem below is broken into five fields, and the one that matters most is
+**the real test** — the single design decision the problem exists to probe. A
+problem statement is a costume; underneath, "design a vending machine" is a
+question about state machines and "design Splitwise" is a question about whether
+you model the balance or recompute it.
+
+Work them in the order given. Do not read a solution before attempting the
+problem — the value is entirely in the attempt. And follow the rule from
+[Part 7](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build): after each
+one, invent a new requirement and count the files you have to touch.
+
+Starred problems are the highest-frequency. **If you do the four starred ones
+properly, you can handle the majority of LLD rounds**, because the underlying
+decisions repeat.
+
+---
+
+## Beginner — one clear decision each
+
+These have a small entity set and one obvious design axis. The goal is to finish
+them cleanly rather than cleverly.
+
+### 1. Parking lot (worked in full)
+
+- **Entities:** `ParkingLot`, `ParkingFloor`, `ParkingSpot`, `Vehicle`, `Ticket`, `Gate`
+- **The real test:** can you find the axes of change — pricing and allocation —
+  and put interfaces on exactly those, leaving everything else concrete?
+- **Expected pattern:** Strategy for both axes, Factory for vehicles and spots,
+  Facade for the lot itself.
+- **Classic follow-up:** two cars arrive at the last free spot simultaneously.
+- **The trap:** putting fee calculation inside `ParkingLot`. It fails the first
+  follow-up and it is by far the most common version of this design.
+- Full solution: [Part 5](/lld/part-5-worked-example-design-a-parking-lot-the-canonical).
+
+### 2. Vending machine
+
+- **Entities:** `VendingMachine`, `Slot`, `Product`, `Coin`, `Inventory`, plus a state type
+- **The real test:** do you model the lifecycle as explicit states, or as a pile
+  of booleans? This is the purest state-machine problem in the set.
+- **Expected pattern:** State. Idle, has-money, item-selected, dispensing,
+  out-of-service, each knowing which operations it permits.
+- **Classic follow-up:** the user cancels mid-transaction, or the machine cannot
+  make exact change.
+- **The trap:** three booleans (`hasMoney`, `isDispensing`, `isSoldOut`) give
+  you eight representable states of which four are legal, and the illegal ones
+  are reachable. Also: the refund path is where the state machine earns its
+  keep, so do not skip it.
+
+### 3. Tic-tac-toe
+
+- **Entities:** `Game`, `Board`, `Cell`, `Player`, `Move`, `WinStrategy`
+- **The real test:** can you separate the rules from the board? A board that
+  knows how to detect a win is a board that cannot be reused for Connect-4.
+- **Expected pattern:** Strategy for the win condition, Command if you support
+  undo.
+- **Classic follow-up:** generalise to an `n` by `n` board, or to Connect-4.
+- **The trap:** hardcoding the eight winning lines. It works, it is fast to
+  write, and it dies the moment the follow-up arrives. Detect a win by scanning
+  the row, column and diagonals of the last move placed.
+
+### 4. Snake and ladders
+
+- **Entities:** `Game`, `Board`, `Cell`, `Jump`, `Player`, `Dice`
+- **The real test:** do you notice that a snake and a ladder are the same thing?
+  Both are a jump from one cell to another; only the sign of the difference
+  differs.
+- **Expected pattern:** almost none, deliberately. This problem rewards good
+  modelling and punishes pattern-forcing.
+- **Classic follow-up:** multiple dice, or a rule that rolling a six grants
+  another turn.
+- **The trap:** separate `Snake` and `Ladder` classes with duplicated logic. If
+  an interviewer sees you unify them unprompted, that is a strong signal.
+
+### 5. Logging framework
+
+- **Entities:** `Logger`, `LogLevel`, `LogRecord`, `Appender`, `Formatter`
+- **The real test:** two independent axes vary — where the log goes (console,
+  file, network) and how it is formatted (plain, JSON). Do you recognise that
+  they are independent, or do you create `JsonFileLogger` and
+  `PlainConsoleLogger`?
+- **Expected pattern:** Chain of Responsibility for level filtering, Strategy
+  for the formatter, Observer for multiple appenders.
+- **Classic follow-up:** make it thread-safe and asynchronous without losing
+  messages.
+- **The trap:** class explosion from crossing the two axes. Composition gives
+  you three formatters plus three appenders; inheritance gives you nine classes.
+
+---
+
+## Intermediate — multiple interacting decisions
+
+These have more entities and at least one genuine concurrency or consistency
+question.
+
+### 6. Elevator system
+
+- **Entities:** `ElevatorSystem`, `Elevator`, `Request` (internal and external),
+  `SchedulingStrategy`, `Direction`, `DoorState`
+- **The real test:** can you separate *which* elevator answers a call
+  (scheduling) from *how* an elevator services its own queue (movement)? These
+  are two different algorithms and beginners fuse them.
+- **Expected pattern:** Strategy for scheduling, State for the elevator's own
+  lifecycle (idle, moving up, moving down, doors open).
+- **Classic follow-up:** four elevators and a hall call on floor 7 — which one
+  goes, and why? Then: what changes during a fire alarm?
+- **The trap:** modelling a request as just a floor number. An external request
+  has a floor *and* a direction; an internal one has only a destination. Merging
+  them makes the scheduler impossible to write correctly.
+
+### 7. ATM
+
+- **Entities:** `ATM`, `Card`, `Account`, `CashDispenser`, `Transaction`,
+  `CashCassette`
+- **The real test:** two things at once — the session lifecycle as a state
+  machine, and cash dispensing as a denomination problem where you must not
+  commit the debit unless the dispense succeeds.
+- **Expected pattern:** State for the session, Chain of Responsibility for
+  dispensing (the 2000 handler passes the remainder to the 500 handler, and so
+  on).
+- **Classic follow-up:** the cash jams after the account is debited.
+- **The trap:** debiting before dispensing with no compensation path. Say out
+  loud that these two steps are not atomic and that you would either reserve the
+  cash first or record a reversal.
+
+### 8. Library management system
+
+- **Entities:** `Library`, `Book`, `BookItem` (a physical copy), `Member`,
+  `Loan`, `Reservation`, `Catalog`
+- **The real test:** do you distinguish a *book* (a title, an ISBN) from a *book
+  item* (one physical copy with a barcode)? Everything else in the problem
+  depends on that split, and missing it makes reservations unmodellable.
+- **Expected pattern:** Observer for reservation notifications, Strategy for
+  fine calculation, Repository for the catalog.
+- **Classic follow-up:** two members reserve the last copy at the same instant.
+- **The trap:** one `Book` class with a `quantity` field. It cannot express
+  which copy is overdue, and it makes the reservation queue meaningless.
+
+### 9. Splitwise / expense sharing
+
+- **Entities:** `User`, `Group`, `Expense`, `SplitStrategy`, `BalanceSheet`,
+  `Settlement`
+- **The real test:** do you store *balances* or recompute them from the expense
+  log? The log is the source of truth and the balance is a derived view, and
+  candidates who store only balances cannot answer "why do I owe this?".
+- **Expected pattern:** Strategy for the split (equal, exact amounts,
+  percentage, shares), Observer for notifications.
+- **Classic follow-up:** simplify debts so that three people owing each other in
+  a cycle settle with the fewest transfers.
+- **The trap:** floating-point money. Splitting 100 rupees three ways with
+  `double` loses a paisa and the balances never reach zero. Use minor units as a
+  `long`, and decide explicitly who absorbs the remainder.
+
+### 10. Rate limiter
+
+- **Entities:** `RateLimiter` interface, one class per algorithm, `Bucket`,
+  `Clock`
+- **The real test:** can you make the algorithm pluggable behind a one-method
+  interface, and can you do refill without a background thread?
+- **Expected pattern:** Strategy. Token bucket, leaky bucket, fixed window,
+  sliding window log, sliding window counter.
+- **Classic follow-up:** two requests for the same key arrive on different
+  threads — and then, is your clock injectable so this is testable?
+- **The trap:** a background thread refilling every bucket. Compute the refill
+  lazily from the elapsed time on each call instead; it is simpler, it scales to
+  millions of keys, and it is testable with a fake clock. The distributed
+  version is in
+  [design a distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter).
+
+### 11. Notification service
+
+- **Entities:** `NotificationService`, `Notification`, `Channel`,
+  `UserPreferences`, `RetryPolicy`, `Template`
+- **The real test:** do channels stay independent of the dispatch logic, so
+  adding WhatsApp is one file?
+- **Expected pattern:** Strategy or Observer for channels, Decorator for retry
+  and rate limiting wrapped around a channel, Factory to build a channel from a
+  preference.
+- **Classic follow-up:** one channel is down — do you fail the whole
+  notification, and how do you retry without duplicating?
+- **The trap:** a `switch` on channel type inside `send`. Also: building retry
+  into every channel rather than decorating one retry implementation over all of
+  them.
+
+---
+
+## Advanced — concurrency, consistency, and larger entity sets
+
+These are where L5 loops go. Each has a genuine correctness question, not just a
+modelling one.
+
+### 12. BookMyShow / movie ticket booking
+
+- **Entities:** `Movie`, `Show`, `Screen`, `Seat`, `SeatLock`, `Booking`,
+  `Payment`, `PricingStrategy`
+- **The real test:** **seat locking.** Two users select seat A5 at the same
+  moment; one must get it, the other must get a clear failure, and a user who
+  abandons payment must not hold the seat forever.
+- **Expected pattern:** a `SeatLockProvider` with an expiry, Strategy for
+  pricing, State for the booking lifecycle (created, locked, paid, confirmed,
+  expired).
+- **Classic follow-up:** the user locks the seats and then never pays. Then:
+  what if the payment succeeds *after* the lock expired?
+- **The trap:** locking at the booking level rather than the seat level, or
+  locking with no timeout. A lock without an expiry is a permanently lost seat.
+  This problem is really a distributed-lock question wearing an LLD costume, and
+  saying so scores.
+
+### 13. Chess
+
+- **Entities:** `Game`, `Board`, `Square`, `Piece` hierarchy, `Move`,
+  `MoveValidator`, `GameState`
+- **The real test:** where do the movement rules live? Per-piece is the
+  answer — `Bishop` knows how a bishop moves — but check and checkmate are
+  board-level rules that no single piece can evaluate.
+- **Expected pattern:** Strategy or polymorphism per piece for movement, Command
+  for move and undo, State for the game status.
+- **Classic follow-up:** implement undo, then castling and en passant — both of
+  which depend on history, not just the current board.
+- **The trap:** a giant `isValidMove` switching on piece type; and modelling
+  the board as a flat array with no `Square` abstraction, which makes en passant
+  and castling nearly unwriteable.
+
+### 14. Food delivery (Swiggy/Zomato-style)
+
+- **Entities:** `Restaurant`, `MenuItem`, `Cart`, `Order`, `DeliveryPartner`,
+  `AssignmentStrategy`, `OrderState`, `PricingEngine`
+- **The real test:** the order lifecycle is long and every stage has legal and
+  illegal transitions — placed, accepted, preparing, picked up, delivered,
+  cancelled — and cancellation rules differ by stage.
+- **Expected pattern:** State for the order, Strategy for partner assignment and
+  for pricing/surge, Observer for status updates to the customer.
+- **Classic follow-up:** two orders are assigned the same delivery partner, or
+  a restaurant rejects after the customer has paid.
+- **The trap:** an `OrderStatus` enum with a `setStatus` method. Any status can
+  then be set from any other, so "delivered" to "placed" is representable.
+  Transitions need to be validated in one place.
+
+---
+
+## A note on how to actually practise these
+
+<Callout type="tip" title="The exercise that teaches the most">
+Implement one problem end to end. Then, without looking at your design, write
+down a new requirement — "add a second pricing rule", "add a third player",
+"make it work with two machines" — and implement it while counting the files you
+touch.
+
+**If the count is one or two, your abstractions were on the right axes. If it is
+five, they were on the wrong ones, and that is the most useful feedback
+available anywhere in LLD preparation.** It is also exactly the question the
+interviewer will ask, so you are rehearsing the answer with real evidence
+behind it.
+</Callout>
+
+Two practical rules for your practice sessions:
+
+**Time-box.** Ninety minutes for an intermediate problem, no extensions. An
+unfinished design under a timer teaches you more about your bottleneck than a
+perfect one over three evenings, because the interview is the timed version.
+
+**Write a runnable `main` every time.** A design you cannot run is a design you
+have not tested against reality. Most of the gaps in a class diagram surface in
+the first ten lines of the driver.
+
+<Callout type="pitfall" title="Patterns that repeat across the whole list">
+Once you notice these, new problems stop feeling new:
+
+- **Anything with pricing, scheduling, matching or splitting is a Strategy.**
+  Parking fees, ride matching, elevator scheduling, expense splitting, rate
+  limiting.
+- **Anything with a lifecycle is a State machine.** Vending machine, ATM
+  session, order, elevator, booking.
+- **Anything with a shared limited resource is a locking problem.** Parking
+  spots, cinema seats, library copies, delivery partners. The question is always
+  where the lock goes and whether it expires.
+- **Anything with notifications is an Observer**, and the follow-up is always
+  about a slow or failing listener.
+- **Anything with money needs a `Money` type over integer minor units.** Every
+  time. `double` will be challenged and you will lose the exchange.
+</Callout>
+
+### Where this connects
+
+- [Part 5 — the parking lot worked end to end](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — the skeleton most of these problems reuse.
+- [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) —
+  the patterns named above, with the problem each one solves.
+- [Part 7 — the four-week plan](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build)
+  — which of these to attempt in which week.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — required for
+  problems 6, 7, 10 and 12.
+- [Design a distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+  — problem 10 at the other zoom level.

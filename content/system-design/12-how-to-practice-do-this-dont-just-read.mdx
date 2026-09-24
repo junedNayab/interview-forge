@@ -1,0 +1,187 @@
+---
+title: "12. How to practice (do this, don't just read)"
+topic: "system-design"
+order: 212
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 13
+tags: [practice, method, solo-mock, schedule, interview-technique]
+format: "mdx"
+summary: "The mechanics of a 45-minute solo mock — timer, paper, out loud, recorded — plus a weekly problem schedule, how to use the case studies as practice rather than reading, and how to simulate being interrupted."
+---
+
+## Why reading does not transfer
+
+System design is the one track here where reading is almost uncorrelated with
+performance. You can read every lesson, absorb all of it, and still do badly in the
+round — and that happens constantly, to people who genuinely know the material.
+
+The reason is that the round tests a real-time production skill. You have to hold a
+problem in your head, narrate a structure while drawing it, do arithmetic out loud
+without getting flustered, notice your own gaps, and absorb an interruption at minute
+22 without losing your place. None of that is exercised by reading; it is the
+difference between knowing the rules of chess and playing under a clock.
+
+The failure mode is specific. The candidate knows what a consistent-hashing ring is
+and still ends the interview having covered a third of the problem, because they spent
+eleven minutes on requirements without noticing, went quiet while thinking, and never
+did the estimate. **Every one of those is a habit, and habits only come from reps.**
+
+So this page is a method. The companion page,
+[how to self-grade your practice](/system-design/how-to-self-grade-your-practice), is
+the rubric you score each rep against: use this one to run the session and that one to
+mark it.
+
+## The solo mock: five rules
+
+You do not need a partner to get most of the value. You need to make the session
+resemble the real thing in the five ways that matter.
+
+**A timer, visible, at 45 minutes.** Clock management is graded, and the only way to
+build a feel for what five minutes of requirements gathering costs is to watch it
+elapse. Split it the way the [framework lesson](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+does: five minutes requirements, five estimation, five API, ten high-level, fifteen
+deep dive, five bottlenecks. When a segment's time is up, move on even if it is
+unfinished — abandoning an incomplete section gracefully is itself the skill, because
+in the real round you will have to.
+
+**Paper or a whiteboard, not an editor.** On paper you cannot rearrange boxes, so you
+have to plan the layout, which forces you to decide the shape of the system before you
+start. You also draw more slowly, which is realistic: in the interview you are talking
+while drawing and the drawing is the slow part. If the round will be remote, learn the
+company's whiteboard tool beforehand — fighting the tool costs real minutes.
+
+**Out loud, in full sentences, to an imaginary interviewer.** This is the rule people
+skip and the one that matters most. Thinking silently and then summarising is a
+completely different cognitive task from thinking aloud, and only the second is being
+assessed. Saying "reads dominate writes by about a hundred to one, so I am going to
+optimise the read path first" to an empty room feels theatrical. Do it anyway; the
+awkwardness disappears after three sessions and what replaces it is the ability to
+narrate under pressure.
+
+**Recorded.** Audio is enough, video of the whiteboard is better. You cannot grade
+yourself from memory, because memory edits — you will remember having said the
+trade-off you meant to say. The first time you listen back you will hear two things you
+did not know you did: a filler habit, and a long silence you experienced as a moment of
+thought.
+
+**Cold.** No case study, no notes, before the attempt. An attempt on a problem you have
+just read is a recitation exercise.
+
+## The session, end to end
+
+A single practice session runs about 75 minutes:
+
+1. **Pick the problem and read one sentence of it.** "Design a service that
+   shortens URLs." That is all the setup a real interview gives you.
+2. **45 minutes, timer running, recording on.** Follow the framework. Do not pause
+   the timer to look something up; if you do not know a number, estimate it out
+   loud and flag it as an assumption, which is what you would do in the room.
+3. **Stop when the timer stops.** Mid-sentence if necessary.
+4. **Ten minutes: grade yourself** against
+   [the rubric](/system-design/how-to-self-grade-your-practice), listening to the
+   recording rather than working from memory.
+5. **Twenty minutes: read the case study** and compare. Not to check whether you
+   got the same answer — you will not, and that is fine — but to find the
+   considerations you did not raise at all. A missing consideration is a gap; a
+   different choice usually is not.
+6. **Write down one thing to do differently.** One, specific, behavioural. "State
+   the storage estimate's conclusion, not just the number." Carry it into the next
+   session.
+
+Step 6 is what makes the series compound. Without it you will repeat the same three
+mistakes for eight weeks.
+
+## Using the case studies as practice, not reading
+
+The five case studies on this site are worked solutions, which makes them dangerous:
+reading one feels productive and teaches almost nothing, because watching a solved
+problem creates the illusion that you could have solved it.
+
+**Attempt first, always.** Read only the title, then run the full 45 minutes. The
+attempt creates the hooks the reading then attaches to. A consideration you struggled
+with and then saw handled well is learned; the same consideration read cold is
+forgotten by the weekend.
+
+**Then read, looking for omissions rather than differences.** Mark every topic the case
+study raises that you never mentioned — those are your gaps. Where you both raised a
+topic and chose differently, check whether you gave a reason; if you did, you were fine.
+
+**Re-attempt the ones that went badly a week later**, not the next day. After a week
+you will have forgotten the specifics and kept the structure, which is the thing you are
+trying to build.
+
+Start with
+[Case 1, the URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one),
+because it is your own project: you can defend every decision from experience rather
+than theory, and interviewers routinely open with "tell me about something you built".
+
+## A weekly schedule
+
+Sustained over five or six weeks, this is enough:
+
+| Week | Reading | Practice |
+|---|---|---|
+| 1 | Lessons 1 through 5 | Two attempts at Case 1, the second after grading the first |
+| 2 | Lessons 6 through 9 | Case 2, then re-attempt Case 1 cold |
+| 3 | Lessons 10, 13, 14, 15 | Case 3 — the fan-out trade-off, which is the most-asked shape |
+| 4 | Lesson 11, the reference architecture | Case 4, plus one problem not on this site |
+| 5 | Re-read lesson 1 and your own notes | Case 5, plus one unseen problem |
+| 6 | Nothing new | Two unseen problems, graded strictly |
+
+Two properties of that table are deliberate. **Reading decreases and practice
+increases**, because the marginal value flips early. And **week 6 introduces no new
+material**, because the last week before a loop should build confidence on a stable base
+rather than add fresh uncertainty.
+
+For unseen problems once the case studies are exhausted: a ride-hailing dispatch
+service, a ticket booking system with seat reservation, a distributed job scheduler, a
+metrics ingestion pipeline, a collaborative document editor, an ad click aggregator.
+
+## Practising the parts you cannot do alone
+
+**Being interrupted.** A real interviewer redirects you at unpredictable moments, and
+recovering is a distinct skill: answer the question properly, then return to where you
+were without losing the thread. To simulate it, write six interruption cards before you
+start, shuffle them, and set a random alarm twice during the 45 minutes. When it goes
+off, draw a card and deal with it immediately.
+
+Cards worth using, because they are what interviewers actually ask: "why not use
+Postgres for that?", "what happens if that cache goes down entirely?", "the read volume
+is ten times what you assumed — what breaks first?", "walk me through what happens on a
+write, in order", "how do you know this is working in production?", "that component is a
+single point of failure, what would you do?"
+
+**Scope pressure from a vague interviewer.** Real statements are deliberately
+underspecified. Practise by writing the problem yourself as one ambiguous sentence and
+then *committing to your own assumptions out loud* rather than resolving the ambiguity
+first. The skill is stating the assumption clearly enough that it can be corrected.
+
+**Being pushed deeper than you are comfortable with.** After an attempt, pick the
+component you were least confident about and spend ten extra minutes answering "how
+would I actually implement this?" until you hit something you cannot answer. That
+boundary is where the deep dive will land, and it is better found at your desk.
+
+If you can find a partner for even two sessions, spend them on the interruption problem
+specifically, since that is the one with the worst solo substitute.
+
+<Callout type="pitfall" title="The three ways practice goes wrong">
+**Practising without a timer.** You will take 70 minutes and feel good about a
+design you could not have produced in 45. The constraint is the exercise.
+
+**Practising silently.** This trains the wrong skill entirely and it is the most
+common shortcut, because talking to an empty room feels ridiculous.
+
+**Practising without grading.** Reps without feedback entrench whatever you already
+do, including the mistakes. Ten graded attempts beat thirty ungraded ones, and it
+is not close.
+</Callout>
+
+### Where this connects
+
+- [How to self-grade your practice](/system-design/how-to-self-grade-your-practice) — the scoring rubric for step 4 of every session.
+- [1. The framework — how to drive a 45-minute design interview](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview) — the phase structure and timings the mock follows. Re-read before every attempt.
+- [2. Back-of-the-envelope estimation](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize) — the arithmetic you have to do out loud, which is the part that most needs rehearsal.
+- [Case 1 — Design a URL Shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one) — the first problem to attempt, because it is your own system.
+- [Overview](/system-design/overview) — the full lesson order and how much time to allocate to reading versus practice.
+- [Coding-round survival tips](/dsa/coding-round-survival-tips) — the equivalent in-the-room technique for the coding round.

@@ -1,0 +1,233 @@
+---
+title: "Part 7 — Your 4-week LLD plan (you're a beginner, so build steadily)"
+topic: "lld"
+order: 408
+difficulty: "easy"
+estimatedMinutes: 17
+tags: [lld, study-plan, practice, preparation]
+format: "mdx"
+summary: "Week by week: what to build, how many hours it honestly takes, and the specific readiness check at the end of each week — built around the one exercise that teaches more than everything else."
+---
+
+## The premise
+
+You cannot read your way into passing an LLD round. This is the single most
+important thing to accept before you plan your time.
+
+> **Reading about the Strategy pattern teaches you its shape. Implementing a
+> parking lot, then being told "now add electric-vehicle charging spots",
+> teaches you why the shape exists** — because you either touch one new file or
+> you touch six existing ones, and the difference is physical rather than
+> theoretical.
+
+So the plan below is weighted roughly 70% typing, 30% reading. If you find
+yourself three days into a week with no code written, the week has already
+failed regardless of how much you understood.
+
+**The honest time budget:** eight to ten hours a week, which is about ninety
+minutes on weekdays plus one longer weekend session. Less than six hours a week
+and four weeks will not be enough — extend to six or eight weeks rather than
+compressing, because the bottleneck is repetitions, not information.
+
+### The exercise that does most of the work
+
+Every week ends with the same drill, and it is the highest-value thing in this
+entire track:
+
+1. Implement a problem end to end, with a runnable `main`.
+2. Close the file. Write down a new requirement on paper, without looking at
+   your design.
+3. Implement it. **Count the files you touched.**
+
+One or two files means your abstractions were on the right axes. Five means they
+were on the wrong ones, and now you know exactly which guess was wrong and why.
+No amount of reading produces that feedback, and it happens to be the precise
+question the interviewer will ask you — so you are rehearsing the answer with
+real evidence behind it.
+
+---
+
+## Week 1 — Foundations, and your first refactor
+
+**Read:** [Part 1 — the OOP pillars](/lld/part-1-the-foundation-oop-the-4-pillars-applied)
+and [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview).
+Read Part 2 twice; it is the load-bearing lesson and one pass will not stick.
+
+**Build, in this order:**
+
+- **A `BankAccount` with an enforced invariant.** Twenty minutes. Private
+  balance, validation in the constructor, a `withdraw` that rejects overdrafts,
+  and a test that proves you cannot reach a negative balance from outside.
+  Trivial, and it makes encapsulation concrete rather than verbal.
+- **Refactor a `switch` into polymorphism.** Write a deliberately bad
+  `ShippingCalculator` with an `if`-chain over three shipping methods, get it
+  working, then refactor it to an interface with three implementations. Do both
+  halves — the point is feeling the difference, and you only feel it if you
+  wrote the bad one first.
+- **Find a real SRP violation in your own code.** Open a project you have
+  actually shipped and find one class that changes for two different reasons.
+  Write down who owns each reason. This gives you an honest answer to "give me
+  an example from your own work", which is asked constantly and which nobody
+  prepares.
+
+**Readiness check:** can you explain all five SOLID principles with a
+before-and-after example each, out loud, in under six minutes, including one
+place where you would deliberately *not* apply one? If the last clause is hard,
+re-read the closing section of Part 2 — it is the part that signals judgement.
+
+---
+
+## Week 2 — Patterns, one tiny program each
+
+**Read:** [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary).
+
+**Build a minimal working demo of seven patterns.** Twenty to thirty minutes
+each, one file each, with a `main` that prints something. Do not build elaborate
+examples; the goal is muscle memory for the shape.
+
+| Pattern | The demo to write |
+|---|---|
+| Strategy | Three pricing rules behind one interface, swapped at runtime |
+| Factory | An enum-to-class mapping producing three `Vehicle` subtypes |
+| Builder | A `Pizza` with four optional toppings and validation in `build()` |
+| Singleton | The holder idiom and the enum form, plus a note on why you would rather inject |
+| Observer | A publisher with two listeners, one of which throws |
+| State | A three-state turnstile: locked, unlocked, and a coin that does nothing when already unlocked |
+| Decorator | Coffee with milk and sugar, and a second version wrapping `java.io` streams |
+
+The Observer demo has a deliberate cruelty in it: make one listener throw and
+watch the second one never run. That is the pitfall from Part 3, learned in
+thirty seconds instead of in production.
+
+**Readiness check:** for each of the seven, can you state in one sentence the
+*problem* it solves without using the pattern's name? "Behaviour depends on
+which lifecycle stage the object is in" is the answer for State. If you can only
+describe the structure and not the problem, you will be unable to justify the
+pattern when pushed, which is the failure mode Part 3 warns about.
+
+---
+
+## Week 3 — Your first two full problems
+
+This is the week the real learning happens. Two problems, each built twice.
+
+**Read:** [Part 4 — how to drive an LLD round](/lld/part-4-how-to-drive-an-lld-interview-the-method)
+and [Part 5 — the parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical).
+
+**Build:**
+
+1. **Parking lot, attempted before reading the solution.** Give yourself ninety
+   minutes and a timer. Then read Part 5 and diff it against what you wrote —
+   not to feel bad, but to find the specific decisions you did not know were
+   decisions. Most beginners discover they put pricing inside the lot, which is
+   exactly the lesson.
+2. **Parking lot, extended.** Add electric-vehicle charging spots and monthly
+   passes to *your* version. Count the files. This is the drill, and it is the
+   most valuable ninety minutes of the four weeks.
+3. **Vending machine, from scratch.** Ninety minutes. Model the states
+   explicitly — idle, has-money, dispensing, out-of-service — and implement the
+   refund path, because the refund path is where a boolean-based design falls
+   apart and a state machine pays for itself.
+
+**Readiness check:** with no notes, can you produce a runnable parking lot with
+pluggable pricing in under seventy-five minutes, including a `main` that
+demonstrates it? Time yourself honestly. If you are at a hundred minutes, the
+gap is typing speed and Java fluency rather than design knowledge, and the fix
+is more repetitions, not more reading.
+
+---
+
+## Week 4 — Concurrency, and a timed mock
+
+**Read:** [Part 8 — machine-coding survival tips](/lld/part-8-machine-coding-round-survival-tips)
+and, if concurrency is shaky,
+[Java concurrency](/java/3-concurrency-senior-must-have).
+
+**Build:**
+
+1. **The two-cars-one-spot test.** Take your week 3 parking lot and write a test
+   with a `CountDownLatch` that releases two threads at the same spot and
+   asserts exactly one succeeds. Then break it deliberately — remove the
+   `synchronized` — and run it a few hundred times in a loop until it fails.
+   **Watching a race condition actually happen is worth more than any
+   explanation of one**, and it gives you a real story to tell when asked.
+2. **Elevator system.** Ninety minutes. It forces you to separate scheduling
+   from movement, which is the intermediate-level skill.
+3. **A timed 90-minute mock, out loud, recorded.** Pick a problem you have not
+   seen — BookMyShow or the ATM — set a timer, narrate your reasoning aloud as
+   if someone were listening, and record it. Then watch it back.
+
+The playback is uncomfortable and it is where the round is actually won. Check
+three things: did you scope out anything explicitly in the first five minutes,
+did you state an axis of change before introducing an interface, and did you
+reserve time at the end for concurrency and testing? Almost everyone fails the
+third one on their first attempt.
+
+**Readiness check:** you are ready when you can take an unseen intermediate
+problem, drive it end to end in ninety minutes to something that compiles and
+runs, name the axes of change before you abstract, and answer "how would you add
+X?" with a specific file count.
+
+---
+
+## If you have eight weeks
+
+Do not compress; use the room. Spend two weeks on each of the four above, and
+use the extra time as follows:
+
+- **Weeks 1–2:** the same foundation work, plus rewriting one real class from a
+  project you shipped with the principles applied. Real code you know well makes
+  a much better interview story than a toy.
+- **Weeks 3–4:** patterns, plus the library management system and the logging
+  framework — both teach modelling distinctions (title versus copy, formatter
+  versus appender) that the starred problems do not.
+- **Weeks 5–6:** parking lot, vending machine, elevator, and the extension drill
+  on each.
+- **Weeks 7–8:** BookMyShow, Splitwise, and two timed mocks a week. Interleave
+  with [system design](/system-design) on alternate days so both rounds stay
+  warm.
+
+<Callout type="pitfall" title="How this plan usually fails">
+- **Reading Part 3 five times and writing no code.** Patterns feel learnable by
+  reading because the explanations are short. They are not. Seven tiny programs
+  beat seven re-reads.
+- **Attempting the parking lot only after reading the solution.** You get the
+  comfortable feeling of understanding and none of the feedback. Attempt first,
+  always.
+- **Never running a timer.** The interview is a timed exercise and time pressure
+  changes what you can do. A design you can produce in three hours is not
+  evidence about a ninety-minute round.
+- **Skipping the extension drill because the problem "already works".** The
+  drill is the whole point. A design is only good relative to the changes it
+  survives.
+- **Practising silently.** The bottleneck in a real round is talking while
+  thinking. If you have never done both at once, the first time will be in the
+  interview.
+- **Treating week 4's concurrency as optional.** It is the most common
+  differentiating follow-up in the entire round, and it is also the one
+  beginners most reliably skip.
+</Callout>
+
+<Callout type="tip" title="A realistic day-to-day shape">
+Weekdays, ninety minutes: twenty minutes reading, seventy typing. Weekend, one
+three-hour block: a full timed problem plus the extension drill.
+
+Keep one file called `lld-notes.md` with two lists — patterns you have
+implemented and the problem each solves, and mistakes you made and what you
+would do differently. Re-read it for fifteen minutes the morning of the
+interview. It is far more useful than re-reading any lesson, because it is
+written in your own words about your own gaps.
+</Callout>
+
+### Where this connects
+
+- [Part 6 — practice problems](/lld/part-6-practice-problems-beginner-advanced)
+  — the problems referenced each week, with the design decision each is testing.
+- [Part 5 — the parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — the reference solution to diff your week 3 attempt against.
+- [Part 8 — machine-coding survival tips](/lld/part-8-machine-coding-round-survival-tips)
+  — read before your week 4 mock, not after.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — required for the
+  week 4 race-condition exercise.
+- [The master roadmap](/roadmap) — where this four-week block sits relative to
+  your DSA and system design preparation.

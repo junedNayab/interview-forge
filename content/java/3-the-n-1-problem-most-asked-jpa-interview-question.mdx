@@ -1,0 +1,420 @@
+---
+title: "3. The N+1 Problem (Most Asked JPA Interview Question)"
+topic: "java"
+order: 603
+group: "Java + SQL"
+difficulty: "hard"
+estimatedMinutes: 24
+tags: [jpa, hibernate, n-plus-one, join-fetch, entity-graph, batch-size, dto-projection]
+format: "mdx"
+summary: "Why lazy loading turns one query into 101, what JOIN FETCH costs you in pagination and duplicate rows, when @BatchSize beats a fetch join, why MultipleBagFetchException happens, and how to detect the whole class of bug in a test."
+---
+
+## Layer 1 — The mental model
+
+Everyone can recite the definition of N+1. Very few can explain why a framework
+written by careful people produces it by default, and that gap is what the
+question is designed to find.
+
+> N+1 is not a Hibernate bug. It is **the bill for a promise the object model
+> made and the relational model cannot keep.** In Java,
+> `department.getEmployees()` is a field dereference costing nanoseconds. In SQL
+> it is a join or a second query costing a network round trip. Lazy loading
+> makes those two things look *identical in your source code*, and the
+> difference reappears in the query log as a hundred round trips.
+
+That framing tells you where the fix has to live. You cannot make lazy loading
+smarter — the framework genuinely does not know, at the moment it hands you a
+`Department`, whether you are about to touch its employees. **Every fix is a way
+of telling it what you will need, or of not asking for objects at all.**
+
+The shape, drawn once so the rest of the lesson has something to point at:
+
+```
+  findAll()                      the loop body
+      |                                |
+  SELECT * FROM departments       for each of 100 departments:
+      |                             SELECT * FROM employees WHERE dept_id = 1
+      v                             SELECT * FROM employees WHERE dept_id = 2
+  100 Department objects,           SELECT * FROM employees WHERE dept_id = 3
+  each with an uninitialised        ...
+  collection proxy                  SELECT * FROM employees WHERE dept_id = 100
+
+  total: 1 + 100 = 101 round trips, each one ~1 ms of network
+         = 100 ms of pure latency for data one join could return
+```
+
+---
+
+## Layer 2 — The mechanism
+
+### The problem, with the SQL it actually emits
+
+```java
+List<Department> depts = departmentRepository.findAll();
+for (Department d : depts) {
+    total += d.getEmployees().size();   // one SELECT per iteration
+}
+```
+
+The first line emits exactly what you expect:
+
+```sql
+select d.id, d.name from departments d;
+```
+
+Each `Department` comes back with `employees` set to an uninitialised
+`PersistentBag` — a Hibernate collection wrapper holding a reference to the
+session and the owner's identifier, and no data. The first method call on it
+triggers initialisation:
+
+```sql
+select e.id, e.name, e.salary, e.department_id
+from employees e where e.department_id = ?;
+```
+
+Once per department. The database executes each in microseconds; what kills you
+is the hundred round trips, which is why N+1 is invisible on a laptop against
+localhost and catastrophic in production across an availability zone.
+
+Two refinements that show you have debugged this rather than read about it.
+
+**The `@ManyToOne` case is sneakier than the collection case.** Everyone watches
+`@OneToMany`, but a list of a thousand `ClickEvent` rows where you read
+`click.getUrl().getShortCode()` is also N+1, with no collection in the code to
+make you suspicious.
+
+**The "1" is often not 1.** If each child has its own lazy association you also
+touch, the count multiplies rather than adds. A page rendering orders, their
+items and each item's product can issue thousands of queries from thirty lines
+of readable Java.
+
+### Fix 1: `JOIN FETCH`, and the two things it costs you
+
+```java
+@Query("SELECT DISTINCT d FROM Department d JOIN FETCH d.employees")
+List<Department> findAllWithEmployees();
+```
+
+One query, collections initialised. The right fix when you need the whole graph
+and the result set is bounded.
+
+The first cost is **duplicate rows**. A join between one department and its ten
+employees returns ten rows, so without `DISTINCT` you get the same `Department`
+object ten times — literally the same instance, thanks to the identity map,
+which makes the bug easy to miss until someone counts the list. `DISTINCT` in
+JPQL tells Hibernate to de-duplicate in memory; modern Hibernate does this
+automatically for fetch joins and no longer passes `DISTINCT` through to SQL,
+because a SQL `DISTINCT` on a wide row set is expensive and pointless here.
+
+The second cost is the one that gets asked:
+
+<Callout type="pitfall" title="JOIN FETCH silently breaks pagination">
+Combine a collection fetch join with `Pageable` and Hibernate logs this:
+
+```
+HHH000104: firstResult/maxResults specified with collection fetch;
+applying in memory!
+```
+
+It is a warning, not an error. Your page size is twenty *departments*, but the
+join produces one row per employee, so `LIMIT 20` at the database would cut the
+result in the middle of a department's employees and give you a wrong,
+partially-populated page. Hibernate refuses. Instead it **removes the `LIMIT`
+entirely, loads the whole table into the heap, and paginates in Java.**
+
+So the query meant to return twenty rows returns two million, the page works
+perfectly against forty seed rows in testing, and the service dies of an
+`OutOfMemoryError` the first time production data shows up.
+
+The fixes, in order of preference:
+
+- **Project to a DTO** so there is no collection to fetch and `LIMIT` works.
+- **Two queries**: page the parent IDs with a plain paginated query, then load
+  the collections for exactly those IDs with a `WHERE id IN (...)` fetch join.
+  This is the standard, reliable pattern.
+- **`@BatchSize`**, which paginates correctly because it never joins.
+
+A fetch join on a `@ManyToOne` is fine with pagination — the row count does not
+multiply. It is specifically collection fetching that breaks it.
+</Callout>
+
+### Fix 2: `@EntityGraph`
+
+```java
+@EntityGraph(attributePaths = {"employees"})
+List<Department> findByActiveTrue();
+```
+
+Mechanically this is the same as a fetch join, but declaring it as an annotation
+means it composes with derived query methods: you keep the generated query and
+only describe the fetch plan. You can also define a `@NamedEntityGraph` on the
+entity and reference it from several repository methods.
+
+One distinction worth knowing: a `FETCH` graph treats everything not listed as
+`LAZY`, while a `LOAD` graph leaves unlisted attributes at their mapped default.
+`@EntityGraph` defaults to `FETCH`. Entity graphs inherit the fetch join's
+pagination problem, because underneath they are the same join.
+
+### Fix 3: `@BatchSize`, the fix people forget
+
+```properties
+spring.jpa.properties.hibernate.default_batch_fetch_size=25
+```
+
+Or per association with `@BatchSize(size = 25)`. Hibernate now initialises lazy
+proxies in groups: when you touch the first department's employees, it looks for
+other uninitialised proxies of the same type in the persistence context and
+loads up to twenty-five of them together.
+
+```sql
+select e.* from employees e where e.department_id in (?,?,?, ... 25 of them);
+```
+
+A hundred departments become one query plus four, rather than one plus a
+hundred. **This does not eliminate the extra queries; it divides them.** Weaker
+than a join, but with three properties a fetch join does not have. It works with
+pagination, because there is no join and no row multiplication. It works for
+*any* number of collections at once, so it sidesteps
+`MultipleBagFetchException`. And it works without changing the query, so setting
+`default_batch_fetch_size` globally improves every unfixed N+1 in a codebase.
+
+**If you say one non-obvious thing in this interview, make it this: set
+`default_batch_fetch_size` globally as a floor, then fix the hot paths with
+projections.** That combination is what an experienced team actually does.
+
+### Fix 4: subselect fetching
+
+```java
+@OneToMany(mappedBy = "department")
+@Fetch(FetchMode.SUBSELECT)
+private Set<Employee> employees;
+```
+
+When the first collection is initialised, Hibernate re-runs the original query as
+a subselect to load every collection at once:
+
+```sql
+select e.* from employees e
+where e.department_id in (select d.id from departments d where ...);
+```
+
+Exactly two queries, always, regardless of how many parents there were. The
+catch is that it re-executes the original query inside the subselect, so if that
+query was expensive you pay for it twice, and it only applies to collections
+loaded by the same query. It is a Hibernate-specific feature, not JPA.
+
+### Fix 5: DTO projections — the best answer for read paths
+
+```java
+public record DepartmentSummary(String name, long employeeCount) {}
+
+@Query("""
+    SELECT new com.example.DepartmentSummary(d.name, COUNT(e))
+    FROM Department d LEFT JOIN d.employees e
+    GROUP BY d.id, d.name
+    """)
+List<DepartmentSummary> summaries();
+```
+
+This separates people who have fixed N+1 from people who have read about it,
+because **it removes the possibility of the bug rather than handling it.** There
+are no entities, so no proxies, so nothing can lazily load later no matter what
+a downstream mapper or JSON serialiser does.
+
+The secondary benefits show you understand the persistence context from
+[the previous lesson](/java/2-spring-data-jpa-hibernate): nothing enters the
+identity map, so no memory goes on load-time snapshots; nothing is dirty-checked
+at flush; and you fetch four columns instead of thirty, which can turn a
+sequential scan into an index-only scan.
+
+The cost is honest: a second type to maintain and a hand-written query. For a
+read-heavy endpoint that is a good trade. For a service method that loads an
+aggregate to modify it, entities are correct and a fetch join is the right tool.
+
+### `MultipleBagFetchException`
+
+```java
+// BROKEN: two collection fetch joins in one query.
+@Query("SELECT d FROM Department d JOIN FETCH d.employees JOIN FETCH d.projects")
+```
+
+```
+org.hibernate.loader.MultipleBagFetchException:
+cannot simultaneously fetch multiple bags
+```
+
+This is a genuine correctness problem, not a limitation. A "bag" is an unordered
+collection allowing duplicates, which is what a Java `List` without an
+`@OrderColumn` maps to. Fetching two bags at once produces a **Cartesian
+product**: ten employees and five projects give fifty rows, and Hibernate cannot
+tell whether the department has ten employees and five projects or fifty of
+each. It refuses rather than guessing.
+
+Two fixes, with different characters.
+
+Change the collection type to `Set`. A set has no duplicates by definition, so
+Hibernate can de-duplicate unambiguously and the exception disappears — but
+**the Cartesian product still crosses the wire**, and two collections of a few
+hundred elements each means tens of thousands of rows to produce a handful of
+objects. This fix removes the error and can leave the performance problem.
+
+Or issue two queries, each fetching one collection, in the same transaction. The
+second query's results merge into the already-managed entities through the
+identity map, so you get one fully populated graph and no Cartesian product.
+That is the better fix, and `@BatchSize` achieves it with less code.
+
+### `FetchType.EAGER` is worse than N+1, not a fix for it
+
+`@ManyToOne` and `@OneToOne` default to `EAGER`. This looks like it prevents the
+problem and in fact it institutionalises it.
+
+Eager on a `@ManyToOne` usually becomes a join on `find()`, which is fine. But
+for a query returning many rows — including any derived method or `findAll()` —
+Hibernate frequently issues a separate `SELECT` per parent to resolve the eager
+association: N+1 executing automatically, with no loop in your code to make it
+visible.
+
+The deeper objection is architectural. **`EAGER` is a mapping-time decision that
+applies to every query in the application forever, and there is no way to turn
+it off for one query.** A lazy association can be fetched eagerly when a query
+needs it; an eager one cannot be made lazy for the one report that does not.
+Mark everything `LAZY`, then opt in per query.
+
+### How to detect it
+
+You cannot fix what you cannot see, and this is where interviews go after the
+fixes.
+
+**`spring.jpa.show-sql=true`** with `hibernate.format_sql=true` is the
+zero-effort option and also the worst: unstructured, no parameter values,
+written to stdout rather than the logging framework. Prefer
+`logging.level.org.hibernate.SQL=DEBUG` with `org.hibernate.orm.jdbc.bind=TRACE`
+for the parameters.
+
+**datasource-proxy or p6spy** wraps the `DataSource` and logs statement counts
+per transaction, which is a real improvement: it reports "this request executed
+143 queries" rather than printing 143 statements.
+
+**Hibernate statistics** —
+`spring.jpa.properties.hibernate.generate_statistics=true` — exposes those
+counts programmatically, which is what makes the last technique possible.
+
+**Asserting query counts in tests is the only durable fix.** Everything above
+finds N+1 once; a test stops it coming back:
+
+```java
+@Test
+void listingDepartmentsIsOneQuery() {
+    statistics.clear();
+    service.listDepartments();
+    assertThat(statistics.getPrepareStatementCount()).isEqualTo(1);
+}
+```
+
+**A query-count assertion on your three hottest endpoints is one of the
+highest-value tests a service can have**, because N+1 is re-introduced by
+innocent refactors — someone adds a field to a response DTO and nothing else in
+the build notices.
+
+<Callout type="note" title="A verified example from your url-shortener">
+`src/main/java/com/urlshortener/entity/ClickEvent.java` maps its owner as
+`@ManyToOne(fetch = FetchType.LAZY) private Url url;`.
+
+`src/main/java/com/urlshortener/service/AnalyticsService.java` calls
+`clickEventRepository.findTop20ByUrlIdOrderByClickedAtDesc(url.getId())` and maps
+each row with `click.getClickedAt()`, `click.getIpAddress()` and
+`click.getReferrer()`. It never touches `click.getUrl()`, so the proxies are
+never initialised and there is no N+1 here.
+
+Worth saying precisely, because the failure mode is one line away: adding the
+short code to `ClickDetail` via `click.getUrl().getShortCode()` would turn one
+query into twenty-one, and nothing in the code would look wrong.
+`src/main/resources/application.yml` sets `spring.jpa.show-sql: true`, so you
+would see it locally — while `application-docker.yml` sets `show-sql: false`, so
+you would not see it in the container.
+</Callout>
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What is the N+1 problem?"** One query loads N parents, then touching a lazy
+   association on each emits one more query per parent. The cost is round trips,
+   not database work.
+2. **"Why does lazy loading cause it?"** The proxy has no way to know you are
+   about to iterate, so it resolves itself one owner at a time, at the moment of
+   access.
+3. **"Does it only affect `@OneToMany`?"** No — a lazy `@ManyToOne` accessed in a
+   loop is the same bug and harder to spot, because there is no collection in the
+   code.
+4. **"How do you fix it?"** Fetch join or entity graph when you need the graph,
+   `@BatchSize` as a global safety net, DTO projection for read paths. Name the
+   trade-off of whichever you pick.
+5. **"Why does `JOIN FETCH` break pagination?"** The join multiplies rows, so a
+   SQL `LIMIT` would cut a parent in half. Hibernate drops the limit, loads
+   everything into memory and paginates in Java, logging `HHH000104`.
+6. **"So how do you paginate with a collection?"** Page the parent IDs first,
+   then fetch the collections for those IDs in a second query. Or project to a
+   DTO.
+7. **"Why do I get duplicate parents from a fetch join?"** One row per child.
+   Use `DISTINCT` in JPQL; Hibernate de-duplicates in memory rather than adding a
+   SQL `DISTINCT`.
+8. **"What is `MultipleBagFetchException`?"** Two `List` collections fetched at
+   once produce a Cartesian product that Hibernate cannot unambiguously
+   reconstruct.
+9. **"And the fix?"** `Set` makes it legal but still transfers the Cartesian
+   product. Two queries, or `@BatchSize`, is the better answer.
+10. **"How does `@BatchSize` help?"** It initialises up to N proxies in one
+    `IN` query, turning N queries into N divided by the batch size — and unlike a
+    fetch join it works with pagination and with multiple collections.
+11. **"Isn't `EAGER` simpler?"** It is worse. It still fires per-parent queries
+    on multi-row results, and it is a global decision you cannot override for a
+    single query. Lazy plus per-query fetching is the only direction that gives
+    you control.
+12. **"What is subselect fetching?"** Hibernate re-runs the original query as a
+    subselect to load all collections in one extra statement. Always two queries,
+    but you pay for the original query twice.
+13. **"Why is a DTO projection the best read-path fix?"** It removes entities
+    entirely, so no proxy can exist to lazily load later, and it fetches only the
+    columns you need.
+14. **"How would you detect N+1 in an existing service?"** datasource-proxy or
+    Hibernate statistics for per-request query counts, and then a query-count
+    assertion in a test so it cannot regress.
+15. **"You inherited a codebase full of this — where do you start?"** Turn on
+    `default_batch_fetch_size` globally for immediate broad relief, measure to
+    find the worst endpoints, and rewrite those specific read paths as
+    projections.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Fetch join plus `Pageable`**, which quietly loads the whole table into the
+  heap.
+- **Fixing `MultipleBagFetchException` by switching to `Set`** and shipping the
+  Cartesian product instead of the exception.
+- **Testing against thirty seed rows**, where 101 queries against localhost is
+  four milliseconds and looks fine.
+- **Adding one field to a response DTO** and turning a one-query endpoint into a
+  five-hundred-query endpoint with no other code change.
+- **Lazy loading during JSON serialisation** under Open Session In View, where
+  the queries fire outside your service layer entirely.
+- **`FetchType.EAGER` added to "fix" an exception**, which moves the cost into
+  every other query in the application.
+- **`@OneToOne` in the non-owning direction**, which Hibernate cannot proxy and
+  therefore always loads eagerly.
+- **Believing `show-sql` is monitoring.**
+</Callout>
+
+### Where this connects
+
+- [Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate) — the
+  persistence context, proxies and lifecycle states this problem lives inside.
+- [Spring Data repositories](/java/4-spring-data-repository) — where
+  `@EntityGraph`, projections and `Page` versus `Slice` are declared.
+- [Transaction management](/java/5-transaction-management-transactional) — Open
+  Session In View, which hides N+1 in the serialisation phase.
+- [First-level and second-level cache](/java/6-hibernate-first-level-vs-second-level-cache)
+  — why the first-level cache does not save you here.
+- [Indexing and performance](/sql/3-indexing-performance) — the join and index
+  behaviour behind whichever query you end up with.

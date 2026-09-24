@@ -1,0 +1,413 @@
+---
+title: "2. Window Functions -- The Senior Differentiator"
+topic: "sql"
+order: 702
+group: "Advanced SQL"
+difficulty: "medium"
+estimatedMinutes: 25
+tags: [sql, window-functions, frame-clause, ranking, logical-query-order]
+format: "mdx"
+summary: "The OVER clause in full — partition, order and the frame nobody configures — why RANGE and ROWS disagree on ties, why LAST_VALUE looks broken, and why filtering on a window function in WHERE is impossible rather than merely disallowed."
+---
+
+## Layer 1 — The mental model
+
+Most SQL you write reduces rows. `WHERE` removes them, `GROUP BY` collapses
+them, `JOIN` recombines them. A window function does something structurally
+different, and once you see it the whole feature falls into place.
+
+> **`GROUP BY` collapses a set of rows into one row and throws the detail away.
+> A window function computes across the same set of rows and gives the answer
+> back to every one of them.** Same aggregation, same partitioning, opposite
+> effect on cardinality.
+
+That is why "show each employee alongside their department average" is awkward
+without windows. `GROUP BY dept_id` gives you the averages but has already
+destroyed the employee rows, so you must compute the aggregate separately and
+join it back. A window function does both in one pass.
+
+```
+         GROUP BY dept_id                 AVG(salary) OVER (PARTITION BY dept_id)
+
+ name    dept  salary                     name    dept  salary  dept_avg
+ Alice   10    90000        Alice, Bob    Alice   10    90000   82500
+ Bob     10    75000    ->  collapse ->   Bob     10    75000   82500
+ Carol   20    80000        into one      Carol   20    80000   75000
+ Dan     20    70000        row per       Dan     20    70000   75000
+                            dept
+ result: 2 rows                           result: 4 rows, every one annotated
+```
+
+The word "window" is literal. For each row the engine defines a set of other
+rows and evaluates the function over that set. Three clauses control membership:
+`PARTITION BY` says which rows are eligible, `ORDER BY` puts them in a sequence,
+and the **frame clause** says how much of that sequence to include relative to
+the current row. Almost everyone knows the first two and almost nobody
+configures the third, which is where the questions live.
+
+---
+
+## Layer 2 — The mechanism
+
+### Anatomy of the OVER clause
+
+```sql
+function_name(args) OVER (
+    PARTITION BY expr [, ...]          -- which rows are in scope at all
+    ORDER BY     expr [ASC|DESC] [, ...]  -- the sequence within a partition
+    { ROWS | RANGE | GROUPS } BETWEEN frame_start AND frame_end
+)
+```
+
+**`PARTITION BY`** splits the result set into independent groups; the function
+restarts at each boundary and never sees across it. Omit it and the result set
+is one partition.
+
+**`ORDER BY`** inside `OVER` is not the query's `ORDER BY`. It defines the order
+the function walks the partition in, which makes "running", "previous" and
+"rank" meaningful — and it changes the default frame.
+
+**The frame** narrows the partition to a sliding range around the current row,
+and this is where the defaults bite.
+
+### The frame clause, and the default that surprises everyone
+
+The rule is short and worth memorising verbatim:
+
+- **No `ORDER BY` in the `OVER` clause:** the frame defaults to the entire
+  partition — `RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`.
+- **`ORDER BY` present:** the frame defaults to
+  `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+
+That second default is why a running total works without a frame:
+
+```sql
+SELECT order_date, amount,
+       SUM(amount) OVER (ORDER BY order_date) AS running_total
+FROM orders;
+```
+
+`SUM` over "everything from the start of the partition up to the current row" is
+the definition of a running total. It works because of the default, not because
+`SUM` knows anything about running, and `PARTITION BY customer_id` gives a
+per-customer running total for the same reason. The reverse follows too: adding
+an `ORDER BY` to a window that had none silently converts a whole-partition
+aggregate into a cumulative one, with no error raised.
+
+Frame endpoints are written relative to the current row:
+
+```sql
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW      -- cumulative
+ROWS BETWEEN 2 PRECEDING AND CURRENT ROW              -- current + 2 prior: 3-row trailing
+ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING              -- centred 3-row window
+ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING      -- remainder of the partition
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING  -- whole partition
+```
+
+### ROWS versus RANGE, the genuine gotcha
+
+`ROWS` counts **physical rows**. `RANGE` counts **logical values of the ORDER BY
+expression**, which means every row with the same ordering value — every *peer*
+— enters or leaves the frame together.
+
+With distinct ordering values the two are identical, which is why this never
+shows up in a tutorial. With ties they diverge:
+
+```sql
+-- three orders, two of them on the same date
+-- 2024-01-01  100
+-- 2024-01-02  200
+-- 2024-01-02  300
+
+SELECT order_date, amount,
+       SUM(amount) OVER (ORDER BY order_date
+                         RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS by_range,
+       SUM(amount) OVER (ORDER BY order_date
+                         ROWS  BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS by_rows
+FROM orders;
+
+-- order_date   amount   by_range   by_rows
+-- 2024-01-01      100        100      100
+-- 2024-01-02      200        600      300   <- RANGE already includes the 300
+-- 2024-01-02      300        600      600
+```
+
+`RANGE` gives both rows on 2 January the same total, because as peers in a
+value-based frame the window ends at the last of them. `ROWS` counts positions,
+so each row gets its own total.
+
+Neither is wrong; they answer different questions. A daily cumulative revenue
+figure that must match for every transaction on the same day wants `RANGE`; a
+trailing three-transaction moving average wants `ROWS`. **The important part is
+knowing the default is `RANGE`, so if your ordering column has duplicates and
+you expected row-counting behaviour, you already have a bug.**
+
+Postgres adds a `GROUPS` mode that counts peer groups, and offset `RANGE` frames
+on numeric and interval types such as
+`RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW`, a true rolling
+seven-day window regardless of how many rows fall inside it. MySQL 8 has `ROWS`
+and `RANGE` but not `GROUPS`.
+
+### Ranking: ROW_NUMBER, RANK, DENSE_RANK
+
+All three number rows within a partition by the window's `ORDER BY`, differing
+only in how they treat ties.
+
+```sql
+SELECT name, salary,
+       ROW_NUMBER() OVER (ORDER BY salary DESC) AS rn,
+       RANK()       OVER (ORDER BY salary DESC) AS rnk,
+       DENSE_RANK() OVER (ORDER BY salary DESC) AS dense
+FROM employees;
+
+-- name    salary    rn   rnk   dense
+-- Alice    90000     1     1     1
+-- Bob      90000     2     1     1     <- tie
+-- Carol    75000     3     3     2     <- RANK skips 2, DENSE_RANK does not
+-- Dan      60000     4     4     3
+```
+
+`ROW_NUMBER` always produces consecutive distinct integers, breaking ties
+arbitrarily — and "arbitrarily" means non-deterministically across runs unless
+you add a tiebreaker to the `ORDER BY`. `RANK` gives peers the same number and
+then skips, so the next rank reflects how many rows preceded it. `DENSE_RANK`
+gives peers the same number without skipping, so it counts distinct values.
+
+Which you pick is a correctness decision, not a style one. "Second highest
+salary" means `DENSE_RANK() = 2` if two people tied for first should not consume
+the second slot, and `ROW_NUMBER() = 2` if you want the literal second row.
+Interviewers ask it to see whether you notice the ambiguity, and the strongest
+answer names it before choosing.
+
+`NTILE(n)` splits each partition into `n` buckets as evenly as it can, the quick
+route to quartiles — but it splits by row count, not by value, so identical
+values can land in different buckets. Use `CUME_DIST` when the boundary must
+respect ties.
+
+### LAG and LEAD
+
+`LAG(expr, offset, default)` reads a row earlier in the partition;
+`LEAD` reads later. Both default to an offset of 1 and a default value of NULL.
+
+```sql
+SELECT month, revenue,
+       LAG(revenue) OVER (ORDER BY month) AS prev_month,
+       revenue - LAG(revenue) OVER (ORDER BY month) AS delta,
+       ROUND(100.0 * (revenue - LAG(revenue) OVER (ORDER BY month))
+             / NULLIF(LAG(revenue) OVER (ORDER BY month), 0), 1) AS pct_change
+FROM monthly_revenue;
+```
+
+This is the period-over-period idiom; the alternative is a self join on
+`month = month - 1`, which is slower and wrong at gaps. `NULLIF(..., 0)` guards
+the division, and `LAG`'s third argument avoids a NULL first row.
+
+Two details come up. `LAG` and `LEAD` ignore the frame clause entirely — they
+address by offset within the partition. And those offsets are positional, not
+value-based, so `LAG(revenue)` over monthly data with a missing month gives the
+previous *row*, two months back. If gaps matter, generate a dense calendar and
+left-join to it first.
+
+### FIRST_VALUE, LAST_VALUE, and the frame trap
+
+```sql
+SELECT name, dept_id, salary,
+       FIRST_VALUE(name) OVER (PARTITION BY dept_id ORDER BY salary DESC) AS top_earner,
+       LAST_VALUE(name)  OVER (PARTITION BY dept_id ORDER BY salary DESC) AS bottom_earner
+FROM employees;
+```
+
+`top_earner` is correct. `bottom_earner` returns each row's own name, which
+looks like a database bug and is not.
+
+The default frame is the reason. With `ORDER BY` present the window ends at the
+current row, so its first value is genuinely the partition's first row — hence
+`FIRST_VALUE` works — and its last value is the current row, which `LAST_VALUE`
+faithfully reports.
+
+```sql
+-- FIXED: extend the frame to the end of the partition
+LAST_VALUE(name) OVER (
+    PARTITION BY dept_id ORDER BY salary DESC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+) AS bottom_earner
+```
+
+The cleaner alternative is to flip the sort and use `FIRST_VALUE`, which needs
+no frame at all and is harder to get wrong. `NTH_VALUE(expr, n)` has the same
+frame sensitivity.
+
+### Where window functions sit in the logical query order
+
+One fact answers several interview questions at once. SQL is evaluated in this
+logical order, however you write it:
+
+```
+FROM / JOIN  ->  WHERE  ->  GROUP BY  ->  HAVING
+     ->  WINDOW FUNCTIONS  ->  SELECT (aliases exist here)
+     ->  DISTINCT  ->  ORDER BY  ->  LIMIT / OFFSET
+```
+
+Three consequences fall straight out.
+
+**Window functions see the rows that survived `WHERE`, `GROUP BY` and `HAVING`,**
+so a `RANK` computed after `WHERE status = 'ACTIVE'` ranks only active rows.
+Usually what you want, and worth saying deliberately.
+
+**You cannot reference a window function in `WHERE` or `HAVING`.** Not
+disallowed for consistency — impossible, because when `WHERE` runs the window
+function has not been evaluated and there is nothing to reference. Push the
+window into a subquery or CTE, which completes the pipeline, and filter outside:
+
+```sql
+-- BROKEN: rn does not exist yet when WHERE runs
+SELECT name, dept_id, salary,
+       ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rn
+FROM employees
+WHERE rn <= 3;
+
+-- FIXED: the CTE finishes the pipeline, then the outer query filters
+WITH ranked AS (
+    SELECT name, dept_id, salary,
+           ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rn
+    FROM employees
+)
+SELECT name, dept_id, salary
+FROM ranked
+WHERE rn <= 3;
+```
+
+That second query is **top-N per group**, the most common practical use of
+window functions and a near-certain interview question. Postgres also offers
+`DISTINCT ON` and both databases can express it with a lateral join, but the
+window form is the portable one. Note too that you cannot nest a window function
+inside an aggregate in the same `SELECT`; one has to move into a subquery.
+
+### Aggregates as window functions
+
+Any aggregate becomes a window function by adding `OVER`, keeping its meaning
+and losing its collapsing behaviour.
+
+```sql
+SELECT name, dept_id, salary,
+       AVG(salary)  OVER (PARTITION BY dept_id) AS dept_avg,
+       salary - AVG(salary) OVER (PARTITION BY dept_id) AS diff_from_avg,
+       salary / SUM(salary) OVER () AS share_of_payroll,
+       COUNT(*) OVER (PARTITION BY dept_id) AS dept_headcount
+FROM employees;
+```
+
+Empty parentheses, `OVER ()`, means a grand total over the whole result set,
+turning percentage-of-total into a one-liner instead of a self join to an
+aggregate subquery. Postgres also composes `FILTER (WHERE ...)` with this for
+conditional counts per partition; MySQL has no `FILTER`, so use
+`SUM(CASE WHEN ... THEN 1 ELSE 0 END) OVER (...)`.
+
+### Performance
+
+Execution is a `WindowAgg` node whose input must arrive sorted by the
+`PARTITION BY` columns followed by the `ORDER BY` columns, so the planner
+inserts a `Sort` underneath unless something already provides that order. On a
+large table that sort is usually the dominant cost, and it spills to disk past
+`work_mem`.
+
+**An index on the partition columns followed by the order columns removes the
+sort entirely**, because an index scan already returns rows in that order. An
+index on `(dept_id, salary DESC)` serves
+`OVER (PARTITION BY dept_id ORDER BY salary DESC)` directly, and the plan shows
+`Index Scan` feeding `WindowAgg` directly.
+
+Several window functions sharing the *same* `OVER` specification are evaluated
+in one pass over one sort, so six statistics over the same window cost about
+what one does, while different specifications each need their own sort. A named
+`WINDOW` clause declares the specification once and makes that sharing obvious:
+
+```sql
+SELECT name, salary,
+       RANK()       OVER w AS rnk,
+       DENSE_RANK() OVER w AS dense,
+       LAG(salary)  OVER w AS prev_salary
+FROM employees
+WINDOW w AS (PARTITION BY dept_id ORDER BY salary DESC);
+```
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Window function versus `GROUP BY`?"** Both aggregate over a set of rows.
+   `GROUP BY` collapses the set into one row; a window function returns the
+   result to every row in the set.
+2. **"What does `PARTITION BY` do?"** Splits the result set into independent
+   groups; the function restarts at each boundary and never reads across.
+3. **"What is the default frame?"** Whole partition when there is no `ORDER BY`;
+   `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` when there is. That
+   default is why a running total works without a frame clause.
+4. **"`ROWS` versus `RANGE`?"** `ROWS` counts physical rows; `RANGE` counts
+   ordering values, so all peer rows enter the frame together. Identical when
+   the ordering column is unique, different the moment there are ties.
+5. **"`ROW_NUMBER`, `RANK`, `DENSE_RANK`?"** Consecutive and arbitrary on ties;
+   equal with gaps; equal without gaps. Picking between them is a correctness
+   decision about how ties should count.
+6. **"Second highest salary — which one?"** Name the ambiguity first.
+   `DENSE_RANK() = 2` if tied top earners share first place, `ROW_NUMBER() = 2`
+   if you literally want the second row.
+7. **"Why is `ROW_NUMBER` non-deterministic?"** Ties are broken arbitrarily. Add
+   a unique tiebreaker to the window's `ORDER BY` if the result must be stable.
+8. **"Why does `LAST_VALUE` return the current row?"** The default frame ends at
+   the current row, so the last value in it is that row. Extend the frame to
+   `UNBOUNDED FOLLOWING`, or reverse the sort and use `FIRST_VALUE`.
+9. **"Why can't I filter on a window function in `WHERE`?"** Window functions
+   are evaluated after `WHERE`, `GROUP BY` and `HAVING`, so the value does not
+   exist yet. Wrap the query in a CTE or subquery and filter outside.
+10. **"Top three per department."** `ROW_NUMBER() OVER (PARTITION BY dept_id
+    ORDER BY salary DESC)` in a CTE, then filter on the row number outside.
+    Mention `DISTINCT ON` and a lateral join as alternatives.
+11. **"Period-over-period change."** `LAG` over the time ordering with `NULLIF`
+    on the divisor. `LAG` moves by row, not by calendar interval, so gaps shift
+    the comparison.
+12. **"Do `LAG` and `LEAD` respect the frame?"** No. They address by offset
+    within the partition and ignore the frame entirely.
+13. **"How is a window function executed?"** A `WindowAgg` node over input
+    sorted by the partition then the order columns, usually with a `Sort`
+    beneath it.
+14. **"How would you make a window query faster?"** Index on the partition and
+    order columns so the sort disappears, filter earlier to shrink the input,
+    and reuse one `OVER` specification so several functions share a pass.
+15. **"Running total with ties on the ordering column?"** Decide whether
+    same-key rows should share a value: `RANGE` gives them the same cumulative
+    figure, `ROWS` gives each its own.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Adding an `ORDER BY` to an existing `OVER` clause.** It changes the default
+  frame from whole-partition to cumulative, so a total quietly becomes a running
+  total.
+- **`LAST_VALUE` without an explicit frame.** The most reported non-bug in SQL.
+- **`ROW_NUMBER` with no tiebreaker** in anything that must be reproducible,
+  such as a deduplication job that keeps "row 1".
+- **Assuming `ROWS` when the default is `RANGE`**, on an ordering column with
+  duplicates.
+- **Inlining the window expression into `WHERE`** instead of wrapping the query,
+  which evaluates differently and is usually wrong.
+- **`NTILE` on tied values.** Equal values can land in different buckets because
+  the split is by row count.
+- **Windowing over a huge unfiltered table** when an earlier `WHERE` would
+  shrink the sort by an order of magnitude.
+- **MySQL before 8.0 has no window functions at all.**
+</Callout>
+
+### Where this connects
+
+- [1. JOINs](/sql/1-joins-know-them-cold) — the self joins and correlated
+  subqueries that window functions replace.
+- [3. Indexing and performance](/sql/3-indexing-performance) — why an index on
+  `(partition, order)` removes the sort under a `WindowAgg`.
+- [5. Query optimization checklist](/sql/5-query-optimization-checklist) —
+  spotting the sort, and the spill to disk past `work_mem`.
+- [6. Common interview SQL problems](/sql/6-common-interview-sql-problems-quick-reference)
+  — top-N per group, gaps and islands, medians and running totals, worked end to
+  end.
+- [System design: databases](/system-design/6-databases) — analytical queries
+  like these are the read side that usually belongs on a replica.

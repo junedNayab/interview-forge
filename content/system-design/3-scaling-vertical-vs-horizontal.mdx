@@ -1,0 +1,255 @@
+---
+title: "3. Scaling: vertical vs horizontal"
+topic: "system-design"
+order: 203
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 20
+tags: [scaling, statelessness, autoscaling, amdahl, capacity]
+format: "mdx"
+summary: "Why the real question is never 'up or out' but 'what is the one thing that can't be duplicated' — statelessness as the enabling property, Amdahl's law as the ceiling, and why scaling out usually makes latency worse."
+---
+
+## Layer 1 — The mental model
+
+The textbook answer is a two-column table: bigger machine versus more machines.
+It's correct and it's worth about thirty seconds. The framing that carries a
+whole interview:
+
+> **Scaling isn't about adding capacity. It's about finding the thing that
+> can't be duplicated and dealing with it.**
+
+Adding servers is trivial. What's hard is that somewhere in your system there's
+a resource that exists exactly once — a database leader, a session in local
+memory, a counter, a lock, a sequence generator — and **that thing is your real
+capacity limit**, no matter how many application servers you put in front of
+it.
+
+So the productive move when asked "how would you scale this?" is not to say
+"horizontally." It's to ask: *what in this design is singular?* Then either
+duplicate it, partition it, or move the state somewhere it can be shared.
+
+```
+Scaling out the easy part ─────────────────────────┐
+                                                    ▼
+  [ app ] [ app ] [ app ] [ app ] [ app ]  ──►  ┌─────────┐
+   ▲ these are free to duplicate                │ ONE DB  │ ← the actual limit
+                                                └─────────┘
+```
+
+That picture is why "add more servers" so often changes nothing. You scaled the
+part that was never the bottleneck.
+
+---
+
+## Layer 2 — The mechanism
+
+### Vertical scaling, and why it's underrated
+
+| | Vertical (scale up) | Horizontal (scale out) |
+|---|---|---|
+| How | A bigger machine | More machines |
+| Limit | A hardware ceiling | Effectively unlimited |
+| Failure | Single point of failure | Tolerant, *if* stateless |
+| Latency | **Unchanged** | Usually **worse** — a network hop appears |
+| Consistency | Trivial — one machine | Now a distributed systems problem |
+| Cost curve | Superlinear at the top end | Roughly linear |
+| Complexity | Almost none | Load balancing, coordination, ops |
+
+The instinct in interviews is to dismiss vertical scaling. Resist that, because
+the numbers have changed: **you can rent a machine with 128 cores and 4 TB of
+RAM.** That handles an enormous amount of traffic, and it does it without
+introducing a single distributed-systems problem.
+
+The strongest version of the answer is therefore: *"I'd scale vertically first,
+because it buys real headroom for almost no complexity, and it buys time to find
+out where the actual bottleneck is. I'd scale horizontally when I hit the
+ceiling, need fault tolerance, or need to be in more than one region."*
+
+That last clause matters. **Fault tolerance is often the real reason to scale
+out, not throughput.** One machine is one power supply and one kernel panic. Two
+machines survive one failure. Saying that shows you understand availability as a
+separate axis from capacity.
+
+### Statelessness is the enabling property
+
+Horizontal scaling works when any server can handle any request. That fails the
+moment a server holds something the next request needs.
+
+```
+STATEFUL (broken)                 STATELESS (works)
+ request 1 → server A             request 1 → server A ──┐
+   stores session in RAM          request 2 → server C ──┼─► Redis / JWT
+ request 2 → server C                                     │   (shared state)
+   "who are you?"                                         ┘
+```
+
+The state that hides in application servers, and where it should go:
+
+- **Sessions** → Redis, or a signed token the client carries (your project's
+  JWT approach). This is what makes the whole thing possible.
+- **Uploaded files** → object storage, never the local disk.
+- **In-process caches** → acceptable, but accept the inconsistency between
+  instances, or make them short-TTL.
+- **Scheduled jobs** → a leader-elected or distributed scheduler, otherwise
+  every instance runs the nightly job.
+- **WebSocket connections** → genuinely stateful, which is why
+  [the chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  needs a connection registry.
+
+"Push state out of the application tier" isn't really removing state. It's
+**concentrating** it somewhere designed to be shared and replicated. The
+database and Redis still have the hard problem; you've just stopped spreading it
+across fifty boxes.
+
+### Scaling out usually makes a single request slower
+
+Worth internalising because candidates rarely say it: horizontal scaling
+improves **throughput**, not **latency**. Often it makes latency worse.
+
+A monolith calling a local method pays nanoseconds. Split it into two services
+and the same call is a network round trip — half a millisecond in the same
+datacenter, plus serialisation, plus a new failure mode. Do that five times in a
+request path and you've added milliseconds and five things that can time out.
+
+**Throughput and latency are different problems with different fixes.** More
+machines buy throughput. Latency is bought with caching, fewer hops,
+parallelism, and doing less work. Conflating them is how teams end up with a
+microservice architecture that's slower than the monolith it replaced.
+
+<Callout type="note" title="Amdahl's and Universal Scalability: why the curve bends">
+**Amdahl's law** says the speedup from parallelism is capped by the fraction of
+work that is inherently serial. If 5% of a request must be serialised — a lock,
+a single-leader write, a sequence number — then **20× is your ceiling no matter
+how many machines you add.** That's the answer to "why doesn't doubling the
+servers double the throughput?"
+
+The **Universal Scalability Law** adds the part that's worse: beyond contention
+there's *coherency* cost — the work nodes do to agree with each other, which
+grows quadratically with node count. That term means the throughput curve
+doesn't just flatten, it **bends back down**. Past some point, adding a node
+makes the system slower.
+
+You've seen this if you've ever added application servers and watched the
+database get worse: more servers meant more connections, more lock contention,
+and less throughput. That is the coherency term, and naming it is a strong
+senior signal.
+</Callout>
+
+### The order to scale in
+
+This sequence is itself a good answer, because it shows you reach for reversible
+things first:
+
+1. **Measure.** Find the actual bottleneck. Scaling the wrong tier is the most
+   common waste.
+2. **Optimise what's there** — a missing index, an N+1 query, a bad algorithm.
+   Often a 10× win for a day's work and no new infrastructure.
+3. **Cache.** The cheapest way to remove load, and it attacks the database,
+   which is usually the real limit.
+4. **Scale vertically.** Simple, immediate, no new failure modes.
+5. **Scale the stateless tier horizontally.** Easy once state is externalised.
+6. **Add read replicas.** Most workloads are read-heavy, so this is the highest
+   leverage database move.
+7. **Shard.** Last, because it costs you joins and transactions — see
+   [databases](/system-design/6-databases).
+
+Saying "I'd shard" first is a red flag. Saying "I'd measure, then cache, then
+scale up, and shard only when I've exhausted the reversible options" is the
+answer of someone who has done this.
+
+### Autoscaling, and why it disappoints
+
+Autoscaling sounds like the end of capacity planning. In practice:
+
+- **It's too slow for a spike.** A new instance takes a minute or more to boot,
+  join the load balancer and warm its JIT and caches. A traffic spike arrives in
+  seconds. Autoscaling handles *trends*, not *events* — for known events you
+  pre-scale.
+- **Scaling on CPU is often wrong.** An I/O-bound service is at 20% CPU while
+  being completely saturated on connections or threads. Scale on the metric that
+  actually saturates: queue depth, request latency, or in-flight requests.
+- **It can amplify a failure.** If your database is the bottleneck, adding
+  application servers adds connections and makes it worse. Autoscaling into an
+  overloaded dependency is a way to turn a slowdown into an outage.
+- **Scale-in is riskier than scale-out** because it terminates instances holding
+  live requests. Connection draining matters here — see
+  [load balancing](/system-design/4-load-balancing).
+
+### Scaling the tiers that aren't the app
+
+Because "the app" is rarely the problem:
+
+| Tier | How it scales | The catch |
+|---|---|---|
+| Stateless app | Trivially, horizontally | Nothing — this is the easy tier |
+| Database reads | Read replicas | Replication lag, read-your-writes |
+| Database writes | Vertical, then sharding | One leader is the hard ceiling |
+| Cache | Add nodes, consistent hashing | A single hot key can't be split |
+| Static assets | CDN | Invalidation |
+| Background work | More consumers | Ordering, and the DB behind them |
+
+The pattern: **the stateless tier scales trivially and the stateful tier is the
+whole problem.** Which brings you back to the mental model — find the thing that
+exists once.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How would you scale this system?"** First identify what can't be
+   duplicated. Scaling the stateless tier is easy and usually isn't the
+   bottleneck.
+2. **"Vertical or horizontal?"** Vertical first for the headroom with no
+   complexity; horizontal when you hit the ceiling, need fault tolerance, or
+   need multiple regions.
+3. **"Isn't vertical scaling obsolete?"** No — 128 cores and terabytes of RAM
+   handle a great deal, with zero distributed-systems cost.
+4. **"What makes horizontal scaling possible?"** Statelessness. Any server must
+   be able to serve any request.
+5. **"Where does the state go?"** Sessions to Redis or a token, files to object
+   storage, scheduled jobs to a leader-elected scheduler.
+6. **"Does adding servers reduce latency?"** No — it adds throughput and usually
+   *increases* per-request latency by adding network hops.
+7. **"Why doesn't doubling servers double throughput?"** Amdahl's law: the
+   serial fraction caps you. And the coherency cost can make the curve bend
+   downward.
+8. **"You added app servers and it got slower. Why?"** More connections and more
+   contention on a shared bottleneck, usually the database.
+9. **"What do you autoscale on?"** Whatever actually saturates — queue depth or
+   latency, often not CPU.
+10. **"Will autoscaling handle a flash sale?"** No. Boot and warm-up time is
+    minutes; pre-scale for known events.
+11. **"What's the order you'd do things in?"** Measure, optimise, cache, scale
+    up, scale out the stateless tier, read replicas, then shard.
+12. **"When do you shard?"** Last. It costs joins, cross-shard transactions and
+    auto-increment IDs.
+13. **"Why scale out if one machine is enough?"** Availability. One machine is
+    one kernel panic away from an outage.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Scaling the tier that isn't the bottleneck**, which is usually the app tier.
+- **Local session state**, which quietly forces sticky sessions and undoes
+  horizontal scaling.
+- **Autoscaling on CPU** for an I/O-bound service that saturates elsewhere.
+- **Autoscaling into a struggling database**, amplifying the failure.
+- **Assuming more servers means lower latency.**
+- **A nightly job that runs on every instance** because nobody thought about
+  leader election.
+- **Sharding first**, before the cheap reversible options.
+</Callout>
+
+### Where this connects
+
+- [4. Load balancing](/system-design/4-load-balancing) — the mechanism that
+  makes a stateless tier usable.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — the highest-leverage step before scaling anything.
+- [6. Databases](/system-design/6-databases) — replicas and sharding, the
+  stateful tier where the real limit lives.
+- [Case 4: chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  — the case where servers genuinely can't be stateless.
+- [OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency) — why a
+  single machine stops scaling internally too.

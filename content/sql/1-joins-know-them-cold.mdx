@@ -1,0 +1,362 @@
+---
+title: "1. JOINs -- Know Them Cold"
+topic: "sql"
+order: 701
+group: "Advanced SQL"
+difficulty: "medium"
+estimatedMinutes: 25
+tags: [sql, joins, query-planner, hash-join, null-semantics, anti-join]
+format: "mdx"
+summary: "A join is a filtered Cartesian product that the planner computes as a nested loop, hash or merge join — plus why a WHERE on the right table turns a LEFT JOIN into an INNER JOIN, and why NOT IN returns zero rows when the subquery contains a NULL."
+---
+
+## Layer 1 — The mental model
+
+You can already write joins. What separates a mid-level answer from a senior one
+is holding two things in your head at once: **what a join means** and **how the
+database computes it**.
+
+The meaning comes from relational algebra. An inner join of `A` and `B` on
+predicate `p` is the Cartesian product of the two tables filtered by `p` — every
+row of `A` paired with every row of `B`, discarding the pairs where the
+predicate is false. That definition is exact, and it explains every join
+behaviour you will be asked about, including surprises like duplicate rows
+appearing out of nowhere.
+
+But no real database builds the product. Five rows joined to four million would
+mean twenty million intermediate rows for a result of five, so the engine
+substitutes a cheaper algorithm, chosen by cost.
+
+> **A join is a filtered Cartesian product by definition and never one in
+> practice.** The SQL you write describes a set; the plan that runs is one of
+> three algorithms picked from statistics. Naming which one your query got, and
+> why it suits the data, is the senior signal on this topic.
+
+```
+   employees (5 rows)        departments (4 rows)
+            \                       /
+     LOGICAL: form all 20 pairs, keep those where e.dept_id = d.id
+                        |
+     PHYSICAL: the planner picks exactly ONE of these
+                        |
+   +--------------------+---------------------+
+ Nested Loop        Hash Join            Merge Join
+ for each outer     build a hash table   both inputs already
+ row, look up       on the smaller side, sorted on the key;
+ matches in the     stream the larger    walk them in lockstep
+ inner side         side through it
+```
+
+Each wins in a specific situation and loses badly outside it, and which is which
+is the rest of this lesson.
+
+---
+
+## Layer 2 — The mechanism
+
+### The three physical join algorithms
+
+Assume we join `orders` (the outer, or driving, input) to `customers` (the
+inner input) on `orders.customer_id = customers.id`.
+
+**Nested loop.** For each row of the outer input, search the inner input for
+matches. Without an index that inner search is a full scan, so the cost is
+O(n × m) and catastrophic at scale. **With** an index on `customers.id` it
+becomes a three-or-four-page B-tree descent and the cost drops to roughly
+n × log m. The same plan node is therefore either the best or the worst thing in
+your query, depending entirely on that index.
+
+It is the right choice when the outer input is small and the inner side is
+indexed. It is also the *only* algorithm that handles non-equality predicates
+such as `ON a.ts BETWEEN b.start_ts AND b.end_ts`, because hashing and merging
+both require equality. And it emits rows immediately, which is what you want
+behind a `LIMIT`.
+
+**Hash join.** Read the smaller input in full and build an in-memory hash table
+on the join key — the *build* phase. Then stream the larger input through it,
+probing with each row's key — the *probe* phase. Each side is read once, so the
+cost is O(n + m) rather than O(n × m). This is the workhorse for large
+unindexed equi-joins.
+
+The catch is memory. In Postgres the budget is `work_mem` per node, and when the
+build side does not fit, the planner partitions both inputs by hash and spills
+them to temporary files, joining a batch at a time. That spill is a real
+performance cliff, visible in `EXPLAIN (ANALYZE, BUFFERS)` as a batch count
+above one plus temp block reads. Raising `work_mem` for the session fixes it,
+and so does selecting fewer columns, since narrower rows mean more of them fit.
+Hash join also needs an equality predicate and blocks on the build side.
+
+**Merge join.** If both inputs arrive sorted on the join key, walk them in
+lockstep like the merge step of a merge sort. The cost is O(n + m) with almost
+no memory, and the output is itself sorted, which a later `ORDER BY` or
+`GROUP BY` can reuse for free.
+
+Everything depends on where the sort comes from. If indexes on both sides
+already provide the order, it is free. If the engine must sort first, the cost
+becomes O(n log n + m log m) and hash join usually wins. So merge join is the
+algorithm of pre-sorted data.
+
+| Algorithm | Cost | Wins when | Loses when |
+|---|---|---|---|
+| Nested loop | O(n × m), or n × log m with an index | Outer side tiny and inner side indexed; non-equality joins; behind a `LIMIT` | Both sides large, or the inner side unindexed |
+| Hash join | O(n + m) plus build-side memory | Large unindexed equi-joins | Build side exceeds `work_mem` and spills; no equality predicate |
+| Merge join | O(n + m) if sorted | Both inputs already ordered by the join key | A sort is added purely for the join |
+
+### How the planner chooses, and when it is wrong
+
+The planner enumerates candidate plans and costs each from **table statistics**:
+row counts, distinct-value fractions, a most-common-value list, and a histogram
+of the distribution. Postgres refreshes these during `ANALYZE`, which autovacuum
+runs for you; MySQL maintains similar per-index statistics.
+
+Two consequences, both of which appear as follow-ups. **The choice is
+data-dependent, not query-dependent** — the same SQL gets different plans at ten
+rows and at ten million, correctly, which is why "it got slow overnight and
+nothing changed" is usually a plan flip. And **a wrong estimate produces a wrong
+plan**: expecting 50 rows and getting 500,000 means a nested loop performing half
+a million index lookups. The query is slow because the planner was lied to,
+which is why estimated-versus-actual rows in
+[5. Query optimization checklist](/sql/5-query-optimization-checklist) is the
+first thing to read in any plan.
+
+### The join types, precisely
+
+```
+      A              B                 Result contains
+   +-----+       +-----+
+   |  1  |       |  1  |   INNER       rows with a match on both sides
+   |  2  |       |  2  |   LEFT        all of A; B columns NULL where no match
+   |  3  |       |  4  |   RIGHT       all of B; A columns NULL where no match
+   +-----+       +-----+   FULL OUTER  all of both, NULLs on whichever side misses
+                           CROSS       every pair, no predicate at all
+```
+
+`LEFT JOIN` keeps every left row and **NULL-extends** the right-hand columns
+when nothing matched. That phrase is worth using, because NULL-extension is
+exactly what the next section breaks. `RIGHT JOIN` is its mirror and is rare
+because readers expect the preserved table to be the one they read first.
+`FULL OUTER JOIN` preserves both sides and does not exist in MySQL, where you
+emulate it with a `UNION` of a `LEFT` and a `RIGHT` join. `CROSS JOIN` is
+genuinely useful for generating a dense calendar or grid to left-join sparse
+data onto.
+
+One clarification that earns credit: for inner joins, a predicate in `ON` and
+the same predicate in `WHERE` are logically identical and the planner treats
+them identically. For outer joins they are emphatically not.
+
+### The LEFT JOIN trap
+
+This is the most common silent bug in everyday SQL, and it falls out of the
+evaluation order: the join runs first and produces NULL-extended rows, and only
+then does `WHERE` filter them.
+
+```sql
+-- BROKEN: intended "all departments, with their 2024 orders"
+SELECT d.name, COUNT(o.id) AS order_count
+FROM departments d
+LEFT JOIN orders o ON o.dept_id = d.id
+WHERE o.created_at >= '2024-01-01'
+GROUP BY d.name;
+```
+
+For a department with no 2024 orders the join emits one row with every `o.*`
+column NULL. Then `NULL >= '2024-01-01'` is not true, so the row is discarded.
+**The departments you wrote a LEFT JOIN specifically to keep are the exact rows
+the WHERE clause removes**, and the query quietly degrades into an inner join.
+
+```sql
+-- FIXED: the date test belongs to the join, not to the result
+SELECT d.name, COUNT(o.id) AS order_count
+FROM departments d
+LEFT JOIN orders o
+       ON o.dept_id = d.id
+      AND o.created_at >= '2024-01-01'
+GROUP BY d.name;
+```
+
+Conditions in `ON` decide which rows pair up; conditions in `WHERE` decide which
+result rows survive. The rule is mechanical: **in an outer join, a predicate on
+the nullable side belongs in `ON`.** The one deliberate exception is
+`WHERE right_table.id IS NULL`, which is the anti-join idiom below and filters
+*for* the NULL-extended rows on purpose.
+
+### Self joins
+
+A self join is a join where both inputs are the same table under different
+aliases, which the engine treats as two independent scans.
+
+```sql
+SELECT e.name AS employee, m.name AS manager
+FROM employees e
+LEFT JOIN employees m ON e.manager_id = m.id;
+```
+
+`LEFT JOIN` matters here: the CEO has a NULL `manager_id` and an inner join
+would drop them. For anything involving order — previous row, rank, running
+total — a [window function](/sql/2-window-functions-the-senior-differentiator)
+is faster and clearer, because the self join visits the table twice.
+
+### Anti-joins, and the NULL bug that eats teams
+
+An anti-join answers "rows in A with no match in B". Three ways to write it, and
+they do not behave the same.
+
+```sql
+-- 1. NOT IN         -- DANGEROUS if the subquery can produce NULL
+SELECT * FROM customers c
+WHERE c.id NOT IN (SELECT o.customer_id FROM orders o);
+
+-- 2. NOT EXISTS     -- correct under all conditions
+SELECT * FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+
+-- 3. LEFT JOIN ... IS NULL  -- also correct
+SELECT c.* FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE o.customer_id IS NULL;
+```
+
+**If `orders.customer_id` is nullable and one row holds a NULL, form 1 returns
+zero rows. Always. Silently.** This is the single most common SQL correctness
+bug, and three-valued logic explains it.
+
+SQL comparisons return TRUE, FALSE or UNKNOWN, and `WHERE` keeps only TRUE.
+Expand `x NOT IN (a, b, NULL)` and you get `x <> a AND x <> b AND x <> NULL`.
+The last conjunct is UNKNOWN, because NULL means "unknown value" and the
+database cannot claim `x` differs from something it does not know. `TRUE AND
+UNKNOWN` is UNKNOWN, so the whole predicate is either FALSE or UNKNOWN and never
+TRUE. Every row is filtered out. Note the asymmetry that makes it hard to catch:
+plain `IN` is unaffected, because one TRUE in an `OR` chain still yields TRUE.
+Only the negated form collapses.
+
+`NOT EXISTS` asks a different question — did the correlated subquery produce any
+row at all — and "no" is a definite answer. It is also the form the planner most
+reliably recognises as an anti-join and executes in one pass. The
+`LEFT JOIN ... IS NULL` form is equally correct and was historically faster on
+old MySQL; modern Postgres and MySQL 8 plan both identically. **Use `NOT EXISTS`
+by default and `NOT IN` only when the subquery column is declared `NOT NULL`.**
+
+### Join order, and why the planner reorders
+
+Inner joins are associative and commutative, so `A JOIN B JOIN C` can be
+executed in any grouping with the same result. The planner exploits that,
+because the orders differ enormously in cost — joining the pair that produces
+the smallest intermediate result first keeps every later step cheap. The search
+grows factorially, so Postgres switches to a genetic algorithm past
+`geqo_threshold` (twelve relations) and MySQL uses a greedy heuristic.
+
+Three practical consequences. **The order you write inner joins in does not
+matter**; advice to put the smallest table first described optimisers from
+decades ago. **Outer joins constrain reordering**, because `A LEFT JOIN B` must
+preserve A regardless of C, which is one reason chains of outer joins can be
+slower than the equivalent inner joins. And **very many joins degrade planning
+itself**, because past a dozen tables the search stops being exhaustive and
+planning time becomes measurable.
+
+<Callout type="pitfall" title="Fan-out: the join that makes your SUM wrong">
+An order has one shipping cost and many line items. Join them and the order row
+is duplicated once per line item — **fan-out**, the Cartesian-product definition
+showing through.
+
+```sql
+-- BROKEN: shipping_cost is counted once per line item
+SELECT o.id, SUM(o.shipping_cost) AS shipping, SUM(li.amount) AS items
+FROM orders o
+JOIN line_items li ON li.order_id = o.id
+GROUP BY o.id;
+```
+
+An order with four line items reports four times its shipping cost. The total
+looks plausible, nobody notices for a quarter, and then finance does. It gets
+worse with two one-to-many joins from the same parent: three line items and two
+payments produce six rows, and both sums are inflated.
+
+The fix is to aggregate each child independently before joining, so one row
+meets one row:
+
+```sql
+-- FIXED
+SELECT o.id, o.shipping_cost, li.items
+FROM orders o
+LEFT JOIN (
+    SELECT order_id, SUM(amount) AS items
+    FROM line_items GROUP BY order_id
+) li ON li.order_id = o.id;
+```
+
+The habit that prevents it: before aggregating over a join, say out loud what
+one result row represents. If the grain is "one line item", anything measured
+per order is now repeated.
+</Callout>
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What is a join, formally?"** The Cartesian product of two inputs filtered
+   by a predicate, though the engine never materialises the product.
+2. **"Name the physical join algorithms."** Nested loop, hash join, merge join,
+   with the cost and winning condition of each.
+3. **"When is a nested loop right?"** Small outer input with an indexed inner
+   side, non-equality predicates, or behind a `LIMIT` where first rows matter.
+4. **"Why a hash join for two big tables?"** It reads each side once, O(n + m),
+   against O(n × m) for an unindexed nested loop.
+5. **"What is the risk with a hash join?"** The build side must fit in
+   `work_mem`; past that it partitions and spills to disk, visible as multiple
+   batches and temp reads.
+6. **"When does merge join win?"** When indexes already deliver both inputs
+   sorted on the join key, so there is no sort to pay for and the output can
+   feed a later `ORDER BY`.
+7. **"Why did a fast query suddenly get slow?"** The plan flipped because data
+   crossed a cost threshold, or statistics went stale.
+8. **"`ON` versus `WHERE`?"** Identical for inner joins. For outer joins, `ON`
+   decides pairing and `WHERE` filters after NULL-extension, so a `WHERE` on the
+   nullable side turns the outer join into an inner one.
+9. **"Why did my `LEFT JOIN` lose rows?"** Almost certainly that; move the
+   predicate into `ON`.
+10. **"`NOT IN` versus `NOT EXISTS`?"** `NOT IN` returns zero rows if the
+    subquery yields a single NULL, because the comparison is UNKNOWN and `WHERE`
+    keeps only TRUE. `NOT EXISTS` is NULL-safe and plans as an anti-join.
+11. **"Explain three-valued logic."** Comparisons yield TRUE, FALSE or UNKNOWN;
+    anything compared to NULL is UNKNOWN; `TRUE AND UNKNOWN` is UNKNOWN; `WHERE`
+    keeps only TRUE.
+12. **"Does join order matter?"** Not for inner joins — the planner reorders by
+    cost. Outer joins restrict it, and past about twelve tables the search stops
+    being exhaustive.
+13. **"Why is my `SUM` too high after a join?"** Fan-out. The one-to-many join
+    duplicated the parent row. Pre-aggregate the child, then join.
+14. **"Rows in A with no match in B?"** `NOT EXISTS` or
+    `LEFT JOIN ... WHERE b.key IS NULL`; both plan as anti-joins.
+15. **"When would you use a `CROSS JOIN`?"** Generating a dense series, such as
+    every date crossed with every product, then left-joining sparse data so gaps
+    appear as zeroes rather than missing rows.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`NOT IN` against a nullable column.** Zero rows, no error, and it will not
+  reproduce on test data without NULLs.
+- **A filter on the right-hand table in a `LEFT JOIN`'s `WHERE`.**
+- **`COUNT(*)` after a `LEFT JOIN`** counts the NULL-extended row as one, so an
+  empty department reports a count of one. Use `COUNT(child.id)`, which ignores
+  NULLs.
+- **Aggregating across a one-to-many join** without checking the grain.
+- **Joining columns of different types**, which forces a cast and can defeat the
+  join column's index.
+- **Reaching for `DISTINCT` to clean up duplicates after a join.** The grain is
+  wrong; `DISTINCT` hides it and adds a sort.
+- **`RIGHT JOIN`.** Rewrite as a `LEFT JOIN` with the tables swapped.
+</Callout>
+
+### Where this connects
+
+- [2. Window functions](/sql/2-window-functions-the-senior-differentiator) — the
+  better tool for the problems people solve with self joins.
+- [3. Indexing and performance](/sql/3-indexing-performance) — the index that
+  makes a nested loop viable and a merge join free.
+- [5. Query optimization checklist](/sql/5-query-optimization-checklist) —
+  reading the plan that names your algorithm.
+- [Java: the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question)
+  — an application-level nested loop with network latency in the inner position.
+- [System design: databases](/system-design/6-databases) — why joins break once
+  tables live on different shards.

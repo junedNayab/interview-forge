@@ -1,0 +1,477 @@
+---
+title: "Pattern 11 — Graphs (BFS/DFS/Union-Find)"
+topic: "dsa"
+order: 113
+difficulty: "hard"
+estimatedMinutes: 28
+tags: [graphs, bfs, dfs, union-find, topological-sort, dijkstra, cycle-detection]
+format: "mdx"
+summary: "Why BFS gives shortest paths only on unweighted graphs, why directed and undirected cycle detection need different algorithms, topological sort both ways, union-find with path compression, and when a grid is really a graph."
+---
+
+## Layer 1 — When you reach for this
+
+> A graph problem is any problem about **things and the relationships between
+> them**. The hard part is almost never the traversal — BFS and DFS are twelve
+> lines each. The hard part is recognising that your problem is a graph, and
+> then choosing between the five tools: BFS, DFS, topological sort, union-find,
+> and Dijkstra.
+
+The explicit signals are easy. "Network", "nodes and edges", "friends of
+friends", "routes", "connected". The valuable skill is spotting the **implicit**
+graphs, which is where most interview questions live:
+
+- **A grid is a graph.** Each cell is a vertex with up to four edges, to its
+  orthogonal neighbours. Every islands, flood-fill, maze, and rotting-fruit
+  problem is a graph traversal in a two-dimensional costume. `V` is `m * n` and
+  `E` is about `4mn`, so `O(V + E)` is `O(mn)`.
+- **Dependencies are a directed graph.** "Course A requires course B", "task X
+  must run before Y". "Is this schedulable" means "is this graph acyclic", and
+  "in what order" means topological sort.
+- **State spaces are graphs.** Word Ladder joins words differing by one letter;
+  Open the Lock is a graph on four-digit combinations. Any "minimum number of
+  moves from configuration A to configuration B" is BFS over states, and seeing
+  that is the entire insight in those problems.
+- **Equations, equivalences, and merges.** "a/b = 2, b/c = 3, what is a/c" is a
+  weighted graph walk. "These accounts belong to the same person" is union-find.
+- **Two-colouring questions** are bipartiteness checks by BFS or DFS.
+
+Once you know it is a graph, the tool follows from the question:
+
+| The question | The tool | Why |
+|---|---|---|
+| Shortest path, unweighted | BFS | Level order is distance order |
+| Shortest path, weighted non-negative | Dijkstra | Greedy frontier with a heap |
+| Shortest path, negative edges allowed | Bellman-Ford | Relax all edges `V-1` times |
+| Just reachability or connectivity | DFS | Simplest, and recursion is free |
+| Any valid ordering of dependencies | Topological sort | Kahn's or DFS post-order |
+| Connectivity under incremental merges | Union-Find | Near `O(1)` per union or find |
+| Minimum spanning tree | Kruskal with Union-Find, or Prim with a heap | Both greedy |
+
+Anti-signals: if the "graph" is a tree — connected, `V - 1` edges, no cycles —
+you can drop the visited set in favour of tracking the parent, and many problems
+simplify to [Pattern 7](/dsa/pattern-7-trees-dfs-bfs). If the structure is a DAG
+with weights and you want the longest or shortest path, topological order plus
+one relaxation pass beats Dijkstra and is really
+[dynamic programming](/dsa/pattern-12-dynamic-programming) on a DAG. And if
+edges are being *removed* rather than added, union-find does not apply — it has
+no undo — and you need either offline processing in reverse or a link-cut
+structure, which is out of interview scope.
+
+---
+
+## Layer 2 — The mechanism
+
+### Representation, decided first
+
+**Adjacency list**: an array or map from vertex to its neighbours. Space
+`O(V + E)`, iterating a vertex's neighbours is `O(degree)`, and checking whether
+a specific edge exists is `O(degree)`.
+
+**Adjacency matrix**: a `V` by `V` boolean or weight array. Space `O(V^2)`, edge
+existence is `O(1)`, iterating a vertex's neighbours is `O(V)` regardless of how
+few it has.
+
+The list wins for almost every interview graph, because real graphs are sparse —
+`E` is closer to `V` than to `V^2` — and traversal cost is driven by neighbour
+iteration. The matrix wins when the graph is dense, when you query individual
+edges far more often than you traverse, or when `V` is small enough that
+Floyd-Warshall's `O(V^3)` is the right answer anyway. Saying "adjacency list,
+because `E` is `O(V)` here and I only iterate neighbours" is a good opener.
+
+```java
+List<List<Integer>> g = new ArrayList<>();
+for (int i = 0; i < n; i++) g.add(new ArrayList<>());
+for (int[] e : edges) {
+    g.get(e[0]).add(e[1]);
+    g.get(e[1]).add(e[0]);      // omit this line for a DIRECTED graph
+}
+```
+
+### BFS, and why it gives shortest paths
+
+BFS drains the queue in distance order, which is *why* it gives shortest paths on
+an unweighted graph — nothing at distance 2 is touched until every node at
+distance 1 is done. Watch the `d=` labels fill in ring by ring:
+
+<Visualizer algo="bfs" source="A" />
+
+The invariant, and it is worth stating in these words: **when a node is first
+enqueued, the distance recorded for it is final and minimal.** The proof is one
+sentence. The queue only ever contains nodes of distance `d` followed by nodes
+of distance `d + 1`, because we always append the neighbours of a node of
+distance `d`. So nodes are discovered in non-decreasing distance order, and the
+first time we reach a node we have reached it by the fewest possible edges.
+
+**This argument depends entirely on every edge costing the same.** Give the
+edges weights and "fewest edges" stops meaning "cheapest path"; a two-edge route
+of cost 1 each beats a one-edge route of cost 5, and BFS would commit to the
+wrong one. That is precisely the gap Dijkstra fills, by replacing the FIFO queue
+with a priority queue ordered by accumulated cost.
+
+```java
+int bfs(List<List<Integer>> g, int src, int target) {
+    int[] dist = new int[g.size()];
+    Arrays.fill(dist, -1);
+    Deque<Integer> q = new ArrayDeque<>();
+    q.add(src); dist[src] = 0;                    // mark on ENQUEUE
+    while (!q.isEmpty()) {
+        int u = q.poll();
+        if (u == target) return dist[u];
+        for (int v : g.get(u)) {
+            if (dist[v] == -1) {                  // not yet discovered
+                dist[v] = dist[u] + 1;
+                q.add(v);                         // mark happens above, not on poll
+            }
+        }
+    }
+    return -1;
+}
+```
+
+<Callout type="pitfall">
+Mark a node visited when you **enqueue** it, not when you dequeue it. Marking on
+dequeue lets the same node enter the queue several times through different
+neighbours, which silently turns an `O(V+E)` traversal into something far worse.
+</Callout>
+
+Cost: every vertex is enqueued once and every edge is examined once (twice in an
+undirected graph, once from each end), so **`O(V + E)` time and `O(V)` space**.
+That accounting — each vertex once, each edge once — is the sentence to say for
+essentially every traversal in this lesson.
+
+**Multi-source BFS** is the variant people forget, and it turns several
+hard-looking problems easy. Seed the queue with *all* starting nodes at distance
+0 before the loop begins. The level-order argument still holds, so every node
+gets its distance to the *nearest* source in one pass, still `O(V + E)`. Rotting
+Oranges is this — every rotten orange starts in the queue and the answer is the
+final level number — as are Walls and Gates and "distance to nearest 0". The
+alternative of one BFS per source is `O(k(V + E))`, and it is the slow answer
+that gets written first.
+
+### DFS, and what it is actually for
+
+DFS goes deep before wide, so it says nothing useful about distance. Its uses
+are connectivity, cycle detection, topological order, and anything defined
+recursively on subtrees of the DFS tree.
+
+```java
+void dfs(char[][] grid, int r, int c) {
+    if (r < 0 || c < 0 || r >= grid.length || c >= grid[0].length || grid[r][c] != '1')
+        return;
+    grid[r][c] = '0';                      // mark visited by overwriting
+    dfs(grid, r + 1, c); dfs(grid, r - 1, c);
+    dfs(grid, r, c + 1); dfs(grid, r, c - 1);
+}
+// Number of Islands: for every unvisited '1', run dfs and increment the count.
+// Each cell is visited once, so O(m*n).
+```
+
+The recursion depth is the length of the longest path, which on a
+`1000 x 1000` grid of a single island is a million frames and overflows the
+default JVM stack. **If the grid can be large, either say you would convert to
+an iterative stack or use BFS, which has the same complexity and bounded
+depth.** Mentioning this before the interviewer does is a strong signal.
+
+### Cycle detection: the directed and undirected cases are different
+
+This distinction separates people who have understood graphs from people who
+have memorised code, and it comes up constantly.
+
+**Undirected.** Every edge `u–v` appears in both adjacency lists, so a plain DFS
+will always walk back from `v` to `u` and see a visited node. That is not a
+cycle; it is the edge you arrived on. So you track the parent and ignore exactly
+that one neighbour. **A cycle exists when you reach an already-visited node that
+is not your parent.** With parallel edges allowed, track the edge index rather
+than the parent vertex, because two distinct edges between the same pair *are* a
+cycle.
+
+**Directed.** Parent tracking is meaningless here, because reaching a visited
+node is perfectly normal. Consider the graph with edges `1 -> 2`, `1 -> 3`,
+`2 -> 4`, `3 -> 4`: DFS reaches 4 twice and there is no cycle. What makes a
+cycle is reaching a node that is **still on the current recursion stack** — a
+back edge to an ancestor. Hence three colours:
+
+```java
+// 0 = unvisited (white), 1 = in the current DFS stack (grey), 2 = fully done (black)
+boolean hasCycle(int u, List<List<Integer>> g, int[] color) {
+    color[u] = 1;                                   // grey: on the stack
+    for (int v : g.get(u)) {
+        if (color[v] == 1) return true;             // back edge to an ancestor
+        if (color[v] == 0 && hasCycle(v, g, color)) return true;
+    }
+    color[u] = 2;                                   // black: finished, safe to revisit
+    return false;
+}
+```
+
+The grey state is the recursion stack made explicit. Black means "explored, and
+no cycle was found through here", so re-encountering a black node is a
+cross or forward edge, which is harmless. **Getting this right — grey means
+cycle, black means fine — is the discriminator.** A single `visited` boolean
+conflates grey and black and reports cycles that do not exist.
+
+### Topological sort, both ways
+
+A topological order of a DAG is a linear ordering where every edge points
+forwards. It exists if and only if the graph is acyclic.
+
+**Kahn's algorithm** is BFS on in-degrees. Compute the in-degree of every
+vertex, enqueue everything with in-degree 0, and repeatedly remove a vertex,
+append it to the output, and decrement its neighbours' in-degrees, enqueuing any
+that hit 0.
+
+```java
+int[] indeg = new int[n];
+for (int u = 0; u < n; u++) for (int v : g.get(u)) indeg[v]++;
+Deque<Integer> q = new ArrayDeque<>();
+for (int i = 0; i < n; i++) if (indeg[i] == 0) q.add(i);
+
+List<Integer> order = new ArrayList<>();
+while (!q.isEmpty()) {
+    int u = q.poll();
+    order.add(u);
+    for (int v : g.get(u)) if (--indeg[v] == 0) q.add(v);
+}
+// If order.size() != n, a cycle absorbed the remaining vertices.
+boolean acyclic = order.size() == n;
+```
+
+**Cycle detection falls out for free**, and that is the beautiful part. A vertex
+inside a cycle can never reach in-degree 0, because at least one of its
+predecessors is also inside the cycle and will never be removed. So if the
+output is shorter than `V`, the leftovers are exactly the vertices on or
+downstream of a cycle. Course Schedule is this check and nothing more; Course
+Schedule II returns the order itself.
+
+**DFS post-order reversed** is the other way. Run DFS, and push each vertex onto
+a stack *after* all its descendants are finished. Pop the stack for the order.
+The justification: a vertex finishes only after everything reachable from it has
+finished, so it has the latest finish time among its descendants, and reversing
+finish order puts it first. Use the three-colour check simultaneously to detect
+the cycle, since the reversed post-order of a cyclic graph is meaningless.
+
+Both are `O(V + E)`. Kahn's is easier to explain, gives the lexicographically
+smallest order if you swap the queue for a priority queue, and is iterative so it
+cannot overflow the stack. Prefer it unless you need DFS finishing times for
+something else, such as Kosaraju's strongly connected components.
+
+### Union-Find
+
+Union-Find (disjoint set union) answers one question: are these two elements in
+the same group, given that groups only ever merge. Each set is a tree, and the
+root is the set's identity.
+
+```java
+int[] parent, rank;
+
+int find(int x) {
+    if (parent[x] != x) parent[x] = find(parent[x]);   // path compression
+    return parent[x];
+}
+
+boolean union(int a, int b) {
+    int ra = find(a), rb = find(b);
+    if (ra == rb) return false;                        // already joined — this edge closes a cycle
+    if (rank[ra] < rank[rb]) { int t = ra; ra = rb; rb = t; }
+    parent[rb] = ra;                                   // attach shorter tree under taller
+    if (rank[ra] == rank[rb]) rank[ra]++;
+    return true;
+}
+```
+
+Two optimisations, and both are needed. **Union by rank** attaches the shorter
+tree under the taller one, which keeps the height at `O(log n)` because a tree's
+height only grows when two equal-height trees merge, and that requires doubling
+the element count. **Path compression** flattens the path on every `find`, so
+each node visited during a lookup is re-parented straight to the root and never
+walked again.
+
+Together the amortised cost per operation is `O(α(n))`, where `α` is the inverse
+Ackermann function. It is below 5 for any `n` that fits in the observable
+universe, so **treat it as constant, but say "amortised near-constant, formally
+inverse Ackermann"** rather than claiming `O(1)`.
+
+The right way to describe when to use it: **BFS and DFS answer connectivity on a
+graph you already have; union-find answers connectivity on a graph that is being
+built.** If edges arrive one at a time and you must answer questions in between,
+re-running DFS costs `O(V + E)` per query and union-find is effectively free.
+That is why it is the engine of Kruskal's MST — sort edges by weight and add each
+one whose endpoints are not already connected, with `union` returning false
+exactly when the edge would close a cycle.
+
+### Dijkstra, and its one prohibition
+
+Dijkstra is BFS with a priority queue: always expand the unfinalised vertex with
+the smallest known distance. The invariant is **when a vertex is popped from the
+heap, its distance is final.**
+
+```java
+PriorityQueue<int[]> pq = new PriorityQueue<>((a, b) -> a[1] - b[1]);  // (node, dist)
+int[] dist = new int[n];
+Arrays.fill(dist, Integer.MAX_VALUE);
+dist[src] = 0; pq.add(new int[]{src, 0});
+
+while (!pq.isEmpty()) {
+    int[] cur = pq.poll();
+    if (cur[1] > dist[cur[0]]) continue;        // stale entry — lazy deletion
+    for (int[] e : adj.get(cur[0])) {           // e = (neighbour, weight)
+        int nd = cur[1] + e[1];
+        if (nd < dist[e[0]]) { dist[e[0]] = nd; pq.add(new int[]{e[0], nd}); }
+    }
+}
+```
+
+Cost with a binary heap is `O((V + E) log V)`, because each edge can push one
+entry and each pop is `log` of the heap size.
+
+**Why negative edges break it:** the finality invariant rests on the assumption
+that extending a path can only make it more expensive. Pop a vertex at distance
+7, and no route through the remaining frontier can beat 7 because every
+remaining route starts at a cost of at least 7 and only adds. Introduce an edge
+of weight `-5` and that reasoning collapses — a longer route may become cheaper
+later, and Dijkstra has already finalised and moved on. For negative edges use
+**Bellman-Ford**: relax all `E` edges `V - 1` times, `O(VE)`, and a further
+relaxation that still improves something proves a negative cycle exists. Note
+also the special case worth mentioning: on a graph whose weights are only 0 and
+1, a deque — push-front for weight 0, push-back for weight 1 — gives you
+Dijkstra's answer in `O(V + E)`.
+
+### Edge cases and traps
+
+- **Disconnected graphs.** One BFS from one source does not reach everything.
+  Loop over all vertices and start from each unvisited one — which is also how
+  you count components.
+- **Self-loops and parallel edges.** A self-loop is a cycle in a directed graph;
+  in an undirected one the parent check mishandles it unless special-cased.
+- **1-indexed versus 0-indexed node labels.** Off-by-one in array sizing is the
+  most common wasted minute in these problems.
+- **Building an undirected graph and forgetting the reverse edge**, or building
+  a directed one and adding it.
+- **Grid bounds checked after the array access.** Java evaluates `||` left to
+  right, so the bounds test must come first in the guard.
+- **Stack overflow from deep recursive DFS** on large grids or path-shaped
+  graphs.
+- **Assuming the topological order is unique.** It generally is not; if the
+  problem wants the lexicographically smallest, Kahn's needs a priority queue.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why does BFS find the shortest path?"** The queue holds nodes in
+   non-decreasing distance order, so a node is first reached by the fewest
+   edges. That argument needs every edge to cost the same.
+2. **"What if the edges are weighted?"** Dijkstra, replacing the FIFO queue with
+   a min-heap keyed on accumulated distance. `O((V + E) log V)`.
+3. **"Why does Dijkstra fail with negative edges?"** Finality on pop assumes
+   extending a path cannot make it cheaper. Negative weights break that, so use
+   Bellman-Ford at `O(VE)`.
+4. **"Complexity of BFS and DFS?"** `O(V + E)` time — each vertex once, each
+   edge once — and `O(V)` space for the visited set plus the queue or stack.
+5. **"Detect a cycle in an undirected graph."** DFS tracking the parent; a
+   visited neighbour that is not the parent is a cycle. Or union-find, where a
+   `union` returning false means the edge closes a cycle.
+6. **"Detect a cycle in a directed graph."** Three colours. A grey neighbour is
+   a back edge to an ancestor, so it is a cycle; black is finished and harmless.
+   A plain visited flag would report false positives.
+7. **"Topological sort, and how do you know one exists?"** Kahn's with
+   in-degrees. If the output holds fewer than `V` vertices, a cycle trapped the
+   rest, so no order exists.
+8. **"BFS or DFS for topological sort?"** Either. Kahn's is iterative and gives
+   cycle detection for free; DFS post-order reversed needs the colour check
+   bolted on and can overflow the stack.
+9. **"When is union-find better than DFS?"** When edges arrive incrementally and
+   you must answer connectivity between arrivals. DFS would re-run at `O(V + E)`
+   per query; union-find is amortised near-constant.
+10. **"What do path compression and union by rank each contribute?"** Union by
+    rank bounds the tree height at `O(log n)`; path compression flattens the
+    path on each lookup. Together they give inverse Ackermann amortised.
+11. **"Can union-find handle deletions?"** No — merges are one-way. Process the
+    operations offline in reverse, or use a link-cut tree, which is outside
+    interview scope.
+12. **"The graph does not fit in memory. What now?"** Stream the edges rather
+    than materialising the adjacency list, partition the vertices across
+    machines and run a Pregel-style "think like a vertex" iteration, or use an
+    external-memory BFS that processes one frontier at a time from disk. For
+    connectivity specifically, union-find over a streamed edge list needs only
+    `O(V)` state.
+13. **"How do you reconstruct the path, not just its length?"** Keep a `parent`
+    array written when you first discover a node, then walk it backwards from
+    the target and reverse.
+14. **"Shortest path in a grid with obstacles where you may remove k walls?"**
+    BFS over an expanded state space of `(row, col, wallsUsed)`. Recognising
+    that the state is more than the position is the point of the question.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Marking visited on dequeue instead of enqueue**, which lets duplicates pile
+  into the queue.
+- **Using a plain visited flag for directed cycle detection** and reporting
+  cycles that are only re-convergence.
+- **Using the three-colour method on an undirected graph**, which reports the
+  edge you arrived on as a cycle.
+- **Only traversing from vertex 0** and missing the other components.
+- **Recursive DFS on a million-cell grid**, which overflows the stack.
+- **Forgetting the stale-entry skip in Dijkstra**, which is correct but does
+  redundant relaxation work.
+- **`a[1] - b[1]` comparators** in Dijkstra overflowing when distances are
+  initialised to `Integer.MAX_VALUE`.
+- **Running `find` without assigning the compressed parent back**, which quietly
+  removes path compression and degrades union-find to `O(log n)`.
+- **Treating a DAG's topological order as unique** when the problem expects a
+  specific tie-break.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Find if Path Exists in Graph** — the minimal traversal, and the place to
+  first write union-find.
+- **Flood Fill** — a grid as a graph, with nothing else going on.
+
+**Medium**
+
+- **Number of Islands** — the canonical implicit graph; do it with DFS, BFS and
+  union-find to feel the difference.
+- **Clone Graph** — traversal plus a map from original to copy, the general
+  "rebuild a structure while walking it" technique.
+- **Course Schedule** and **Course Schedule II** — directed cycle detection and
+  topological order, the pair that shows the cycle check falling out of Kahn's.
+- **Rotting Oranges** — multi-source BFS, and the reason to know it exists.
+- **Pacific Atlantic Water Flow** — reverse the reasoning and traverse inwards
+  from the borders.
+- **Number of Connected Components** — union-find in its purest form.
+- **Redundant Connection** — the first edge whose `union` returns false.
+- **Network Delay Time** — Dijkstra with a clean statement.
+- **Accounts Merge** — union-find over strings, so you need an index map too.
+- **01 Matrix** — multi-source BFS again, phrased so it looks like DP.
+
+**Hard**
+
+- **Word Ladder** — BFS over an implicit state graph, plus the wildcard-bucket
+  trick for building neighbours efficiently.
+- **Alien Dictionary** — deriving the edges is the hard part, then it is Kahn's.
+- **Cheapest Flights Within K Stops** — where plain Dijkstra is wrong and
+  Bellman-Ford with a stop bound, or BFS by level, is right.
+- **Swim in Rising Water** — Dijkstra with a maximum instead of a sum as the
+  path cost, which tests whether you understand the invariant or just the code.
+
+### Where this connects
+
+- [Pattern 7 — Trees](/dsa/pattern-7-trees-dfs-bfs) — a tree is a graph with no
+  cycles, so the traversals are the same code with the visited set removed.
+- [Pattern 9 — Heaps](/dsa/pattern-9-heaps-priority-queue) — the priority queue
+  that turns BFS into Dijkstra, and why lazy deletion replaces decrease-key.
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) — DP
+  on a DAG is topological order plus one relaxation pass, and memoised recursion
+  is a DFS over the subproblem graph.
+- [Pattern 10 — Backtracking](/dsa/pattern-10-backtracking) — the same DFS, but
+  with the visited mark undone on the way out.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — reading
+  `V` and `E` bounds to decide between `O(V + E)`, `O(E log V)` and `O(V^3)`.
+- [Distributed systems concepts](/cs-fundamentals/3-distributed-systems-concepts)
+  — consistent hashing, gossip and leader election are graph algorithms running
+  across machines.

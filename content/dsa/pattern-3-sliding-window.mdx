@@ -1,0 +1,407 @@
+---
+title: "Pattern 3 — Sliding Window"
+topic: "dsa"
+order: 105
+difficulty: "medium"
+estimatedMinutes: 28
+tags: [sliding-window, substring, subarray, frequency-map, monotonic-deque, amortized]
+format: "mdx"
+summary: "Fixed and variable windows, the expand-then-shrink template and the invariant it maintains, the amortised argument for why a nested while loop is still O(n), where to record the answer for longest versus shortest, and the monotonic deque for sliding window maximum."
+---
+
+## Layer 1 — When you reach for this
+
+Sliding window is the pattern with the highest hit rate in string questions, and
+it is also the one people most often write *almost* correctly. The template is
+six lines. The difficulty is knowing which six.
+
+> A window problem is any problem where the candidate answers are **contiguous
+> ranges**, and where growing or shrinking a range updates its summary in O(1)
+> instead of recomputing it. **The window is a running summary you edit at the
+> edges rather than rebuild from scratch.**
+
+The signals, as they appear in problem text:
+
+- **"Substring" or "subarray"** — the word that makes the range contiguous. If
+  the problem says "subsequence", it is not a window, because a subsequence can
+  skip elements.
+- **"Longest", "shortest", "maximum", "minimum"** applied to such a range.
+- **"Contains at most k distinct"**, "with at most k replacements", "with at
+  most k zeros flipped" — the "at most k" phrasing is close to a guarantee.
+- **"Containing all characters of"**, "is a permutation of", "anagram of" — a
+  window carrying a character-count map.
+- **"Of size k"** — the fixed-size variant, which is strictly easier.
+- **"Consecutive"** or "in a row" applied to elements of an array.
+
+Anti-signals, where the shape is similar but the pattern is wrong:
+
+- **The range does not have to be contiguous.** Longest Increasing Subsequence
+  looks like a window problem and is [dynamic
+  programming](/dsa/pattern-12-dynamic-programming).
+- **The array contains negative numbers and the condition is about a sum.** This
+  is the most important anti-signal. The window only works because extending the
+  window moves the quantity **monotonically** in a known direction; with
+  negatives, adding an element can make a sum smaller, so shrinking is no longer
+  justified. Minimum Size Subarray Sum requires positive values; Subarray Sum
+  Equals K allows negatives and therefore needs prefix sums plus a hash map. See
+  [arrays and hashing](/dsa/pattern-1-arrays-hashing).
+- **You need a pair from opposite ends**, not a range. That is
+  [two pointers](/dsa/pattern-2-two-pointers) converging.
+- **You need the k largest values of the whole array**, not of a range. That is
+  a [heap](/dsa/pattern-9-heaps-priority-queue).
+- **The window maximum is required at every position.** A plain window cannot
+  maintain a maximum under shrinking, because removing the maximum leaves you
+  with no idea what the new one is. That is the monotonic deque variant at the
+  end of Layer 2.
+
+Step through the animation before reading the template. The thing to watch is
+that `left` never moves backwards, which is the entire reason this is linear.
+
+<Visualizer algo="sliding-window" input="abcabcbb" />
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+For the variable-size window, the invariant is one sentence and it should be the
+first thing you say in the interview:
+
+> **After the inner `while` loop finishes, the window `[left, right]` is
+> valid.**
+
+Everything else follows mechanically. The outer loop's job is to add one new
+element on the right, which may break validity. The inner loop's job is to
+remove elements from the left until validity is restored. Between those two, the
+invariant holds, which is precisely the moment at which the window is a
+legitimate candidate for the answer.
+
+For the fixed-size window, the invariant is simpler: **the window always holds
+exactly k elements**, which you maintain by removing one element for every
+element you add, once the window has reached full size.
+
+### Why a nested loop is still O(n)
+
+The template contains a `while` inside a `for`, which looks quadratic. It is
+not, and the argument is amortised rather than per-iteration:
+
+`right` advances exactly once per outer iteration, so it moves n times total.
+`left` only ever increases, and it can never exceed `right`, so across the
+**entire run** it also moves at most n times. Every execution of the inner loop
+body advances `left` by one, so the total number of inner-loop executions over
+the whole algorithm is at most n. **Total work is bounded by 2n pointer moves,
+so the algorithm is O(n) even though a single outer iteration can do O(n)
+work.**
+
+The phrase to use is "amortised": one outer step may be expensive, but the
+expensive steps pay for themselves because they permanently consume budget that
+no later step can reuse. This is the same argument that makes `ArrayList`
+append O(1) amortised.
+
+Space is O(k) where k is the number of distinct values that can be in the
+window — O(1) for a fixed alphabet, since an `int[26]` or `int[128]` suffices.
+
+### The canonical template
+
+```java
+// Longest Substring Without Repeating Characters.
+int left = 0, best = 0;
+int[] count = new int[128];                       // ASCII; a Map works for any alphabet
+for (int right = 0; right < s.length(); right++) {
+    char in = s.charAt(right);
+    count[in]++;                                  // EXPAND: unconditional
+
+    while (count[in] > 1) {                       // while the window is INVALID
+        count[s.charAt(left)]--;                  // SHRINK from the left
+        left++;
+    }
+    // INVARIANT: [left, right] is now valid
+    best = Math.max(best, right - left + 1);      // record AFTER the shrink loop
+}
+return best;
+```
+
+Three structural facts about this template:
+
+- **The expansion is unconditional.** You never decide whether to admit the new
+  element; you admit it and then repair.
+- **The shrink condition is the negation of the validity predicate**, written as
+  a `while` and not an `if`. An `if` is correct only when a single removal can
+  always restore validity, which is true for the distinct-characters problem and
+  false in general. Always write `while`.
+- **Checking `count[in] > 1` rather than scanning the whole count array** is
+  what keeps the validity check O(1). Whenever you write a window, ask what the
+  O(1) way to test validity is; if the answer is "scan the map", you need an
+  extra counter, as in the next example.
+
+### The variants
+
+**Fixed size k.** No inner loop at all. Add the incoming element, and once
+`right >= k - 1`, record the answer and remove the element at `right - k + 1`.
+
+```java
+long sum = 0, best = Long.MIN_VALUE;
+for (int right = 0; right < nums.length; right++) {
+    sum += nums[right];
+    if (right >= k) sum -= nums[right - k];       // evict the element that fell out
+    if (right >= k - 1) best = Math.max(best, sum);
+}
+```
+
+**Longest valid window.** Shrink while invalid, then record after the loop, as
+in the canonical template. The answer is the largest window that satisfies the
+predicate.
+
+**Shortest valid window.** The structure inverts, and this is the difference
+that catches people out. Here the window becomes valid by *growing*, so you
+shrink **while it is still valid**, and you record the answer **inside** the
+shrink loop, just before the removal that would break it.
+
+```java
+// Minimum Size Subarray Sum: shortest subarray with sum >= target (positive values only).
+int left = 0, best = Integer.MAX_VALUE, sum = 0;
+for (int right = 0; right < nums.length; right++) {
+    sum += nums[right];
+    while (sum >= target) {                       // while the window is VALID
+        best = Math.min(best, right - left + 1);  // record INSIDE the loop
+        sum -= nums[left++];                      // then try to do better
+    }
+}
+return best == Integer.MAX_VALUE ? 0 : best;
+```
+
+The rule to memorise: **for "longest", the loop condition is "invalid" and you
+record after it; for "shortest", the loop condition is "valid" and you record
+inside it.** Getting this backwards produces code that returns the right answer
+on the sample input and the wrong one on half the tests.
+
+**Counting windows.** "How many subarrays satisfy P" is usually solved as
+`atMost(k) - atMost(k - 1)`, where `atMost` is a standard longest-style window
+that adds `right - left + 1` to a running total at each step, because that is
+the number of valid windows ending at `right`. Subarrays with K Different
+Integers is the canonical use.
+
+**Window with a frequency map and a satisfaction counter.** When validity means
+"the window contains at least the required multiset", scanning the map is O(52)
+per step, which is fine but clumsy. The clean version keeps an integer `formed`
+counting how many distinct required characters have reached their required
+count, and the window is valid when `formed` equals the number of distinct
+required characters. Minimum Window Substring is this.
+
+### Worked example: Longest Repeating Character Replacement
+
+Given a string and an integer k, you may replace up to k characters; find the
+longest substring of a single repeated character you can produce. The validity
+predicate is `windowLength - countOfMostFrequentCharInWindow <= k`, because the
+characters that are not the majority are exactly the ones you must pay to
+replace.
+
+The adaptation from the template is a single line: the shrink condition becomes
+that predicate.
+
+```java
+int[] count = new int[26];
+int left = 0, maxCount = 0, best = 0;
+for (int right = 0; right < s.length(); right++) {
+    maxCount = Math.max(maxCount, ++count[s.charAt(right) - 'A']);
+    while (right - left + 1 - maxCount > k) {     // too many characters to replace
+        count[s.charAt(left) - 'A']--;
+        left++;
+    }
+    best = Math.max(best, right - left + 1);
+}
+```
+
+The subtlety that gets asked about: `maxCount` is never decreased when the
+window shrinks, so it can be stale and too large. That is safe, and the reason
+is worth being able to say. A stale `maxCount` only makes the predicate easier
+to satisfy, so the window never shrinks when it should have stayed — and since
+`best` only grows, an answer can only be recorded when a genuinely larger
+`maxCount` was seen, which corresponds to a real window. Recomputing the true
+maximum each step is also correct and costs O(26) per step; say that you know
+both and that the stale version is an optimisation, not an accident.
+
+### Worked example: Minimum Window Substring
+
+Find the shortest substring of `s` containing every character of `t`, with
+multiplicity. This is the shortest-window variant plus the satisfaction counter.
+
+```java
+Map<Character, Integer> need = new HashMap<>();
+for (char c : t.toCharArray()) need.merge(c, 1, Integer::sum);
+Map<Character, Integer> window = new HashMap<>();
+int required = need.size(), formed = 0;
+int left = 0, bestLen = Integer.MAX_VALUE, bestStart = 0;
+
+for (int right = 0; right < s.length(); right++) {
+    char in = s.charAt(right);
+    window.merge(in, 1, Integer::sum);
+    if (need.containsKey(in) && window.get(in).intValue() == need.get(in).intValue()) {
+        formed++;                                  // this character is now satisfied
+    }
+    while (formed == required) {                   // while VALID: try to shrink
+        if (right - left + 1 < bestLen) { bestLen = right - left + 1; bestStart = left; }
+        char out = s.charAt(left++);
+        window.merge(out, -1, Integer::sum);
+        if (need.containsKey(out) && window.get(out) < need.get(out)) formed--;
+    }
+}
+return bestLen == Integer.MAX_VALUE ? "" : s.substring(bestStart, bestStart + bestLen);
+```
+
+Two details. `formed` increments on **equality**, not on "greater than or equal",
+so a fourth copy of a character needed three times does not inflate the count.
+And the boxed comparison uses `.intValue()`, because `Integer` values above 127
+compare false under `==` and this bug is invisible until a large count appears.
+
+### The hard variant: monotonic deque for a sliding window maximum
+
+A plain window cannot maintain a maximum, because when the maximum leaves the
+window you have no way to find the new one without a rescan. A `TreeMap` or a
+heap gives O(n log k). The O(n) answer is a **deque holding indices whose values
+are in decreasing order**.
+
+The invariant: **the deque holds exactly those indices in the current window
+that could still become the maximum of some future window**, in decreasing order
+of value. An index is discarded the moment a newer index with a value at least
+as large arrives, because the newer one is both bigger and will survive longer.
+The front of the deque is therefore always the maximum of the current window.
+
+```java
+Deque<Integer> dq = new ArrayDeque<>();           // holds INDICES, values decreasing
+int[] out = new int[nums.length - k + 1];
+for (int i = 0; i < nums.length; i++) {
+    if (!dq.isEmpty() && dq.peekFirst() <= i - k) dq.pollFirst();   // front fell out
+    while (!dq.isEmpty() && nums[dq.peekLast()] <= nums[i]) dq.pollLast();  // dominated
+    dq.offerLast(i);
+    if (i >= k - 1) out[i - k + 1] = nums[dq.peekFirst()];
+}
+```
+
+It is O(n) by the same amortised argument as before: each index is pushed once
+and popped at most once. Store **indices, not values**, or you cannot tell when
+the front has left the window.
+
+### Edge cases and traps
+
+- **Off-by-one in the window length.** It is `right - left + 1`. Writing
+  `right - left` is the most frequent silent error in this pattern.
+- **Recording the answer in the wrong place** for shortest-window problems.
+- **`if` instead of `while`** on the shrink, which fails whenever one removal
+  cannot restore validity.
+- **An empty pattern or an empty input string**, where the answer is the empty
+  string and the loop must not run.
+- **`k` larger than the array** in a fixed-size window, which must be handled
+  before the loop.
+- **Negative numbers in a sum-based window.** The pattern is invalid; say so
+  rather than producing subtly wrong code.
+- **Boxed `Integer` comparison with `==`** inside the count maps.
+- **Forgetting to decrement the frequency entry to zero and remove it**, which
+  breaks any validity check based on `map.size()`.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity, and why isn't the nested `while` quadratic?"**
+   O(n) time: `right` moves n times, `left` moves at most n times across the
+   whole run, so total movement is bounded by 2n. That is an amortised argument.
+2. **"What's the space?"** O(k) for the window's summary, where k is the number
+   of distinct values it can hold — O(1) for a fixed alphabet.
+3. **"Why can't this handle negative numbers?"** Shrinking is justified only if
+   removing an element moves the quantity monotonically. With negatives it can
+   move either way, so a shrink can discard the answer.
+4. **"How would you solve the negative-number version?"** Prefix sums plus a
+   hash map, which is O(n) time and O(n) space.
+5. **"What changes between longest and shortest?"** For longest you shrink while
+   invalid and record after; for shortest you shrink while valid and record
+   inside the loop.
+6. **"How do you count the number of valid subarrays rather than find the best
+   one?"** Add `right - left + 1` per step, which counts valid windows ending at
+   `right`; for "exactly k", compute `atMost(k) - atMost(k - 1)`.
+7. **"Can you do it in O(1) space?"** Yes when the alphabet is fixed — an
+   `int[26]` is O(1) by definition. Not in general.
+8. **"What if the input is a stream?"** A fixed-size window works directly,
+   since it only needs the last k elements. A variable window works only if you
+   never need to re-read what `left` has passed, which is usually true.
+9. **"What if the data doesn't fit in memory?"** A window of size k needs only k
+   elements resident, so stream the file through a ring buffer of size k.
+10. **"Sliding window maximum in O(n)."** A monotonic decreasing deque of
+    indices; each index is pushed and popped once.
+11. **"Why store indices in the deque rather than values?"** Because eviction is
+    driven by position: you must know when the front has fallen out of the
+    window.
+12. **"In Longest Repeating Character Replacement, why is a stale `maxCount`
+    safe?"** It only relaxes the shrink condition, and the recorded answer never
+    exceeds a length that was genuinely achievable, so no wrong answer can be
+    produced.
+13. **"Permutation in String — fixed or variable window?"** Fixed, of length
+    `t.length()`, comparing frequency arrays. That makes it strictly easier than
+    Minimum Window Substring.
+14. **"How do you check window validity in O(1)?"** Maintain a counter of
+    satisfied requirements alongside the map, and update it only on the exact
+    transition into or out of satisfaction.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`right - left` instead of `right - left + 1`.**
+- **Recording the answer after the shrink loop in a shortest-window problem**,
+  which reports a window that is one shrink too long.
+- **Using `if` where the shrink needs `while`.**
+- **Applying the pattern to an array containing negatives.**
+- **Comparing boxed `Integer` counts with `==`** rather than `intValue()` or
+  `equals`.
+- **Leaving zero-valued entries in the frequency map** when validity depends on
+  `map.size()`.
+- **Forgetting `k > nums.length`** in a fixed-size window.
+- **Shrinking on the wrong element** — always remove `s.charAt(left)` before you
+  increment `left`, or reason carefully about the post-increment.
+- **Storing values instead of indices** in the monotonic deque.
+</Callout>
+
+### Problems to drill
+
+**Easy** — get the skeleton reflexive.
+
+- **Best Time to Buy and Sell Stock** — a degenerate window where `left` is just
+  the running minimum.
+- **Maximum Average Subarray I** — the fixed-size template, unmodified.
+
+**Medium** — the real content of the pattern.
+
+- **Longest Substring Without Repeating Characters** — the canonical variable
+  window.
+- **Longest Repeating Character Replacement** — a non-obvious validity predicate
+  and the stale-maximum argument.
+- **Permutation in String** — fixed-size window with frequency comparison.
+- **Find All Anagrams in a String** — the same thing, collecting every match.
+- **Minimum Size Subarray Sum** — the shortest variant, where the record moves
+  inside the loop.
+- **Max Consecutive Ones III** — "at most k zeros" phrased as a window.
+
+**Hard**
+
+- **Minimum Window Substring** — shortest window plus the satisfaction counter.
+- **Sliding Window Maximum** — the monotonic deque.
+- **Subarrays with K Different Integers** — the `atMost(k) - atMost(k-1)`
+  counting trick.
+- **Longest Substring with At Most K Distinct Characters** — the general form
+  every "at most" problem reduces to.
+
+### Where this connects
+
+- [Two pointers](/dsa/pattern-2-two-pointers) — the same two indices with a
+  different invariant; read them together.
+- [Arrays and hashing](/dsa/pattern-1-arrays-hashing) — prefix sums plus a map,
+  which is what you use when negatives rule the window out.
+- [Stacks and monotonic stacks](/dsa/pattern-5-stack) — the monotonic deque is
+  the same idea with eviction at both ends.
+- [Heaps and priority queues](/dsa/pattern-9-heaps-priority-queue) — the
+  O(n log k) alternative for window maximum, and the right tool when the window
+  needs order statistics rather than an extreme.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  why `ArrayDeque` is the right deque and `Integer` caching bites the count map.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  amortised-analysis vocabulary.

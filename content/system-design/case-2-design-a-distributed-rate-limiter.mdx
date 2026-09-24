@@ -1,0 +1,415 @@
+---
+title: "Case 2 — Design a Distributed Rate Limiter"
+topic: "system-design"
+order: 302
+group: "Case Studies"
+difficulty: "hard"
+estimatedMinutes: 22
+tags: [case-study, rate-limiting, redis, lua, token-bucket, resilience]
+prerequisites: [9-rate-limiting-you-already-have-a-basic-version]
+format: "mdx"
+summary: "The five algorithms and what each actually costs, why INCR plus EXPIRE is a bug, how to cut the Redis round trip at scale — and a line-by-line critique of the limiter in your own project."
+---
+
+## Layer 1 — The mental model
+
+For every incoming request you must answer one question in well under a
+millisecond: **has this caller exceeded its allowance?** And the allowance is
+shared across a fleet of stateless servers, none of which individually knows the
+total.
+
+That last clause is the entire difficulty. A counter in a `ConcurrentHashMap`
+works perfectly on one machine and is **silently wrong** the moment you run two:
+with `N` instances and a limit of 100, each instance independently allows 100, so
+the effective limit is `N × 100`. Worse, it drifts as you autoscale, so the limit
+nobody configured changes shape under load.
+
+So the design has three parts, and each has a real tradeoff:
+
+1. **The algorithm** — how you decide, which determines whether bursts are
+   allowed and how much memory you need.
+2. **The shared state** — where the counter lives, which determines your latency
+   floor and your blast radius.
+3. **The failure policy** — what happens when that shared state is unreachable.
+   There is no safe default; you have to choose.
+
+<Callout type="pitfall" title="Rate limiting is not DDoS protection">
+Worth saying early, because interviewers probe it. An application-level limiter
+still *accepts the TCP connection, parses the request, and does a Redis
+round trip* before rejecting. Against a volumetric flood, you've built a
+slightly cheaper way to fall over.
+
+Layers, from outside in: volumetric attacks belong to the CDN, scrubbing centre
+or cloud WAF; per-IP floods belong at the edge or load balancer; **per-user and
+per-API-key fairness and quota belong in the application.** Your limiter is the
+innermost layer and protects against abuse and accidental overload by legitimate
+clients — not against an attacker with a botnet.
+</Callout>
+
+---
+
+## Layer 2 — The mechanism
+
+### R — Requirements
+
+**Functional:** limit each identity to `N` requests per window; return `429` with
+`Retry-After`; support different limits per endpoint and per plan tier.
+
+**Non-functional:**
+
+- Adds under ~2 ms at p99. This is on *every* request, so the limiter's latency
+  is a tax on the entire API.
+- Correct across a horizontally scaled, autoscaling fleet.
+- **Must not take the API down when the limiter's own dependency fails.** The
+  limiter is infrastructure on the critical path, so its failure mode is a
+  first-class design decision.
+- Memory bounded — millions of distinct keys, each expiring.
+
+**Estimate.** Guarding a 10,000-QPS API means 10,000+ checks/sec. That's
+comfortable for a single Redis node (which handles low hundreds of thousands of
+simple ops/sec). The number worth stating: **if the check adds 5 ms to a 50 ms
+request, you've added 10% latency to everything** — which is why the two-tier
+design later exists.
+
+### The five algorithms
+
+**1. Fixed window counter.** Bucket time into fixed intervals; count per
+interval.
+
+```
+INCR  rate:{user}:{minute}
+EXPIRE rate:{user}:{minute} 60     (first request only)
+```
+
+Dead simple, O(1) memory, one round trip. The flaw is at the boundary:
+
+```
+Limit: 100 per minute
+  11:59:30 → 100 requests   (fills the 11:59 window)
+  12:00:01 → 100 requests   (fills the 12:00 window)
+  ⇒ 200 requests in ~31 seconds, both windows "within limit"
+```
+
+**A fixed window permits up to 2× the limit** across any window of the same
+length that straddles a boundary. For coarse abuse prevention, fine. For
+protecting a capacity-constrained downstream, not fine — the burst is exactly
+what you were trying to prevent.
+
+**2. Sliding window log.** Store a timestamp per request; count those inside the
+trailing window.
+
+```
+ZREMRANGEBYSCORE  rate:{user}  0  (now - window)   -- drop expired
+ZCARD             rate:{user}                      -- count remaining
+ZADD              rate:{user}  now  <uniqueId>     -- record this one
+```
+
+Exactly accurate, no boundary artefact. The cost is **memory proportional to the
+limit, per key**: a 1,000/hour limit across 10 million users is 10 billion stored
+timestamps. Correct and usually unaffordable.
+
+**3. Sliding window counter.** The practical compromise — weight the previous
+window by how much of it still overlaps:
+
+```
+count = current_window_count
+      + previous_window_count × (1 − elapsed_fraction_of_current_window)
+
+e.g. 20 s into a 60 s window: weight the previous window by 0.67
+```
+
+O(1) memory, one or two round trips, and the boundary burst is largely gone. It's
+approximate — it assumes the previous window's requests were spread evenly — and
+that approximation is almost always acceptable. This is what Cloudflare uses, and
+it's a strong default.
+
+**4. Token bucket.** A bucket of capacity `C` refills at `R` tokens/sec; each
+request spends one.
+
+Two numbers stored per key (`tokens`, `lastRefill`), O(1) memory, and it
+expresses something the counters can't: **a sustained rate `R` with a burst
+allowance `C`.** That's what API consumers actually want — 10 requests/sec
+sustained but let me send 50 at once occasionally. Stripe, AWS and most
+commercial APIs work this way, and it's the right answer when asked to design a
+public API's limiter.
+
+**5. Leaky bucket.** Requests enter a queue draining at a constant rate; reject
+when the queue is full. Smooths output rather than rejecting bursts — it *delays*
+them. Good for traffic shaping into a fragile downstream, but it adds latency and
+needs a queue, so it's rarely the answer for an HTTP API.
+
+| Algorithm | Memory/key | Accuracy | Bursts | Use when |
+|---|---|---|---|---|
+| Fixed window | O(1) | 2× at boundary | Yes, at boundaries | Simplicity matters most |
+| Sliding log | O(limit) | Exact | No | Small limits, exactness required |
+| Sliding counter | O(1) | Approximate | Mostly prevented | **Good general default** |
+| Token bucket | O(1) | Exact for rate + burst | Yes, up to capacity | **Public APIs** |
+| Leaky bucket | O(queue) | Exact | Delayed, not rejected | Shaping a fragile downstream |
+
+<Callout type="interview" title="GCRA — the answer that ends the algorithms question">
+Worth one sentence if you want to signal depth: the **Generic Cell Rate
+Algorithm** is behaviourally equivalent to a token bucket but stores a *single*
+value — the theoretical arrival time of the next permitted request. One number,
+no refill arithmetic, no race between reading tokens and writing them. It's what
+`redis-cell` implements. Naming it tends to end that line of questioning
+favourably.
+</Callout>
+
+### A — Atomicity, and the bug almost everyone ships
+
+`INCR` followed by `EXPIRE` is **two round trips and not atomic**, which produces
+a genuinely nasty failure:
+
+```java
+Long count = redis.opsForValue().increment(key);   // key created, NO TTL
+if (count == 1) redis.expire(key, window);         // ← crash here?
+```
+
+If the process dies, the network blips, or Redis fails over between those two
+calls, the key exists **with no expiry**. It never resets. That identity is
+rate-limited *forever*, and the only cure is manually deleting the key. It's rare
+enough to survive testing and frequent enough to happen in production.
+
+Redis executes Lua scripts atomically (it's single-threaded), so the fix is to
+make the whole decision one script — which also collapses two round trips into
+one:
+
+```lua
+-- Token bucket, atomic. KEYS[1]=bucket  ARGV: capacity, rate/sec, now_ms, cost
+local capacity = tonumber(ARGV[1])
+local rate     = tonumber(ARGV[2])
+local now      = tonumber(ARGV[3])
+local cost     = tonumber(ARGV[4])
+
+local state  = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens = tonumber(state[1])
+local ts     = tonumber(state[2])
+
+if tokens == nil then            -- first request for this key
+  tokens = capacity
+  ts     = now
+end
+
+tokens = math.min(capacity, tokens + (now - ts) * rate / 1000)   -- refill
+
+local allowed = 0
+if tokens >= cost then
+  tokens  = tokens - cost
+  allowed = 1
+end
+
+redis.call('HSET',    KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('PEXPIRE', KEYS[1], math.ceil(capacity / rate * 2000))  -- idle cleanup
+
+return { allowed, math.floor(tokens) }
+```
+
+Three details in there worth being able to defend:
+
+- **`PEXPIRE` on every call** is what bounds memory. Without it, every identity
+  that ever hit your API stays resident forever. The TTL is set to roughly twice
+  the full-refill time, since a bucket that has been idle that long is
+  indistinguishable from a fresh one.
+- **`now` is passed in by the caller**, which introduces clock skew: two app
+  servers whose clocks differ by a second will compute different refills. The fix
+  is `redis.call('TIME')` inside the script, giving every instance one clock. (In
+  older Redis this made scripts non-deterministic and unsafe to replicate; with
+  effects-based replication, the modern default, it's fine.)
+- **The cost parameter** lets an expensive endpoint spend 10 tokens while a cheap
+  one spends 1. Weighted limits are what real API quotas look like, and it costs
+  nothing to support.
+
+### The shared store, and cutting the round trip
+
+**Centralised Redis** is the baseline: every request does one round trip. At
+10,000 QPS with a 0.5 ms same-AZ round trip, that's fine and you should say so
+rather than over-engineering.
+
+It breaks in three places, and knowing which breaks first is the interesting
+part:
+
+- **Throughput.** Beyond a few hundred thousand checks/sec, one node saturates.
+  Shard by key — every check touches exactly one key, so sharding is trivial and
+  needs no cross-slot operations.
+- **Latency.** A cross-region round trip is 50–150 ms. A globally distributed API
+  cannot consult a single Redis, full stop.
+- **Blast radius.** Every request now depends on Redis being up.
+
+**The two-tier fix**, which is what large systems actually run: give each
+instance a **local** bucket holding a slice of the global budget, and reconcile
+with the central store periodically (say every 100 ms) or when the local slice is
+nearly spent.
+
+```
+Request → local bucket (in-memory, ~0 ms)
+              │ periodically / on near-exhaustion
+              └──► central Redis: claim the next slice of budget
+```
+
+The tradeoff is explicit and you should state it: you give up exactness for
+latency and availability. A client can briefly exceed the limit, bounded by the
+slice size times the instance count. For abuse prevention that's irrelevant; for
+billing quota it is not, which is why billing quotas are usually enforced
+separately and asynchronously. Envoy's global rate limiting and most cloud API
+gateways work this way.
+
+### Where it runs
+
+- **API gateway** (Envoy, Kong, AWS API Gateway) — one place to configure, no
+  application code, and rejected traffic never reaches your services. The usual
+  right answer.
+- **Application middleware** — a Spring `HandlerInterceptor` or servlet filter.
+  Easiest to write and has access to authenticated identity, but every service
+  needs it and rejected requests have already consumed a thread.
+- **Sidecar / service mesh** — per-service limits without per-service code; good
+  for internal service-to-service protection.
+
+### Key design — the part that's usually wrong
+
+The limiter is only as good as the identity it counts against.
+
+- **Authenticated identity (user ID, API key) is the best key.** It's stable,
+  unspoofable, and maps to your plan tiers.
+- **IP has three problems.** Behind a load balancer,
+  `request.getRemoteAddr()` returns the *proxy's* address, collapsing every user
+  into one bucket — the limit then fires for everyone at once. You need
+  `X-Forwarded-For`, and you must only trust the portion your own proxies
+  appended, since clients can forge the rest. Then: **CGNAT and corporate NAT**
+  put thousands of legitimate users behind one address, and **IPv6** gives a
+  single user 2^64 addresses, so limit per `/64` prefix rather than per address.
+- **Compose several tiers**: a burst limit per second, a quota per day, and a
+  global limit protecting the service overall. They're cheap and catch different
+  abuse shapes.
+
+### The failure policy
+
+Redis is unreachable. You must pick, and either choice is defensible with a
+reason:
+
+- **Fail open** — allow the request. Preserves availability; a limiter outage
+  can't take down the API. Correct when the limiter prevents *abuse*.
+- **Fail closed** — reject. Preserves protection; correct when the limiter
+  guards something that genuinely cannot absorb the load, or enforces paid quota.
+
+The nuanced answer, which is the one to give: **fail open, but degrade to a
+conservative local limit** rather than to unlimited. You keep serving, and you
+still have a ceiling. Also emit a loud metric — silently failing open means an
+abuser gets free rein the moment they can disrupt Redis.
+
+### The response
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+RateLimit-Limit: 100
+RateLimit-Remaining: 0
+RateLimit-Reset: 30
+```
+
+`429` means "you specifically are over quota, retry later"; `503` means "the
+service is unwell." Don't conflate them — clients back off differently.
+`Retry-After` is what makes well-behaved clients stop hammering you, and omitting
+it guarantees a retry storm. Send `RateLimit-*` headers on **successful**
+responses too, so clients can self-throttle before hitting the wall.
+
+---
+
+## Layer 3 — Your actual project
+
+You have written one of these: `RateLimitInterceptor` in `url-shortener`,
+registered in `WebConfig.addInterceptors` for `/api/**` and `/s/**` (Swagger
+excluded).
+
+**What you got right, and should lead with:**
+
+- **It's Redis-backed, not per-instance.** This is the thing most candidates get
+  wrong and the whole point of the "distributed" in this question. Your limit is
+  genuinely shared across instances, so the service scales out without the limit
+  silently multiplying.
+- **It fails open, deliberately**, with a comment saying so. Availability over
+  enforcement is a real decision and you can defend it: this limiter prevents
+  abuse, not insolvency.
+- **It returns `429` with `X-RateLimit-Limit` and `X-RateLimit-Remaining`
+  headers**, so clients can self-regulate.
+- Limits are externalised to config (`app.rate-limit.max-requests: 100`,
+  `window-seconds: 60`).
+
+**The three flaws to volunteer**, because "how would you improve it?" is coming:
+
+1. **`INCR` and `EXPIRE` are separate calls.** Exactly the bug above: a failure
+   between them leaves a key with no TTL, and that IP is blocked permanently.
+   **Fix:** move the decision into a Lua script. One round trip, atomic, and it
+   eliminates the failure mode entirely.
+2. **It's a fixed window**, so a client can send 200 requests across a boundary
+   with a 100/minute limit. **Fix:** sliding window counter for a
+   near-drop-in improvement, or token bucket if you want to support deliberate
+   bursts.
+3. **The key is `request.getRemoteAddr()`.** Behind an ALB or any reverse proxy
+   that's the proxy's IP, so **every user shares one bucket** — the limiter
+   effectively caps your entire traffic at 100 req/min and then blames whoever
+   arrives next. **Fix:** parse `X-Forwarded-For`, trusting only the hops your
+   own infrastructure appended, and prefer the authenticated user ID when a
+   request is authenticated.
+
+That third one is the most valuable to raise unprompted, because it's a
+correctness bug that only appears once deployed behind a load balancer — which
+is to say, only in production.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why not an in-memory counter?"** With `N` instances the effective limit
+   becomes `N ×` the configured one, and it drifts as you autoscale.
+2. **"What's wrong with a fixed window?"** Up to 2× the limit across a boundary.
+   Walk through the 11:59/12:00 example.
+3. **"Which algorithm would you pick?"** Sliding window counter as a general
+   default; token bucket for a public API, because it expresses sustained rate
+   plus burst allowance.
+4. **"Why is `INCR` + `EXPIRE` a bug?"** Not atomic; a failure between them
+   leaves a key with no TTL and blocks that identity forever.
+5. **"How do you make it atomic?"** A Lua script — Redis is single-threaded, so
+   the script is atomic, and it's also one round trip instead of two.
+6. **"How do you bound memory?"** Set a TTL on every write; millions of idle keys
+   must expire on their own.
+7. **"10 million QPS. Now what?"** Shard by key (trivially — one key per check),
+   and go two-tier: local buckets holding a slice of budget, reconciled
+   periodically. State the accuracy you're trading away.
+8. **"Redis goes down."** Fail open but degrade to a conservative local limit,
+   and alarm loudly. Fail closed only if the protected resource genuinely can't
+   absorb the traffic.
+9. **"Why not limit by IP?"** Proxies collapse everyone into one bucket, NAT
+   punishes legitimate users, IPv6 gives one user 2^64 addresses. Prefer
+   authenticated identity; per `/64` if you must use IPv6.
+10. **"Does this stop a DDoS?"** No. You still accept the connection and do a
+    Redis call. Volumetric defence belongs at the CDN or WAF.
+11. **"`429` or `503`?"** `429` is "you're over quota"; `503` is "we're
+    unhealthy." Always send `Retry-After`.
+12. **"Different limits per endpoint?"** Weighted cost per request — a search
+    spends 10 tokens, a cheap `GET` spends 1.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **No TTL on counter keys.** Unbounded memory growth, and eventually a Redis
+  eviction storm that silently resets everyone's limits.
+- **Limiting before authentication.** You can only key by IP at that point.
+  Authenticate first, then limit by identity — but keep a coarse pre-auth IP
+  limit so the auth endpoint itself can't be flooded.
+- **Counting rejected requests toward the limit.** A client that's already over
+  quota keeps its bucket pinned and can never recover. Usually you don't want
+  429s to consume tokens.
+- **No `Retry-After`.** Clients retry immediately and you get a synchronised
+  retry storm.
+- **Testing only on one instance.** The distributed bug is invisible locally,
+  which is exactly how per-instance limiters reach production.
+</Callout>
+
+### Where this connects
+
+- [9. Rate limiting](/system-design/9-rate-limiting-you-already-have-a-basic-version)
+  — the short reference version of the algorithms.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — retry storms, backoff with jitter, and circuit breakers are the client-side
+  half of this conversation.
+- [7. CAP theorem](/system-design/7-cap-theorem-consistency-models) — the
+  two-tier design is a deliberate consistency-for-latency trade, and the fail
+  open/closed choice is availability versus correctness in miniature.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the service this limiter actually guards.

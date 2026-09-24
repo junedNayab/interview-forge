@@ -1,0 +1,205 @@
+---
+title: "5. Progress tracking"
+topic: "roadmap"
+order: 5
+difficulty: "easy"
+estimatedMinutes: 13
+tags: [roadmap, tracking, self-assessment, feedback, metrics]
+format: "mdx"
+summary: "Four tests that distinguish learning from consuming — the out-loud test, the timed attempt, the query-count check and the week-later design review — plus the specific signal to watch per track."
+---
+
+## The problem this solves
+
+You can spend three months on this material, finish every lesson, feel
+substantially more knowledgeable, and perform exactly as you would have on day
+one. This is not a rare outcome; it is the default one, and it happens because
+reading produces a feeling of understanding that is almost indistinguishable
+from the real thing and costs a tenth as much.
+
+The gap is between **recognition** and **retrieval**. Reading a lesson on
+consistent hashing makes the idea recognisable — you will nod along when you see
+it again. It does nothing for your ability to produce it, unprompted, while
+someone is watching and your hands are shaking. Interviews test retrieval only.
+
+So the tracking that matters is not "did I finish the lesson". It is "can I
+produce this".
+
+## The four tests
+
+These are the only four you need. Each one is cheap, each one is unforgiving,
+and each one maps onto a different failure mode.
+
+### 1. The out-loud test
+
+**Close everything and explain the topic aloud, from memory, for two minutes, as
+if to a colleague.**
+
+This is the single best tool here, and it is brutal in a way that re-reading
+never is. You will get thirty seconds in and discover that you know the shape of
+the idea and none of the mechanism. That discovery is the point.
+
+Two rules that make it work: no notes visible, and out loud rather than in your
+head. Silent explanation is much more forgiving than spoken explanation, because
+your internal monologue skips the parts you cannot articulate without noticing.
+Recording yourself on your phone makes it harder to cheat and lets you hear the
+hesitations.
+
+Apply it after every lesson, and again a week later. **A topic is not learned
+until it survives the week-later version.**
+
+### 2. The timed attempt
+
+**Whatever the skill is, do it once under a real timer before you look at any
+answer.**
+
+A coding problem in twenty-five minutes. A design case in forty-five, standing,
+talking. A machine coding problem in ninety, with code that runs. The timer is
+not there to add pressure for its own sake — it is there because unlimited time
+lets you avoid the specific skill being tested, which is making decisions
+quickly enough to finish.
+
+The critical ordering is attempt first, read the answer second. Reading a worked
+case study and then feeling able to do it is the most common self-deception in
+system design preparation. Reading it after a failed attempt is genuinely
+valuable, because you have something to compare against.
+
+### 3. The query-count check
+
+**For anything in the backend track, verify behaviour rather than asserting it.**
+
+The name comes from the most useful instance of it: turn on SQL logging, make
+one request, and count the queries. Not the cache hit rate, not the latency —
+the actual number of statements your application sent to the database. This is
+how you find that a cache-aside read still queries Postgres on every hit because
+something downstream needs the entity, which is exactly the bug in the URL
+shortener discussed in
+[Story 2](/behavioral/story-2-describe-a-time-you-improved-performance).
+
+Generalised: for every backend claim you intend to make in an interview, find
+the observation that would prove it. What does `EXPLAIN` actually say about the
+index you think is being used? Does the lazy association load where you think it
+does? Does the `@Transactional` you added actually apply, given that you called
+it from within the same class?
+
+**The reason this is a progress test and not just good practice is that it
+distinguishes people who know the framework's documentation from people who know
+the framework's behaviour,** which is precisely what the backend deep-dive round
+is designed to separate.
+
+### 4. The week-later design review
+
+**Write a design, put it away, and grade it seven days later.**
+
+Immediately after producing a design you cannot see its holes — you are still
+inside the reasoning that produced it. A week later you have lost that context
+and you read it roughly the way an interviewer does. Missing capacity numbers,
+components with no stated justification, an unaddressed single point of failure
+and a data model that does not support the access patterns all become obvious.
+
+Use [how to self-grade your practice](/system-design/how-to-self-grade-your-practice)
+as the rubric. Keep the graded versions; the trend across six of them is the
+clearest evidence you will get that phase 2 is working.
+
+## What to track
+
+Keep it small. A spreadsheet with a row per week and a handful of columns beats
+an elaborate system you abandon in week three.
+
+```
+Week | Phase | Sessions with output | Out-loud tests passed | Timed attempts | Notes
+```
+
+**"Sessions with output"** is the one to take seriously: sessions in which you
+produced something — spoke an answer, wrote code, drew a design, solved a
+problem under time. Reading sessions do not count. Four or five a week is a
+healthy rate.
+
+Do not track hours. Hours are easy to accumulate, easy to inflate, and
+uncorrelated with the thing you are trying to change.
+
+Also keep a running **"cannot answer" list**. Every time the out-loud test fails,
+every time a mock exposes a gap, every time an interviewer asks something you
+fumble, it goes on the list. That list is your actual curriculum from phase 3
+onwards, and it is far better targeted than any plan written in advance.
+
+## Signals per track
+
+Concrete things to check, roughly in order of increasing difficulty. These are
+the ones worth testing, not an exhaustive list.
+
+### DSA
+
+- You can name the pattern within three minutes of reading a problem you have
+  not seen.
+- You can write the template for all fifteen patterns from memory. Check against
+  [the pattern lessons](/dsa).
+- You state complexity without hesitating, using
+  [the cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) knowledge from
+  memory.
+- You solve a medium in twenty-five minutes while narrating, without going
+  silent for more than twenty seconds at a stretch.
+- **The real signal:** your failed attempts fail because the problem was hard,
+  not because you spent fifteen minutes not knowing where to start.
+
+### Java and SQL
+
+- Two-minute out-loud answers on HashMap internals, `volatile` and happens-before,
+  the persistence context lifecycle, and the three fixes for
+  [N+1](/java/3-the-n-1-problem-most-asked-jpa-interview-question).
+- You can read a piece of Spring code and say whether the `@Transactional` on it
+  actually takes effect, and why.
+- You can read an `EXPLAIN` output and say which index was used and why.
+- **The real signal:** on your own project, you can explain every non-obvious
+  decision *and* name what is wrong with it. Four issues, with the fix and the
+  tradeoff for each.
+
+### System design
+
+- You drive forty-five minutes without being prompted, hitting requirements,
+  estimation, API, high-level, deep dive and bottlenecks.
+- Estimates take under five minutes and you state a conclusion from each — "that
+  is 40 writes a second, so one Postgres instance, so no sharding."
+- On any component you reach for, you can go one level below the name: for a
+  cache, the eviction policy, the TTL strategy, stampede protection and hot keys.
+- You name your own single points of failure before the interviewer does.
+- **The real signal:** your second attempt at a case study, a week after the
+  first, is visibly better on the self-grade rubric. If it is not, you are
+  reading rather than practising.
+
+### LLD
+
+- Problem statement to a class diagram with clear responsibilities in fifteen
+  minutes.
+- You can name the SOLID principle a piece of code violates and show the
+  refactor.
+- Eight to ten design patterns you can implement, not twenty-three you can name.
+- **The real signal:** working, compiling code at the end of ninety minutes,
+  three times in a row.
+
+### Behavioral
+
+- Six to eight stories, four minutes each, delivered from bullets rather than a
+  script.
+- Each survives the eight follow-ups listed in its lesson.
+- Played back on a recording, your Situation and Task is around twenty percent
+  of the runtime and your Action around sixty.
+- **The real signal:** at least two stories where you were wrong, and you can
+  tell them without either defensiveness or excessive apology.
+
+## The honest check, every fourth week
+
+Once a month, do a short audit rather than a study session:
+
+1. Pick three topics from a month ago. Out-loud test each. How many survive?
+2. Look at your "cannot answer" list. Has it shrunk, or only grown?
+3. Count sessions with output for the last four weeks. Is the rate holding?
+4. Attempt one thing cold from the phase you finished. Does it still work?
+
+If the answers are bad, **the response is to change the method rather than to add
+hours**. Almost always the diagnosis is the same: too much reading, not enough
+producing. The fix is to convert half of next month's sessions into attempts,
+even though attempts are uncomfortable and reading is not.
+
+That discomfort is, unhelpfully, the best available signal that a session was
+worth doing.

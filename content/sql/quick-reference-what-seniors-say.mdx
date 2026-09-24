@@ -1,0 +1,96 @@
+---
+title: "Quick Reference: What Seniors Say"
+topic: "sql"
+order: 707
+group: "Advanced SQL"
+difficulty: "medium"
+estimatedMinutes: 14
+tags: [reference, sql, indexing, isolation, explain, pagination, window-functions]
+format: "mdx"
+summary: "A junior-answer versus senior-answer comparison across 22 SQL interview questions on indexes, joins, isolation, execution plans, pagination, N+1 and window functions."
+---
+
+## How to use this page
+
+Every row below is a question you will be asked. The middle column is the answer most
+candidates give: correct, complete-sounding, and impossible to follow up on. The right
+column is the answer that makes the interviewer want to keep going.
+
+Read it as a diagnostic, not a script. Cover the right column, answer out loud, and treat
+every row where your answer matched the middle column as a pointer back to
+[indexing](/sql/3-indexing-performance),
+[isolation levels](/sql/4-transactions-isolation-levels) or
+[query optimisation](/sql/5-query-optimization-checklist).
+
+**The shared property of the right-hand column is that it names what the database is
+physically doing.** A junior answer describes the effect ("the index makes it faster"); a
+senior answer describes the mechanism ("it is a B-tree sorted on that column, so the
+planner can seek instead of scan, which is also why the sort order matters for `ORDER
+BY`"). Once you are reasoning about the structure you can answer questions nobody
+prepared you for, which is the point.
+
+## Indexes
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| How does an index make a query faster? | "It's like a book index — the database can look up the row instead of scanning." | "It is a B-tree: sorted keys with pointers to rows, three or four levels deep even for hundreds of millions of rows, so a lookup is a handful of page reads instead of a full scan. Because it is sorted, it also satisfies `ORDER BY` and range predicates for free — which is why the same index that speeds up a filter can remove a sort step from the plan." |
+| Why does a composite index on `(a, b, c)` not help a query filtering only on `b`? | "Because of the leftmost prefix rule." | "Because the index is sorted by `a` first, then `b` within equal `a`, so the `b` values are not globally ordered — there is no contiguous range to seek to. That is the leftmost prefix rule, and stating it as a consequence of the sort order rather than as a rule is what lets me predict which of five queries will use the index." |
+| Should you index every column in the `WHERE` clause? | "More indexes means faster queries, so generally yes." | "No, and this is a trade I would want to make explicitly. Every index is another structure to maintain on insert, update and delete, and it competes for buffer cache. On a write-heavy table I would rather have three well-chosen composite indexes than nine single-column ones. I would also check for redundancy: an index on `(a, b)` makes a separate index on `a` unnecessary." |
+| What is a covering index? | "An index that contains all the columns the query needs." | "An index the planner can satisfy the query from entirely, so it never touches the heap — an index-only scan. That is often the difference between a fast and a slow query on a wide table, because the random reads to fetch rows dominate. In Postgres I would add the extra columns with `INCLUDE` so they sit in the leaf pages without affecting the sort key." |
+| Why might the planner ignore an index you added? | "Maybe the statistics are stale." | "Several reasons worth ruling out in order. If the predicate matches a large fraction of the table, a sequential scan genuinely is cheaper than random index lookups, so being ignored is correct. If not, I would check whether statistics are stale, whether the predicate is wrapped in a function, and whether there is an implicit type cast — a `varchar` column compared to an integer parameter will not use the index." |
+| Why can `LIKE 'smith%'` use an index but `LIKE '%smith'` cannot? | "Because the wildcard is at the start." | "Because the B-tree is sorted left to right, so a known prefix identifies a contiguous range of leaf pages and an unknown prefix does not — there is nothing to seek to. If I genuinely need suffix or substring search I would use a trigram index or full-text search, because no amount of B-tree indexing solves it." |
+| Does an index help with a low-cardinality column like `status`? | "Not really, indexes need high cardinality." | "Usually not on its own, because matching half the table is cheaper by sequential scan. But it earns its place as the trailing column of a composite index, and a partial index on the selective value — indexing only where the status is `PENDING`, which is one percent of rows — is often exactly the right answer for a queue table." |
+
+## Joins
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| `INNER JOIN` versus `LEFT JOIN` | "`LEFT JOIN` keeps all rows from the left table." | "Same, plus the thing that actually bites: an extra condition on the right table belongs in the `ON` clause, not the `WHERE` clause. Putting it in `WHERE` filters out the null-extended rows and silently turns the outer join back into an inner one. That is one of the few SQL bugs that produces plausible-looking wrong numbers rather than an error." |
+| How does the database actually execute a join? | "It matches rows from both tables on the join condition." | "One of three algorithms, and which one it picks tells me a lot. Nested loop for a small outer input with an index on the inner side. Hash join when both sides are large and there is an equality predicate — it builds a hash table on the smaller side. Merge join when both inputs are already sorted. If I see a nested loop over a large unindexed table in a plan, that is the problem." |
+| `NOT IN` versus `NOT EXISTS` | "They're equivalent, `NOT EXISTS` is usually faster." | "They are not equivalent, and the difference is nulls. If the subquery returns a single null, `NOT IN` evaluates to unknown for every row and the result is empty — a silent wrong answer rather than an error. `NOT EXISTS` handles nulls correctly and usually plans better as an anti-join, so I default to it." |
+| Why did adding a join multiply my row count? | "There must be duplicate rows in the joined table." | "The join is one-to-many, so each parent row is repeated once per child. It matters most when aggregating — a `SUM` over a joined table double-counts, and the fix is to aggregate in a subquery or use `COUNT(DISTINCT ...)` deliberately rather than by accident. It is also why fetching two collections in one query is a mistake." |
+
+## Transactions and isolation
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| What are the isolation levels? | "Read Uncommitted, Read Committed, Repeatable Read, Serializable — each prevents more anomalies." | "Same list, and then the part that matters: the default is Read Committed in Postgres and Repeatable Read in MySQL, so 'the default' depends on which database you are talking about. And a lost update is still possible at Read Committed — two transactions read the same row and the second write silently overwrites the first, with no error anywhere." |
+| How do you prevent a lost update? | "Use a higher isolation level." | "Two options with different costs. `SELECT ... FOR UPDATE` takes a row lock, which is correct but holds the lock for the duration of the business logic. Or an optimistic version column, where the update includes the version in its `WHERE` clause and zero affected rows means somebody else won — no lock held, but the caller has to handle a retry. On a hot row I take the second." |
+| What is a phantom read? | "Reading rows that weren't there before." | "A range query returning a different set of rows on re-execution within the same transaction, because another transaction inserted into that range. It is distinct from a non-repeatable read, which is about a row changing rather than appearing. Preventing it needs Serializable or explicit range locks, and it is the reason 'check then insert' is not safe without a unique constraint." |
+| Why do deadlocks happen and what do you do about them? | "Two transactions wait on each other's locks; the database kills one." | "Circular lock acquisition, and the practical fix is ordering: if every transaction touches rows in a consistent order, usually by primary key, the cycle cannot form. Since the database resolves them by killing a victim, application code has to be prepared to retry — so I make the transaction idempotent and retry once with jitter rather than surfacing the error." |
+| How does MVCC change how you think about reads? | "Readers don't block writers." | "Each transaction sees a snapshot, so readers do not block writers and writers do not block readers — but the old row versions have to live somewhere. That is where the follow-up is: long-running transactions hold back cleanup, so an idle-in-transaction connection causes table bloat and degrading performance far away from the query that caused it." |
+
+## Execution plans
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| How do you debug a slow query? | "I run `EXPLAIN` and add an index." | "`EXPLAIN ANALYZE`, and I look at three things in order: where the time is actually spent, whether the estimated and actual row counts diverge, and what the access method is on the largest input. Estimates that are wrong by an order of magnitude mean the planner is choosing from bad information, and fixing the statistics is more valuable than fighting the plan." |
+| `EXPLAIN` versus `EXPLAIN ANALYZE` | "`ANALYZE` gives more detail." | "`EXPLAIN` shows the plan and the planner's estimates without running the query. `EXPLAIN ANALYZE` executes it and reports actual timings and row counts, which is the only way to see estimation error. The caveat worth stating: it really does execute, so on an `UPDATE` or `DELETE` I wrap it in a transaction and roll back." |
+| What does a sequential scan in a plan tell you? | "It means the query isn't using an index." | "On its own, nothing bad — on a small table or a query returning most rows, it is the right choice. What I look for is a sequential scan on a large table inside a nested loop, which means it is being repeated per outer row. That combination is the actual problem, not the scan type by itself." |
+
+## Pagination, N+1 and window functions
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| Why is `LIMIT 20 OFFSET 200000` slow? | "Because the offset is large." | "Because `OFFSET` is not a seek — the database produces and discards 200,000 rows to reach the ones you want, so cost grows with the page number. Keyset pagination replaces it with `WHERE (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT 20`, which is an index seek at constant cost. The trade-off is no random page access, which is almost always acceptable for a feed." |
+| What is the N+1 problem from the database's side? | "The ORM issues one query per row instead of joining." | "A hundred round trips instead of one, and the cost is dominated by latency rather than by work — each query is fast, which is exactly why it is invisible in slow-query logs. That is why I catch it by asserting query counts in tests rather than by watching query duration. The fix is a join, a batched `IN` query, or a projection, depending on the shape." |
+| When would you use a window function instead of `GROUP BY`? | "When you want aggregates without collapsing rows." | "That is the mechanical difference: `GROUP BY` reduces the row count, a window function computes over a partition and keeps every row. The cases where it is transformative are the ones that need both the row and its context — rank within a group, a running total, or a comparison to the previous row with `LAG`. The alternative is a correlated subquery per row, which is the same work done worse." |
+| `ROW_NUMBER` versus `RANK` versus `DENSE_RANK` | "They number rows differently when there are ties." | "`ROW_NUMBER` is arbitrary among ties, so it is the right choice for deduplication and for deterministic pagination. `RANK` gives ties the same number and then skips, `DENSE_RANK` does not skip — so top-three by `RANK` can return five rows, which is either what the requirement says or a bug. I ask which one the requirement means before writing it." |
+| Is `SELECT *` a problem? | "It's better to select only the columns you need." | "It costs three things worth naming: bandwidth on wide rows, the possibility of losing an index-only scan because a column outside the index is requested, and a silent behaviour change when someone adds a column. In an ORM it also forces full entity hydration when a projection would do." |
+
+<Callout type="tip" title="The one habit behind most of the right-hand column">
+Almost every senior answer above is derivable from one question: *what does the database
+physically have to read, and in what order?* Rows discarded by `OFFSET`, leaf pages that
+are not contiguous, heap fetches avoided by a covering index, old row versions kept alive
+by an open transaction. On a question this page does not cover, ask that and reason
+forward; it beats trying to recall a rule.
+</Callout>
+
+### Where this connects
+
+- [3. Indexing & Performance](/sql/3-indexing-performance) — the B-tree, leftmost prefix and covering-index rows in full.
+- [4. Transactions & Isolation Levels](/sql/4-transactions-isolation-levels) — the anomalies, MVCC and the lost-update fixes.
+- [5. Query Optimization Checklist](/sql/5-query-optimization-checklist) — the plan-reading procedure behind the `EXPLAIN` rows.
+- [2. Window Functions — The Senior Differentiator](/sql/2-window-functions-the-senior-differentiator) — ranking, running totals and frames.
+- [Quick Reference: Junior vs Senior Answers (Java)](/java/quick-reference-what-seniors-say-in-interviews) — the same treatment for Java, including the N+1 and isolation questions from the application side.
+- [3. The N+1 Problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) — how the ORM produces it and the three fixes.

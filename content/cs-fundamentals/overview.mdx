@@ -1,0 +1,137 @@
+---
+title: "Overview"
+topic: "cs-fundamentals"
+order: 800
+difficulty: "medium"
+estimatedMinutes: 7
+tags: [overview, networking, operating-systems, distributed-systems, security, reading-order]
+format: "mdx"
+summary: "Why breadth questions are asked as rapid-fire follow-ups rather than as a round of their own, the order to work through the five lessons, and the explain-to-a-colleague bar that means you are done."
+---
+
+## What this track is assessed on
+
+There is usually no interview called "CS fundamentals". That is exactly why this
+track gets under-prepared and why it costs people offers.
+
+The material shows up in two places. The first is the rapid-fire segment at the
+end of an otherwise technical round, when the interviewer has ten minutes left:
+what happens when you type a URL into a browser, what is the difference between a
+process and a thread, why is HTTPS secure, what is a deadlock. The second, and
+more consequential, is as a follow-up *inside* another round. You are twenty
+minutes into a design discussion, you say "the client retries", and the
+interviewer asks "at which layer, and what does the TCP connection do while that
+happens?"
+
+**Breadth questions are how interviewers test whether your depth is real or
+memorised.** Somebody who genuinely understands concurrency can describe context
+switching; somebody who learned the Java API cannot. The questions are short
+because their purpose is to probe, not to grade a long answer.
+
+That sets a different standard from the other tracks here. You are not being asked
+to design a congestion control algorithm. You are being asked to explain each
+concept clearly and correctly to a colleague, in two or three minutes, without
+hedging. Depth beyond that has low returns; hesitation has a high cost.
+
+## Where you stand, and what to prioritise
+
+Your notes and study are concentrated on [Java internals](/java) and databases
+([SQL](/sql)), both of which you know well. This track is the breadth that sits
+underneath those and around them, and it is likely the least-covered ground in
+your preparation after system design.
+
+Two things about your position make the prioritisation easy.
+
+**Your Java concurrency work gives you a head start on the operating systems
+material, and a blind spot.** You know what a thread is from the API side. What you
+likely have not done is connect it to processes, scheduling, context-switch cost
+and the memory hierarchy — the difference between "I use a thread pool" and "I size
+the pool differently for CPU-bound and IO-bound work, and here is why". That
+connection is worth more than anything else in this track, so the OS lesson comes
+early.
+
+**Networking is probably your weakest area and the most frequently asked.** The
+walk-me-through-a-URL question is close to universal, and a gift once rehearsed
+because it demonstrates DNS, TCP, TLS, HTTP and load balancing in one answer. With
+limited time, this is where it goes.
+
+Security is the area where you have a concrete advantage worth using: your own
+[URL shortener project](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+has authentication and rate limiting in it, so every security concept here has a
+place in your own code to attach to. Use that, and audit the project as you read
+— a security answer that cites something you fixed in your own service is far
+stronger than a definition.
+
+Distributed systems concepts overlap heavily with the
+[system design track](/system-design/7-cap-theorem-consistency-models). Read it
+here as vocabulary consolidation rather than as new material.
+
+## The order to work through it
+
+1. [1. Networking](/cs-fundamentals/1-networking) — first, because it is the most
+   frequently asked and because the URL walkthrough is the single highest-value
+   rehearsed answer in this track.
+2. [2. Operating Systems & Concurrency](/cs-fundamentals/2-operating-systems-concurrency)
+   — second, and read it in conjunction with
+   [Java concurrency](/java/3-concurrency-senior-must-have). Each explains the
+   other: the JVM lesson tells you what the API guarantees, this one tells you
+   what the machine is doing to provide the guarantee.
+3. [3. Distributed Systems Concepts](/cs-fundamentals/3-distributed-systems-concepts)
+   — third, once networking is in place, since every distributed-systems problem
+   is ultimately a consequence of the network being unreliable. Pairs directly
+   with the system design track.
+4. [4. Security (also see your project's OWASP requirements)](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements)
+   — fourth, and read it with your own project open. Authentication, token
+   handling, injection and secret management all have examples in your code.
+5. [5. Rapid-fire self-test (answer out loud)](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud)
+   — last, and used as a test rather than as reading. Cover the answers, say
+   yours out loud, and treat every hesitation as a pointer back to one of the
+   four lessons above.
+
+The ordering principle is simply dependency: the network explains distributed
+systems, and the operating system explains concurrency. Security draws on both.
+
+## What "ready" looks like
+
+The bar for this track is fluency, not depth, so the self-check is a set of
+short explanations delivered out loud without notes. Two to three minutes each,
+no hedging, no "I think".
+
+- Walk through everything that happens between typing a URL and seeing the page,
+  naming DNS resolution, the TCP handshake, the TLS handshake, the HTTP request
+  and the response path. Then answer the follow-up: which of those steps would
+  you cache, and where?
+- Explain the difference between TCP and UDP, then name a case where you would
+  deliberately choose UDP and justify it.
+- Explain what a process is, what a thread is, and what a context switch costs.
+  Then answer: why is a thread pool for IO-bound work sized differently from one
+  for CPU-bound work?
+- Define a deadlock by its four required conditions, then say which one you would
+  remove in practice and how.
+- Explain what HTTPS actually protects against and what it does not, including
+  why certificate validation is the part that matters.
+- Explain why exactly-once delivery is not achievable in a distributed system,
+  and what people mean when they claim it.
+- Explain what idempotency is and how you would make a payment endpoint
+  idempotent.
+- Name three vulnerability classes from your own project's threat surface and how
+  each is mitigated in the code.
+
+Passing bar: you can answer any item in the
+[rapid-fire self-test](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud)
+without pausing to reconstruct it, and your URL walkthrough is smooth enough that
+you can be interrupted mid-answer and resume.
+
+## How long this track takes
+
+About 12,000 words across five lessons, each around 2,200 to 2,600 words. That is
+the smallest track on the site, and the least of it is genuinely new to you, so
+budget three to four hours of reading and two hours of out-loud rehearsal, over
+about a week.
+
+Where that week should sit in your schedule matters more than its length. Do this
+track *after* the [system design fundamentals](/system-design), not before.
+Reading about consistency and partitioning here is abstract; reading about them
+after you have tried to design a replicated system gives every term something to
+attach to. The exception is networking, which you can move earlier at any point,
+because the URL walkthrough is useful to have rehearsed from day one.

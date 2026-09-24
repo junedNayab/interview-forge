@@ -1,0 +1,230 @@
+---
+title: "Story 4: \"How do you handle disagreements with your team?\""
+topic: "behavioral"
+order: 904
+difficulty: "medium"
+estimatedMinutes: 17
+tags: [behavioral, conflict, influence, disagree-and-commit, url-shortener]
+format: "mdx"
+summary: "How to tell a conflict story that does not make you the hero, worked from a real fail-open rate-limiter decision, plus the disagree-and-commit ending and the follow-ups that test whether you can be wrong."
+---
+
+## What this question is really probing
+
+Every candidate knows they are supposed to sound collaborative, so everyone
+performs collaboration. The interviewer knows that, and is therefore looking past
+the surface for three things:
+
+- **Can you disagree at all?** A candidate who has never had a technical
+  disagreement worth describing is either not engaged enough to have opinions or
+  is sanitising. Both are problems. Conflict avoidance is a real negative signal
+  at senior level, because senior engineers are hired partly to push back.
+- **Can you be wrong?** The most valuable conflict story is one where you lost or
+  changed your mind. It is also the one candidates almost never tell, because
+  they think the question is asking them to win.
+- **What do you do after the decision?** Whether you commit to a decision you
+  argued against is close to the whole question for anyone hiring at senior level.
+
+There is also a trap built into the phrasing. "How do you handle disagreements"
+invites a process answer — "I listen to the other perspective and we find common
+ground." That is a fine sentence and it is worth nothing on its own. **Answer
+with a process in one sentence and then spend the rest of the time on one
+specific disagreement.**
+
+## The structure that works
+
+```
+1. The disagreement       both positions, stated fairly
+2. Why it mattered        stakes — otherwise this is bikeshedding
+3. What you did first     understand their position before arguing yours
+4. How you moved it       data, a prototype, a written doc, a small experiment
+5. The outcome            who was right, honestly
+6. What you did after     especially if you lost
+7. The relationship       what it is like with that person now
+```
+
+**Step 1 is the one that quietly decides the answer.** If you cannot state the
+other person's position in a way they would agree with, you did not understand
+it, and the interviewer can hear that instantly. Steel-man it. Say the strongest
+version of their case, not the version that makes your case look good.
+
+Step 5 is where you should resist the urge to have been right. A story where you
+lost and the decision turned out fine is stronger than a story where you won.
+
+## A worked example from the url-shortener
+
+The `url-shortener` project has a decision in it that is a genuine two-sided
+technical argument: the `RateLimitInterceptor` is Redis-backed — `INCR` plus
+`EXPIRE` on a per-IP key — and it **fails open**. If Redis is unreachable, the
+interceptor lets every request through unlimited.
+
+That is a real disagreement waiting to happen, because both positions are
+defensible:
+
+- **Fail open.** A redirect service exists to redirect. Degrading to "unlimited
+  traffic" keeps the product working; degrading to "everything is rejected"
+  means a Redis blip takes down a service that does not otherwise need Redis. A
+  protective measure that can cause the outage it protects against is badly
+  designed.
+- **Fail closed.** If the limiter exists to stop abuse, failing open means the
+  protection evaporates at exactly the moment an attacker would most like it to —
+  and an attacker who can knock over Redis has also disabled the limiter. A
+  limit you cannot rely on is not a limit.
+
+Told as an answer, with the second position held by someone else:
+
+> **The disagreement.** "We disagreed about what the rate limiter should do when
+> Redis is unavailable. I'd built it to fail open. A colleague argued it should
+> fail closed, and their case was genuinely strong: a rate limiter that
+> disappears under pressure isn't a control, it's a decoration, and the failure
+> mode is correlated with the attack."
+>
+> **Why it mattered.** "It wasn't a style question. It decided which of two
+> outages we'd have. Fail open means a Redis incident becomes an abuse incident;
+> fail closed means a Redis incident becomes a total outage of the redirect
+> path — which is the entire product."
+>
+> **What I did first.** "I asked what they were actually worried about, because
+> I'd assumed it was correctness and it turned out to be a specific scenario:
+> someone deliberately overwhelming Redis in order to bypass the limit. That's a
+> better argument than the one I'd been preparing to counter, and it changed what
+> I thought the disagreement was about."
+>
+> **How I moved it.** "I stopped arguing the principle and looked at what we
+> actually had. Redis was a single instance with no replication, so its
+> availability was worse than the application's — under fail-closed, the most
+> likely outcome by a wide margin was a self-inflicted outage from an
+> infrastructure blip, not a thwarted attacker. I wrote that up in about half a
+> page with the two failure modes and rough likelihoods rather than making the
+> case verbally, because a written comparison is much harder to argue past than
+> a conversation."
+>
+> **The outcome.** "We landed on something neither of us proposed. Fail open, but
+> with the failure made loud — a metric and an alert when the limiter is
+> degraded, so we know we're unprotected rather than finding out later. And we
+> agreed that if Redis ever became a replicated, genuinely highly available
+> dependency, fail-closed becomes the better default and we should revisit it.
+> Their concern was right; the conclusion depended on infrastructure we didn't
+> have."
+>
+> **Afterwards.** "I added the alert and a comment in the interceptor explaining
+> that failing open is deliberate, with a pointer to the reasoning — because the
+> next person to read an empty catch block will assume it's a bug."
+>
+> **Learning.** "What I took from it was to find out what specific scenario
+> someone is worried about before arguing against their position. I'd spent two
+> days preparing a counter-argument to a point they weren't making."
+
+Note what makes this work. The other position is stated strongly. The resolution
+is neither person's original proposal. The deciding factor is a fact about the
+system rather than seniority or volume. And the ending includes a concrete
+artifact — the alert and the comment.
+
+## The disagree-and-commit ending
+
+Have a second, shorter story ready where **you lost and executed anyway.** This
+is the one hiring managers listen for, and a bank of conflict stories where you
+were always eventually vindicated is a yellow flag.
+
+The shape is short:
+
+> "I argued for X, the team went with Y, and I thought Y was the wrong call. I
+> said so once more in writing so the reasoning was on record, and then I built Y
+> properly — I didn't want it to fail because I'd half-built it. It worked out
+> better than I expected, mainly because I'd underweighted how much the team's
+> familiarity with it mattered. I still think X was technically cleaner, and I
+> also think we made the right decision."
+
+That last sentence — holding a technical view while endorsing the decision — is
+the thing being tested. It is also true, which is why it is worth saying.
+
+<Callout type="pitfall" title="The sabotage tell">
+Interviewers listen for whether you undermined the decision after losing.
+Phrasings that hurt you: "I did it their way but I made sure everyone knew it
+would fail", "I was proven right six months later", "I let them find out the hard
+way". Being right is not the point; being someone a team can make a decision with
+is the point.
+</Callout>
+
+## Draft your own
+
+Prepare two: one where you prevailed or reached a synthesis, and one where you
+lost.
+
+1. **The two positions.** Write theirs first, in the strongest form you can
+   manage. If it sounds stupid when you write it, you have not understood it.
+2. **The stakes.** What was the actual consequence of getting it wrong? If you
+   cannot answer this, pick a different disagreement — a story about tabs versus
+   spaces makes you look like someone who fights about tabs versus spaces.
+3. **What you did to understand their position.** Specifically: what you asked,
+   what you read, what you tried.
+4. **What changed the conversation.** A measurement, a prototype, a written
+   comparison, a spike, a customer data point, a third opinion. Something
+   external to both of you is much stronger than persuasion.
+5. **Who was right.** Honestly. Partial credit is realistic and sounds it.
+6. **What you did after the decision.** Especially if it went against you.
+7. **What the relationship is like now.** One sentence. "We still disagree about
+   this and it's fine" is a good answer.
+8. **What you would do differently.** Usually some version of "raise it earlier",
+   "write it down sooner", or "find out what they were actually worried about".
+
+## Other disagreement material in this project
+
+- **Making click recording asynchronous.** A real tradeoff between redirect
+  latency and losing click events on a crash. Reasonable people argue both that
+  analytics counts should not be lossy and that analytics is exactly where
+  lossiness is acceptable, which is what makes it a good story.
+- **The seven-character random code with a retry loop.** `generateUniqueCode()`
+  checks `existsByShortCode` and then inserts — a check-then-act race. A
+  colleague might reasonably say the probability is negligible; the counter is
+  that the failure surfaces as a 500 and costs nothing to handle properly.
+- **Caching at all.** Someone arguing the database can handle it and the cache
+  adds a consistency problem is a disagreement you can lose gracefully — and it
+  connects to the expiry bug in
+  [Story 1](/behavioral/story-1-tell-me-about-a-challenging-bug-you-solved),
+  where the cache did introduce a correctness problem.
+
+## Follow-ups you will get
+
+| Follow-up | What they are checking |
+|---|---|
+| "Tell me about a time you were wrong." | The main event. Have this ready as its own story. |
+| "What if they still disagreed after all that?" | Escalation judgement — do you know when to involve a manager? |
+| "Have you ever disagreed with your manager?" | Whether hierarchy silences you. |
+| "How did the other person describe this?" | Whether you can hold their perspective. Very revealing. |
+| "What would you do if you'd lost that one?" | Disagree-and-commit, asked hypothetically. |
+| "How long did the disagreement go on?" | Whether you let things fester or resolve them. |
+| "Did it affect how you work together?" | Whether conflict costs you relationships. |
+
+On escalation specifically: the defensible line is that you escalate when the
+decision is blocking work and two people have stopped making progress, you
+escalate the *decision* rather than the person, and you tell them you are doing
+it. Escalating quickly is not weakness; escalating silently is.
+
+## Weak versus strong
+
+<Callout type="pitfall" title="What a weak answer sounds like">
+"I had a disagreement with a teammate about using Redis versus an in-memory
+cache. They wanted Redis even though we only had one instance. I explained that
+Redis would add unnecessary complexity, and eventually they came around and
+agreed with me. We ended up using the simpler solution and it worked well."
+
+The other position is stated as obviously wrong. Nothing external decided it —
+the resolution is "they came around", which means you out-argued them. You were
+right, they were wrong, nothing was learned, and there is no artifact. The
+interviewer's next question will be "tell me about a time you were the one who
+came around", and if that answer does not exist, this one retroactively looks
+worse.
+</Callout>
+
+<Callout type="interview" title="What a strong answer sounds like">
+Both positions stated fairly, with theirs first and at full strength. Real stakes
+named. Evidence that you tried to understand before you tried to persuade. Something
+external — data, a prototype, a written comparison — moved the decision rather
+than force of argument. An honest verdict, ideally partial. A concrete artifact
+that came out of it. And a second, shorter story where you lost and built their
+version properly anyway.
+</Callout>
+
+That completes the four story lessons. Before the interview itself, work through
+[the day-of checklist](/behavioral/day-of-interview-checklist).

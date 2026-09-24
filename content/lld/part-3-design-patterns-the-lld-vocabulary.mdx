@@ -1,0 +1,670 @@
+---
+title: "Part 3 — Design patterns (the LLD vocabulary)"
+topic: "lld"
+order: 404
+difficulty: "hard"
+estimatedMinutes: 26
+tags: [lld, design-patterns, strategy, singleton, decorator, state, java]
+format: "mdx"
+summary: "Fourteen patterns organised by the problem each one solves, with Java sketches, the LLD problems where each is the expected answer, and why Singleton is usually the wrong one."
+---
+
+## Layer 1 — The mental model
+
+Patterns are usually taught as a catalogue to memorise, which produces
+candidates who can define Abstract Factory and cannot say when they would use
+it. The catalogue is not the point.
+
+> **A design pattern is a name for a solution you would have reached anyway.**
+> Its value is that it compresses a paragraph of explanation into one word both
+> people already understand. That is the whole benefit: shared vocabulary.
+
+Which leads directly to the warning that matters more than any individual
+pattern:
+
+<Callout type="pitfall" title="Naming a pattern you can't justify is worse than not naming one">
+If you say "I'll use a Factory here" and the interviewer asks "why not just call
+the constructor?", you need an answer. A pattern name without a justification
+reads as recall rather than judgement, and it invites exactly the follow-up you
+cannot answer.
+
+The safe form is always problem-first: *"construction varies by input and I
+don't want the caller to know the concrete types, so I'll put that behind a
+factory method."* You have now named the problem, the solution and the reason,
+and the word "factory" is doing no work you could not have done without it. If
+you forget the name entirely, that sentence still scores full marks.
+</Callout>
+
+Organised by problem rather than by the Gang of Four's categories, the useful
+set is small:
+
+| The problem you have | The pattern |
+|---|---|
+| Construction varies by input, caller shouldn't know concrete types | Factory / Factory Method |
+| A family of related objects must be created consistently | Abstract Factory |
+| Too many optional constructor parameters | Builder |
+| Exactly one instance must exist | Singleton — and read the caveats |
+| An existing class has the wrong interface | Adapter |
+| Behaviour must be layered on at runtime, in any combination | Decorator |
+| A subsystem is too complicated for its callers | Facade |
+| Something must happen around every call to an object | Proxy |
+| An algorithm varies and is selected at runtime | **Strategy** |
+| Many objects must react to one object's change | Observer |
+| Behaviour depends on a lifecycle stage | State |
+| The steps are fixed, one step varies | Template Method |
+| A request must be stored, queued, logged or undone | Command |
+| A request should pass through a series of handlers | Chain of Responsibility |
+
+If you learn only three properly, make them **Strategy, State and Observer** —
+between them they answer most LLD problems you will be asked.
+
+---
+
+## Layer 2 — The mechanism
+
+### Creational: when construction itself is the problem
+
+#### Factory and Factory Method
+
+The problem: the caller knows *what kind* of thing it wants but should not know
+*which class* implements it, and the mapping from kind to class is going to
+grow.
+
+```java
+// The caller asks for a capability by kind and gets an implementation.
+public final class VehicleFactory {
+    public static Vehicle create(VehicleType type, String plate) {
+        return switch (type) {                      // one switch, in one place
+            case CAR   -> new Car(plate);
+            case BIKE  -> new Bike(plate);
+            case TRUCK -> new Truck(plate);
+        };
+    }
+}
+```
+
+Note what has and has not been achieved. The `switch` still exists — a program
+that turns strings from the outside world into objects must branch somewhere.
+What the factory buys is that it branches in **exactly one place**, so the rest
+of the codebase holds `Vehicle` references and never mentions `Car`. When
+`Vehicle` gains a subtype, one file changes instead of twenty.
+
+*Factory Method* is the variant where the choice is made by a subclass
+overriding a `protected` creation method rather than by a `switch` — useful when
+a framework defines the algorithm and lets you supply the product type.
+
+**Where it's the expected answer:** parking lot (vehicles and spots), vending
+machine (products), notification service (channels), any problem where input
+arrives as an enum or a string.
+
+#### Abstract Factory
+
+The problem: you need several related objects that must all come from the *same
+family*, and mixing families would be a bug.
+
+```java
+public interface UiToolkit {                // the family
+    Button button();
+    Checkbox checkbox();
+}
+final class MacToolkit implements UiToolkit { /* Mac button + Mac checkbox */ }
+final class WinToolkit implements UiToolkit { /* Win button + Win checkbox */ }
+```
+
+The point is not that you can create buttons; it is that you cannot
+accidentally pair a Mac button with a Windows checkbox, because the factory
+instance guarantees consistency. If there is no consistency requirement between
+the products, you want several factory methods, not an abstract factory. Say
+that distinction out loud and you will be one of few candidates who does.
+
+#### Builder, and why telescoping constructors fail
+
+The problem: an object has many parameters, most of them optional.
+
+```java
+// BAD — the telescoping constructor. Three failures, all real:
+//   1. The caller cannot tell what new Pizza(30, true, false, true, false) means.
+//   2. Two adjacent boolean or int parameters can be swapped and still compile.
+//   3. Every new option doubles the number of overloads worth writing.
+class Pizza {
+    Pizza(int size) { ... }
+    Pizza(int size, boolean cheese) { ... }
+    Pizza(int size, boolean cheese, boolean olives) { ... }
+    Pizza(int size, boolean cheese, boolean olives, boolean jalapenos) { ... }
+}
+
+// Also BAD — the JavaBeans alternative: a no-arg constructor plus setters.
+// It fixes readability and reintroduces a worse problem: the object is
+// observable in a half-built, invalid state, and it cannot be final.
+
+// GOOD — Builder. Readable at the call site, immutable at the end, and
+// validation happens once, in build(), before the object is ever visible.
+public final class Pizza {
+    private final Size size;
+    private final Set<Topping> toppings;
+
+    private Pizza(Builder b) {                        // private: only the builder
+        this.size = b.size;
+        this.toppings = Set.copyOf(b.toppings);
+    }
+
+    public static final class Builder {
+        private Size size = Size.MEDIUM;              // sensible default
+        private final Set<Topping> toppings = EnumSet.noneOf(Topping.class);
+
+        public Builder size(Size size)    { this.size = size; return this; }
+        public Builder add(Topping t)     { toppings.add(t); return this; }
+
+        public Pizza build() {
+            if (size == Size.SMALL && toppings.size() > 3)
+                throw new IllegalArgumentException("too many toppings for small");
+            return new Pizza(this);                   // invariant checked before creation
+        }
+    }
+}
+
+// new Pizza.Builder().size(Size.LARGE).add(CHEESE).add(OLIVES).build();
+```
+
+The load-bearing detail is `build()`. **Cross-field validation has exactly one
+place to live, and it runs before any caller can observe the object** — which
+is the thing neither telescoping constructors nor setters give you.
+
+**Where it's expected:** any problem with configurable objects — a rate limiter
+with capacity, window and refill rate; a `Ticket`; a pizza or burger ordering
+system. In a machine-coding round, if you have four or fewer required fields
+and no optional ones, use a `record` instead and save five minutes.
+
+#### Singleton, and the thread-safety discussion
+
+The problem as stated: exactly one instance must exist. The problem in practice:
+Singleton is global mutable state with a respectable name.
+
+Interviewers ask about it mostly to see whether you know the concurrency
+mechanics and whether you know the criticism. Both are expected.
+
+```java
+// BAD — the classic broken lazy singleton. Two threads can both pass the
+// null check before either assigns, producing two instances.
+class Config {
+    private static Config instance;
+    static Config getInstance() {
+        if (instance == null) instance = new Config();   // check-then-act race
+        return instance;
+    }
+}
+
+// WORKS, but every read pays for a lock it does not need after startup.
+static synchronized Config getInstance() { ... }
+
+// GOOD — double-checked locking. `volatile` is not optional here.
+final class Config {
+    private static volatile Config instance;             // ← the whole trick
+
+    private Config() { }
+
+    static Config getInstance() {
+        Config local = instance;                         // one volatile read
+        if (local == null) {
+            synchronized (Config.class) {
+                local = instance;
+                if (local == null) instance = local = new Config();
+            }
+        }
+        return local;
+    }
+}
+```
+
+Why `volatile` is mandatory: `new Config()` is not atomic. It allocates memory,
+runs the constructor, and assigns the reference — and without `volatile` the JVM
+is permitted to reorder the assignment *before* the constructor finishes. A
+second thread can then see a non-null reference to a partially constructed
+object and use it. `volatile` establishes a happens-before edge that forbids
+that reordering and guarantees the second thread sees a fully initialised
+object.
+
+Two better options exist, and knowing them is the actual signal:
+
+```java
+// BEST for laziness — the holder idiom. The JVM guarantees a class is
+// initialised exactly once, under its own lock, on first use. No volatile,
+// no synchronized in your code, lazy by construction.
+final class Config {
+    private Config() { }
+    private static final class Holder { static final Config INSTANCE = new Config(); }
+    static Config getInstance() { return Holder.INSTANCE; }
+}
+
+// BEST overall if you don't need laziness — the enum singleton. Serialization
+// safe and reflection-proof, which the other forms are not.
+public enum Config {
+    INSTANCE;
+    public void doThing() { ... }
+}
+```
+
+Now the criticism, which you should volunteer rather than wait for:
+**Singleton is a hidden dependency.** A class that calls `Config.getInstance()`
+inside a method has a dependency that does not appear in its constructor, cannot
+be replaced in a test, and is shared across every test in the suite — so tests
+leak state into each other and fail in orders that depend on execution sequence.
+It also violates Dependency Inversion: the caller depends on a concrete class,
+by name, at compile time.
+
+The alternative to offer in an LLD round: *"I'll have exactly one instance, but
+I'll create it in `main` and inject it, rather than making the class enforce its
+own uniqueness. That gives me the one-instance property and keeps it testable —
+which is exactly what a Spring singleton bean is."* See
+[thread-safe singleton practice](/java/practice-thread-safe-singleton) for the
+full mechanics.
+
+### Structural: when the shape of a collaboration is the problem
+
+#### Adapter
+
+The problem: you have a class with the behaviour you need and the wrong
+interface — almost always a third-party SDK.
+
+```java
+// The interface your domain owns.
+public interface PaymentGateway {
+    PaymentResult charge(Money amount, CardToken token);
+}
+
+// The adapter — the ONLY file in your codebase that imports the vendor SDK.
+final class StripeGatewayAdapter implements PaymentGateway {
+    private final StripeClient stripe;                  // third-party type
+
+    @Override public PaymentResult charge(Money amount, CardToken token) {
+        StripeCharge c = stripe.charges().create(
+                amount.minorUnits(), amount.currency().code(), token.value());
+        return c.isPaid() ? PaymentResult.success(c.id())
+                          : PaymentResult.failure(c.failureMessage());
+    }
+}
+```
+
+This is Dependency Inversion made concrete: the vendor's types are quarantined
+in one file, so switching providers touches one class and your domain never
+learns that Stripe existed. **In an interview, whenever a third-party service is
+mentioned, drawing this boundary unprompted is a strong move.**
+
+#### Decorator
+
+The problem: behaviour must be added to an object at runtime, in arbitrary
+combinations, without a class for every combination.
+
+```java
+// Every decorator IS-A Coffee and HAS-A Coffee, which is what makes them stack.
+public interface Coffee { Money cost(); String description(); }
+
+record BasicCoffee() implements Coffee {
+    public Money cost() { return Money.rupees(100); }
+    public String description() { return "coffee"; }
+}
+
+abstract class CoffeeDecorator implements Coffee {
+    protected final Coffee inner;
+    protected CoffeeDecorator(Coffee inner) { this.inner = inner; }
+}
+
+final class WithMilk extends CoffeeDecorator {
+    WithMilk(Coffee inner) { super(inner); }
+    public Money cost() { return inner.cost().plus(Money.rupees(20)); }
+    public String description() { return inner.description() + " + milk"; }
+}
+
+// new WithSugar(new WithMilk(new BasicCoffee()))
+```
+
+The reason this beats inheritance is combinatorial: three add-ons give eight
+combinations, and subclassing needs eight classes, while decorating needs three.
+
+The canonical Java example is `java.io`, and citing it lands well because it
+shows you recognise the pattern in code you already use:
+`new BufferedReader(new InputStreamReader(new FileInputStream(file)))` is three
+decorators, each adding one capability — bytes from a file, bytes decoded to
+characters, characters buffered. Each layer is independently reusable, which is
+why the JDK has a handful of stream classes instead of a class per combination.
+
+**Where it's expected:** coffee or pizza pricing, a logging framework where
+formatting and destinations stack, notification channels with retry and rate
+limiting wrapped around them.
+
+#### Facade
+
+The problem: a subsystem has many parts and callers should deal with one entry
+point.
+
+`ParkingLot` in [Part 5](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+is a facade: it exposes `park(vehicle)` and `unpark(ticket)`, and the caller
+never touches floors, spots, allocation strategies or the pricing engine.
+
+The caveat: a facade that grows methods until it *is* the subsystem has become a
+God class. A facade delegates; it should contain almost no logic of its own.
+That distinction is worth stating when you introduce one.
+
+#### Proxy
+
+The problem: something must happen on every call to an object — lazy loading,
+access control, caching, remoting, or a transaction — without the caller or the
+real object knowing.
+
+```java
+// Same interface, so the caller cannot tell the difference.
+final class CachingSpotFinder implements SpotFinder {
+    private final SpotFinder real;
+    private final Map<VehicleType, List<ParkingSpot>> cache = new ConcurrentHashMap<>();
+
+    @Override public List<ParkingSpot> freeSpots(VehicleType type) {
+        return cache.computeIfAbsent(type, real::freeSpots);
+    }
+}
+```
+
+The most useful thing to know: **Spring AOP is exactly this pattern.**
+`@Transactional`, `@Async` and `@Cacheable` work by the container replacing your
+bean with a generated proxy that wraps the call. That single fact explains why
+calling a `@Transactional` method from inside the same object does nothing — the
+call never crosses the proxy boundary. The full mechanism is in
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies), and
+being able to connect the pattern to the framework behaviour is a strong signal.
+
+Decorator and Proxy have nearly identical structure and different intent:
+a decorator *adds* behaviour the caller asked for and is stacked deliberately; a
+proxy *controls access* to the real object and is usually invisible.
+
+### Behavioral: when the interaction is the problem
+
+#### Strategy — the one that earns its keep
+
+The problem: an algorithm varies, and which one to use is decided at runtime or
+by configuration.
+
+```java
+public interface PricingStrategy { Money fee(Ticket ticket); }
+
+final class HourlyPricing implements PricingStrategy { ... }
+final class FlatDayPricing implements PricingStrategy { ... }
+final class WeekendSurgePricing implements PricingStrategy { ... }
+
+final class ParkingLot {
+    private PricingStrategy pricing;                       // injected
+    void setPricing(PricingStrategy p) { this.pricing = p; }   // swappable at runtime
+    Money checkout(Ticket t) { return pricing.fee(t); }
+}
+```
+
+This is Open/Closed with a name, and it is the single most common correct answer
+in LLD rounds. Pricing, spot allocation, matching, ranking, retry backoff,
+short-code generation, eviction policy — every one of them is a Strategy.
+
+The test for whether Strategy is right: **is the thing that varies an
+algorithm — one input, one output, no state carried between calls?** If yes,
+Strategy. If the varying thing is *which* operations are legal right now, you
+want State instead.
+
+**Where it's expected:** parking lot pricing and allocation, rate limiter
+algorithm, cache eviction policy, ride matching, elevator scheduling, payment
+splitting in Splitwise.
+
+#### Observer
+
+The problem: when one object changes, an open-ended set of others must react,
+and the subject should not know who they are.
+
+```java
+public interface ParkingEventListener { void onParked(Ticket ticket); }
+
+final class ParkingLot {
+    private final List<ParkingEventListener> listeners = new CopyOnWriteArrayList<>();
+
+    public void register(ParkingEventListener l) { listeners.add(l); }
+
+    private void publishParked(Ticket t) {
+        for (ParkingEventListener l : listeners) l.onParked(t);   // subject stays ignorant
+    }
+}
+```
+
+`CopyOnWriteArrayList` is deliberate: listeners are registered rarely and
+iterated often, and it lets a listener unregister itself during notification
+without a `ConcurrentModificationException`.
+
+Observer is the in-process ancestor of event-driven architecture. The same
+decoupling — a publisher that does not know its subscribers — is what a message
+queue provides across processes, with durability and retries added. Saying that
+connects your LLD answer to
+[asynchronous processing](/system-design/8-asynchronous-processing-message-queues)
+and shows you see the continuity.
+
+Two honest caveats: synchronous observers run on the publisher's thread, so a
+slow listener slows the publish, and an exception in one listener can prevent
+later ones from running unless you catch per listener. Mentioning those is the
+difference between having read about Observer and having used it.
+
+#### State — why a state machine beats a pile of booleans
+
+The problem: an object's legal operations depend on where it is in a lifecycle.
+
+```java
+// BAD — behaviour scattered across flags. Every method re-derives the state,
+// and invalid combinations (paid && !hasMoney) are representable.
+class VendingMachine {
+    private boolean hasMoney, isDispensing, isSoldOut;
+    void selectItem(Item i) {
+        if (isSoldOut) { ... }
+        else if (!hasMoney) { ... }
+        else if (isDispensing) { ... }
+        // three flags is eight states, of which maybe four are legal
+    }
+}
+
+// GOOD — each state is a class that knows what it allows. Illegal states are
+// unrepresentable, and transitions are explicit and visible in one place.
+interface VendingState {
+    VendingState insertCoin(Coin c, VendingMachine m);
+    VendingState selectItem(Item i, VendingMachine m);
+    VendingState dispense(VendingMachine m);
+}
+
+final class IdleState implements VendingState {
+    public VendingState insertCoin(Coin c, VendingMachine m) {
+        m.addCredit(c.value());
+        return new HasMoneyState();                     // the transition, explicit
+    }
+    public VendingState selectItem(Item i, VendingMachine m) {
+        throw new IllegalStateException("insert money first");
+    }
+    public VendingState dispense(VendingMachine m) {
+        throw new IllegalStateException("nothing selected");
+    }
+}
+```
+
+The argument to make out loud: **with `n` booleans you have two to the power of
+`n` representable states and usually far fewer legal ones, so most of the state
+space is a bug waiting to be reached.** With a state class you have exactly the
+states you named, and the transitions are the return values — which means the
+state diagram is readable straight off the code.
+
+The simpler variant, and often the right one under time pressure: an `enum` of
+states plus a transition table, with the enum constants holding the behaviour.
+Say which you chose and why.
+
+**Where it's expected:** vending machine, elevator, ATM, order lifecycle,
+traffic signal, chess move validation, any problem where "what can I do now"
+changes.
+
+#### Template Method
+
+The problem: the sequence of steps is fixed, but individual steps vary.
+
+```java
+public abstract class ReportGenerator {
+    public final Report generate(Query q) {        // final: the sequence is the contract
+        var raw = fetch(q);
+        var shaped = transform(raw);
+        return render(shaped);
+    }
+    protected abstract RawData fetch(Query q);      // subclasses vary the steps
+    protected RawData transform(RawData d) { return d; }   // optional hook
+    protected abstract Report render(RawData d);
+}
+```
+
+Marking `generate` as `final` is the point — subclasses may change steps, never
+the order. The tradeoff versus Strategy: Template Method uses inheritance and is
+fixed at compile time; Strategy uses composition and can be swapped at runtime.
+Prefer Strategy unless the steps genuinely share state.
+
+#### Command
+
+The problem: a request must be treated as an object so it can be stored, queued,
+logged, retried or undone.
+
+```java
+public interface Command {
+    void execute();
+    void undo();                                   // this is why Command exists
+}
+
+final class MoveCommand implements Command {
+    private final Piece piece; private final Square from, to;
+    private Piece captured;                        // state needed to reverse it
+
+    public void execute() { captured = to.occupant(); to.place(piece); from.clear(); }
+    public void undo()    { from.place(piece); to.place(captured); }
+}
+```
+
+An undo stack is simply a `Deque<Command>`; popping and calling `undo()` is the
+whole feature. **Where it's expected:** chess and other games with undo, text
+editors, a job queue where each task is a command, transactional operations that
+must be rolled back.
+
+#### Chain of Responsibility
+
+The problem: a request should pass through a series of handlers, each able to
+handle it, transform it, or pass it along.
+
+```java
+public interface LogHandler {
+    void handle(LogRecord record);
+    LogHandler next();                              // or hold a reference internally
+}
+
+abstract class AbstractLogHandler implements LogHandler {
+    private final Level level;
+    private final LogHandler next;
+
+    public void handle(LogRecord r) {
+        if (r.level().ordinal() >= level.ordinal()) write(r);
+        if (next != null) next.handle(r);           // pass along regardless
+    }
+    protected abstract void write(LogRecord r);
+}
+```
+
+The design decision that distinguishes variants: does a handler that handles the
+request *stop* the chain, or does everything see it? Logging frameworks pass to
+everything; an approval workflow stops at the first handler authorised to
+approve. State which one you mean.
+
+A servlet filter chain is exactly this pattern, and so is a Spring Security
+filter chain — each filter decides whether to handle, modify, or call
+`chain.doFilter(...)` to continue. Naming that connection is a good, cheap
+signal.
+
+**Where it's expected:** logging framework, middleware or interceptor design,
+approval workflows, ATM cash dispensing by denomination.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Which pattern would you use here?"** Answer with the problem first: "the
+   thing that varies is the pricing algorithm, so I want that behind an
+   interface and injected — that's Strategy." Problem, solution, name, in that
+   order.
+2. **"Strategy vs State?"** Strategy varies an algorithm chosen by the caller;
+   State varies which operations are legal and the object transitions itself.
+   Structurally similar, different intent and different ownership of the change.
+3. **"Decorator vs Proxy?"** Same structure. A decorator adds behaviour the
+   caller deliberately stacked; a proxy controls access and is usually invisible
+   to the caller.
+4. **"Why is `volatile` needed in double-checked locking?"** `new Config()` is
+   allocate, construct, assign, and the assignment may be reordered before
+   construction completes. Another thread could see a non-null, half-built
+   object. `volatile` forbids that reordering.
+5. **"Is there a better singleton?"** The static holder idiom for laziness —
+   the JVM initialises a class exactly once — or an `enum`, which is also
+   serialization-safe and reflection-proof.
+6. **"Why is Singleton often an anti-pattern?"** Hidden dependency, global
+   mutable state, untestable because you cannot substitute it, and state leaking
+   between tests. Prefer one instance created in `main` and injected.
+7. **"Why not just use setters instead of a Builder?"** Setters make the object
+   observable while half-built and prevent `final` fields. Builder validates
+   once in `build()`, before anything can see the object.
+8. **"Give a Decorator from the JDK."** `java.io`: a `BufferedReader` wrapping
+   an `InputStreamReader` wrapping a `FileInputStream`. Three independent
+   capabilities composed rather than eight subclasses.
+9. **"Where have you used Proxy without realising?"** Spring AOP. The bean in
+   the container is a generated proxy, which is exactly why a self-invoked
+   `@Transactional` method is not transactional.
+10. **"What's the relationship between Observer and event-driven systems?"**
+    Observer is the same decoupling inside one process. A message queue is the
+    cross-process version with durability and retries added.
+11. **"Why is a state machine better than booleans?"** With `n` flags you can
+    represent far more states than are legal, so most of the state space is a
+    latent bug. With state classes, only the states you named exist and the
+    transitions are explicit.
+12. **"Template Method vs Strategy?"** Template Method fixes the sequence and
+    varies steps via inheritance, at compile time. Strategy varies the whole
+    algorithm via composition, at runtime. Prefer Strategy unless the steps
+    share state.
+13. **"Name a real Chain of Responsibility."** A servlet filter chain or the
+    Spring Security filter chain.
+14. **"You've used four patterns here. Isn't that over-engineering?"** The right
+    answer is often yes. Be ready to name which one you would drop first and
+    why — usually the one whose axis you are least confident will change.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Pattern-name-dropping.** Saying "Abstract Factory" and being unable to
+  explain why several factory methods would not do is worse than never saying
+  it. Lead with the problem.
+- **Forcing patterns to prove you know them.** A vending machine with a Builder,
+  a Singleton, an Abstract Factory and a Visitor is a red flag, not a strong
+  answer. Two well-justified patterns beat five decorative ones.
+- **Singleton by reflex.** "There's one parking lot, so `ParkingLot` is a
+  Singleton" is a common and costly instinct — you have just made your central
+  class untestable. One instance created in `main` gets you the same property.
+- **Strategy with a single implementation and no second one in sight.** That is
+  an interface tax with no benefit.
+- **Observers that throw.** One listener's exception kills the rest of the
+  notification unless you catch per listener. Say so when you write the loop.
+- **Deep decorator stacks.** Five layers make stack traces and debugging
+  genuinely painful. The pattern is right; the depth is a cost.
+- **Mutable Builders shared across threads.** A `Builder` is not thread-safe and
+  is not meant to be reused after `build()`.
+</Callout>
+
+### Where this connects
+
+- [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — Strategy is Open/Closed, Adapter is Dependency Inversion against a vendor
+  SDK. Patterns are SOLID with names.
+- [Part 5 — the parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — Strategy, Factory and Facade landed on one design, with the reasoning for
+  each.
+- [Thread-safe singleton practice](/java/practice-thread-safe-singleton) — the
+  full mechanics of double-checked locking, the holder idiom and the enum form.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — the
+  Proxy pattern as a production framework, and the bugs it causes.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — why `volatile`
+  fixes the reordering that breaks naive lazy initialisation.
+- [Asynchronous processing and message queues](/system-design/8-asynchronous-processing-message-queues)
+  — Observer, scaled out across processes.

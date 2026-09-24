@@ -1,0 +1,369 @@
+---
+title: "Practice: SQL Problems"
+topic: "sql"
+order: 905
+group: "Practice Problems"
+estimatedMinutes: 8
+format: "md"
+source: "SkillUpPlan/interview-prep/01-java-and-sql/04-sql-practice-problems.sql"
+---
+
+```sql
+-- =============================================================================
+-- SQL PRACTICE PROBLEMS -- Senior-Level Interview Preparation
+-- =============================================================================
+-- Run these against PostgreSQL or MySQL. Most syntax is ANSI-compatible.
+-- =============================================================================
+
+-- =============================================================================
+-- SCHEMA SETUP
+-- =============================================================================
+
+CREATE TABLE departments (
+    id       INT PRIMARY KEY,
+    name     VARCHAR(50) NOT NULL
+);
+
+CREATE TABLE employees (
+    id          INT PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    department_id INT REFERENCES departments(id),
+    manager_id  INT REFERENCES employees(id),
+    salary      DECIMAL(10,2) NOT NULL,
+    hire_date   DATE NOT NULL
+);
+
+CREATE TABLE products (
+    id    INT PRIMARY KEY,
+    name  VARCHAR(100) NOT NULL,
+    price DECIMAL(10,2) NOT NULL
+);
+
+CREATE TABLE orders (
+    id          INT PRIMARY KEY,
+    customer_id INT NOT NULL,
+    product_id  INT REFERENCES products(id),
+    order_date  DATE NOT NULL,
+    amount      DECIMAL(10,2) NOT NULL
+);
+
+CREATE TABLE customers (
+    id    INT PRIMARY KEY,
+    name  VARCHAR(100) NOT NULL,
+    city  VARCHAR(50)
+);
+
+-- Sample data
+INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Marketing'), (3, 'Sales'), (4, 'HR');
+
+INSERT INTO employees VALUES
+    (1, 'Alice',   1, NULL, 95000, '2019-01-15'),
+    (2, 'Bob',     1, 1,    85000, '2020-03-20'),
+    (3, 'Charlie', 1, 1,    85000, '2021-06-10'),  -- same salary as Bob (for tie-breaking tests)
+    (4, 'Diana',   2, NULL, 78000, '2018-09-01'),
+    (5, 'Eve',     2, 4,    82000, '2022-01-05'),
+    (6, 'Frank',   3, NULL, 72000, '2020-07-15'),
+    (7, 'Grace',   3, 6,    90000, '2019-11-20'),  -- earns more than manager
+    (8, 'Henry',   1, 1,    70000, '2023-04-01'),
+    (9, 'Irene',   2, 4,    75000, '2021-08-15'),
+    (10,'Jack',    3, 6,    68000, '2022-12-01');
+
+INSERT INTO products VALUES (1, 'Laptop', 999.99), (2, 'Mouse', 29.99), (3, 'Keyboard', 79.99);
+
+INSERT INTO customers VALUES
+    (1, 'Acme Corp', 'New York'),
+    (2, 'Globex', 'Chicago'),
+    (3, 'Initech', 'New York'),
+    (4, 'Umbrella', 'Seattle');
+
+INSERT INTO orders VALUES
+    (1, 1, 1, '2024-01-15', 999.99),
+    (2, 1, 2, '2024-02-20', 29.99),
+    (3, 1, 3, '2024-03-10', 79.99),   -- customer 1 ordered ALL products
+    (4, 2, 1, '2024-01-25', 999.99),
+    (5, 2, 2, '2024-04-15', 29.99),
+    (6, 3, 1, '2024-02-01', 999.99),
+    (7, 3, 3, '2024-05-01', 79.99),
+    (8, 4, 2, '2024-03-20', 29.99),
+    (9, 1, 1, '2024-06-10', 999.99),  -- repeat order
+    (10,2, 3, '2024-06-15', 79.99);
+
+
+-- =============================================================================
+-- PROBLEM 1: Find the Nth Highest Salary Per Department
+-- =============================================================================
+-- "Find the 2nd highest salary in each department"
+
+-- SOLUTION using DENSE_RANK (handles ties correctly)
+SELECT department_id, name, salary
+FROM (
+    SELECT
+        department_id,
+        name,
+        salary,
+        DENSE_RANK() OVER (PARTITION BY department_id ORDER BY salary DESC) AS rnk
+    FROM employees
+) ranked
+WHERE rnk = 2;
+
+-- Expected output:
+-- | department_id | name    | salary |
+-- |---------------|---------|--------|
+-- | 1             | Bob     | 85000  |  (tied with Charlie)
+-- | 1             | Charlie | 85000  |  (tied with Bob)
+-- | 2             | Irene   | 75000  |
+-- | 3             | Frank   | 72000  |
+
+-- WHY DENSE_RANK and not RANK?
+-- DENSE_RANK: 95000→1, 85000→2, 70000→3 (no gaps, intuitive "2nd highest")
+-- RANK:       95000→1, 85000→2, 85000→2, 70000→4 (gap at 3, 2nd still correct here)
+-- ROW_NUMBER: 95000→1, 85000→2, 85000→3 (arbitrary tiebreak, might miss one)
+
+
+-- =============================================================================
+-- PROBLEM 2: Employees Earning More Than Their Manager (Self-Join)
+-- =============================================================================
+-- Classic self-join problem
+
+SELECT
+    e.name  AS employee,
+    e.salary AS employee_salary,
+    m.name  AS manager,
+    m.salary AS manager_salary
+FROM employees e
+JOIN employees m ON e.manager_id = m.id
+WHERE e.salary > m.salary;
+
+-- Expected: Grace (90000) earns more than her manager Frank (72000)
+-- | employee | employee_salary | manager | manager_salary |
+-- |----------|-----------------|---------|----------------|
+-- | Grace    | 90000           | Frank   | 72000          |
+
+-- VARIATION: Find employees earning MORE THAN the average salary in their department
+SELECT e.name, e.salary, e.department_id, dept_avg.avg_salary
+FROM employees e
+JOIN (
+    SELECT department_id, AVG(salary) AS avg_salary
+    FROM employees
+    GROUP BY department_id
+) dept_avg ON e.department_id = dept_avg.department_id
+WHERE e.salary > dept_avg.avg_salary;
+
+-- ALTERNATIVE using window function (more elegant):
+SELECT name, salary, department_id, avg_salary
+FROM (
+    SELECT
+        name, salary, department_id,
+        AVG(salary) OVER (PARTITION BY department_id) AS avg_salary
+    FROM employees
+) with_avg
+WHERE salary > avg_salary;
+
+
+-- =============================================================================
+-- PROBLEM 3: Running Total of Sales by Month
+-- =============================================================================
+-- Monthly sales with cumulative running total
+
+SELECT
+    DATE_TRUNC('month', order_date) AS month,     -- PostgreSQL
+    -- DATE_FORMAT(order_date, '%Y-%m') AS month,  -- MySQL alternative
+    SUM(amount) AS monthly_sales,
+    SUM(SUM(amount)) OVER (ORDER BY DATE_TRUNC('month', order_date)) AS running_total
+FROM orders
+GROUP BY DATE_TRUNC('month', order_date)
+ORDER BY month;
+
+-- Expected:
+-- | month   | monthly_sales | running_total |
+-- |---------|---------------|---------------|
+-- | 2024-01 | 1999.98       | 1999.98       |
+-- | 2024-02 | 1029.98       | 3029.96       |
+-- | 2024-03 | 109.98        | 3139.94       |
+-- | 2024-04 | 29.99         | 3169.93       |
+-- | 2024-05 | 79.99         | 3249.92       |
+-- | 2024-06 | 1079.98       | 4329.90       |
+
+-- KEY INSIGHT: SUM(SUM(amount)) OVER (...) is valid!
+-- The inner SUM is the GROUP BY aggregate; the outer SUM is the window function.
+-- Window functions execute AFTER GROUP BY.
+
+-- VARIATION: Running total per customer
+SELECT
+    customer_id,
+    order_date,
+    amount,
+    SUM(amount) OVER (PARTITION BY customer_id ORDER BY order_date) AS customer_running_total
+FROM orders
+ORDER BY customer_id, order_date;
+
+
+-- =============================================================================
+-- PROBLEM 4: Customers Who Ordered Every Product (Relational Division)
+-- =============================================================================
+-- "Find customers who have ordered ALL products at least once"
+
+-- SOLUTION 1: COUNT comparison (most intuitive)
+SELECT c.name
+FROM customers c
+JOIN orders o ON c.id = o.customer_id
+GROUP BY c.id, c.name
+HAVING COUNT(DISTINCT o.product_id) = (SELECT COUNT(*) FROM products);
+
+-- Expected: Acme Corp (customer 1 ordered product 1, 2, and 3)
+
+-- SOLUTION 2: NOT EXISTS with double negation (theoretical relational division)
+-- "Find customers where there does NOT EXIST a product they have NOT ordered"
+SELECT c.name
+FROM customers c
+WHERE NOT EXISTS (
+    SELECT p.id
+    FROM products p
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM orders o
+        WHERE o.customer_id = c.id AND o.product_id = p.id
+    )
+);
+
+-- SOLUTION 3: EXCEPT-based (PostgreSQL)
+-- For each customer, check if (all products) EXCEPT (their ordered products) is empty
+SELECT c.name
+FROM customers c
+WHERE NOT EXISTS (
+    SELECT id FROM products
+    EXCEPT
+    SELECT product_id FROM orders WHERE customer_id = c.id
+);
+
+-- INTERVIEW TIP: Solution 1 is simplest and most common.
+-- Mention Solution 2 to show you understand relational algebra.
+
+
+-- =============================================================================
+-- PROBLEM 5: Pivot Data Using CASE WHEN
+-- =============================================================================
+-- Convert rows to columns: show each department's employee count and avg salary
+-- side by side (pivot/cross-tab)
+
+-- PIVOT: Department stats as columns
+SELECT
+    'Employee Count' AS metric,
+    COUNT(CASE WHEN department_id = 1 THEN 1 END) AS "Engineering",
+    COUNT(CASE WHEN department_id = 2 THEN 1 END) AS "Marketing",
+    COUNT(CASE WHEN department_id = 3 THEN 1 END) AS "Sales"
+FROM employees
+
+UNION ALL
+
+SELECT
+    'Avg Salary',
+    ROUND(AVG(CASE WHEN department_id = 1 THEN salary END), 0),
+    ROUND(AVG(CASE WHEN department_id = 2 THEN salary END), 0),
+    ROUND(AVG(CASE WHEN department_id = 3 THEN salary END), 0)
+FROM employees;
+
+-- Expected:
+-- | metric         | Engineering | Marketing | Sales |
+-- |----------------|-------------|-----------|-------|
+-- | Employee Count | 4           | 3         | 3     |
+-- | Avg Salary     | 83750       | 78333     | 76667 |
+
+
+-- PRACTICAL PIVOT: Monthly sales per customer
+SELECT
+    customer_id,
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 1 THEN amount ELSE 0 END) AS "Jan",
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 2 THEN amount ELSE 0 END) AS "Feb",
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 3 THEN amount ELSE 0 END) AS "Mar",
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 4 THEN amount ELSE 0 END) AS "Apr",
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 5 THEN amount ELSE 0 END) AS "May",
+    SUM(CASE WHEN EXTRACT(MONTH FROM order_date) = 6 THEN amount ELSE 0 END) AS "Jun",
+    SUM(amount) AS "Total"
+FROM orders
+GROUP BY customer_id
+ORDER BY customer_id;
+
+
+-- =============================================================================
+-- BONUS PROBLEMS (Common in Interviews)
+-- =============================================================================
+
+-- BONUS 1: Find departments with no employees
+SELECT d.name
+FROM departments d
+LEFT JOIN employees e ON d.id = e.department_id
+WHERE e.id IS NULL;
+-- Expected: HR
+
+
+-- BONUS 2: Find the most common salary in each department
+SELECT department_id, salary, cnt
+FROM (
+    SELECT
+        department_id,
+        salary,
+        COUNT(*) AS cnt,
+        RANK() OVER (PARTITION BY department_id ORDER BY COUNT(*) DESC) AS rnk
+    FROM employees
+    GROUP BY department_id, salary
+) ranked
+WHERE rnk = 1;
+
+
+-- BONUS 3: Year-over-Year growth (using LAG)
+-- If we had multi-year data:
+SELECT
+    year,
+    total_sales,
+    LAG(total_sales) OVER (ORDER BY year) AS prev_year_sales,
+    ROUND(
+        (total_sales - LAG(total_sales) OVER (ORDER BY year))
+        / LAG(total_sales) OVER (ORDER BY year) * 100, 1
+    ) AS yoy_growth_pct
+FROM (
+    SELECT EXTRACT(YEAR FROM order_date) AS year, SUM(amount) AS total_sales
+    FROM orders
+    GROUP BY EXTRACT(YEAR FROM order_date)
+) yearly;
+
+
+-- BONUS 4: Consecutive ranges (gaps and islands)
+-- Given a table of logged-in days, find consecutive streaks
+-- This is a classic "gaps and islands" problem solved with ROW_NUMBER trick:
+--
+-- CREATE TABLE logins (user_id INT, login_date DATE);
+-- SELECT user_id, MIN(login_date) AS streak_start, MAX(login_date) AS streak_end,
+--        COUNT(*) AS streak_length
+-- FROM (
+--     SELECT user_id, login_date,
+--            login_date - (ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY login_date))
+--                * INTERVAL '1 day' AS grp
+--     FROM logins
+-- ) grouped
+-- GROUP BY user_id, grp
+-- HAVING COUNT(*) >= 3;  -- streaks of 3+ days
+
+
+-- BONUS 5: Delete duplicates keeping the row with the lowest ID
+-- DELETE FROM employees_dup
+-- WHERE id NOT IN (
+--     SELECT MIN(id)
+--     FROM employees_dup
+--     GROUP BY name, department_id, salary
+-- );
+
+
+-- =============================================================================
+-- INTERVIEW TIPS FOR SQL PROBLEMS
+-- =============================================================================
+--
+-- 1. ALWAYS clarify: "Should ties be included?" (affects RANK vs DENSE_RANK vs ROW_NUMBER)
+-- 2. ALWAYS clarify: "Are there NULLs to handle?" (affects JOIN type and COALESCE usage)
+-- 3. Start with the simplest approach, then optimize if asked.
+-- 4. Mention indexing: "I'd add an index on (department_id, salary) for this query."
+-- 5. Mention EXPLAIN: "I'd check the execution plan to verify index usage."
+-- 6. Window functions are your secret weapon -- they solve most "top N per group" problems.
+-- 7. Self-joins solve hierarchical queries (employee-manager, parent-child).
+-- 8. CASE WHEN is SQL's if-else -- use it for pivoting and conditional aggregation.
+```

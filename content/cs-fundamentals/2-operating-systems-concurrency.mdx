@@ -1,0 +1,289 @@
+---
+title: "2. Operating Systems & Concurrency"
+topic: "cs-fundamentals"
+order: 802
+difficulty: "medium"
+estimatedMinutes: 23
+tags: [operating-systems, concurrency, threads, deadlock, io, virtual-memory]
+format: "mdx"
+summary: "The OS layer under every Java concurrency answer — what a context switch really costs, why blocking I/O caps your throughput, how epoll and virtual threads escape it, and deadlock as a property you can prove away."
+---
+
+## Layer 1 — The mental model
+
+> Java-specific concurrency — `synchronized`, `volatile`, the memory model,
+> executors, `ConcurrentHashMap` — lives in
+> [Java concurrency](/java/3-concurrency-senior-must-have). This lesson is the
+> operating-system layer underneath it, which is where the "why" lives.
+
+The framing that makes this topic cohere:
+
+> **The OS's job is to lie to your program convincingly.** It pretends your
+> process has the whole machine to itself — all the memory, a CPU that's always
+> yours, files that are instantly available. Concurrency bugs and performance
+> cliffs are the places where the lie leaks.
+
+Three lies and the leak in each:
+
+| The lie | Where it leaks |
+|---|---|
+| "You have your own contiguous memory" | Page faults, thrashing, the page cache |
+| "Your thread is always running" | Context switches, and their real cost |
+| "This read returns immediately" | Blocking I/O parks your thread for ~10 ms — an eternity |
+
+The third one is the most important for a backend engineer, because it's the
+reason thread pools exist, the reason non-blocking I/O exists, and the reason
+Java added virtual threads. Hold this table:
+
+```
+L1 cache reference                    1 ns
+Branch mispredict                     3 ns
+L2 cache reference                    4 ns
+Mutex lock/unlock (uncontended)      20 ns
+Main memory reference               100 ns
+Context switch               1,000–10,000 ns   (1–10 µs)
+SSD random read              ~     100,000 ns
+Network round trip (same DC) ~     500,000 ns
+Disk seek (spinning)         ~  10,000,000 ns
+```
+
+Read the gap between "main memory" and "network round trip": **5,000×**. A
+thread blocked on one network call could have executed millions of instructions.
+That gap is the entire subject.
+
+---
+
+## Layer 2 — The mechanism
+
+### Process vs thread
+
+| | Process | Thread |
+|---|---|---|
+| Memory | Own address space — **isolated** | Shares the process heap |
+| Creation | Expensive (~ms) | Cheaper (~µs), ~1 MB stack reserved |
+| Communication | IPC: pipes, sockets, shared memory | Just read the same variable |
+| Failure | A crash kills one process | A crash kills the whole process |
+| Context switch | Expensive — full address space swap, TLB flush | Cheaper — same address space |
+
+The trade is isolation versus cost, and it's the same trade as microservices
+versus a monolith one level up — which is a nice connection to draw if the
+conversation allows it.
+
+**What a context switch actually costs.** The direct cost is saving and
+restoring registers and the program counter: 1–10 microseconds. The *indirect*
+cost is usually bigger and is what people miss: the new thread's data isn't in
+the CPU caches, so it runs slowly until those refill. A process switch is worse
+still, because the address space changes and the **TLB** — the cache of
+virtual-to-physical address translations — is flushed.
+
+This is why **more threads is not more throughput**. Past a point, the CPU
+spends its time switching rather than working, and every switch costs you cache
+warmth. For CPU-bound work the right pool size is about the number of cores; for
+I/O-bound work it's much higher, because the threads are mostly parked anyway.
+
+### Virtual memory, in the parts that matter
+
+Every process sees a private contiguous address space; the MMU translates those
+virtual addresses to physical frames through page tables, with the TLB caching
+recent translations. When a page isn't resident, a **page fault** traps to the
+OS, which loads it from disk.
+
+The two practical consequences:
+
+- **Thrashing** — when the working set exceeds RAM, the system spends its time
+  paging instead of computing, and throughput collapses non-linearly. This is
+  the cliff behind "everything was fine, then it fell off a cliff."
+- **The page cache** — free RAM is used to cache file contents. This is why a
+  "disk read" is often actually a memory read, and it's the reason the claim
+  "Redis is fast because RAM beats disk" is
+  [misleading](/system-design/5-caching-your-strongest-topic-you-already-use-redis):
+  your database's hot pages are in RAM too.
+
+**User space vs kernel space** is the other boundary worth knowing. Your code
+can't touch hardware; it makes a **system call**, which traps into the kernel.
+That transition costs a few hundred nanoseconds to a microsecond — negligible
+once, expensive a million times, which is why buffered I/O exists: one `write`
+of 8 KB beats 8,192 writes of one byte.
+
+### Blocking I/O and how to escape it
+
+This is the most valuable section in the lesson, because it explains the whole
+evolution of server architecture.
+
+**Thread-per-request (blocking).** A thread calls `read()`, the OS parks it
+until data arrives, and it wakes up. Simple, debuggable, and what Tomcat has
+always done. The cost is that each concurrent request needs a thread, each
+thread reserves ~1 MB of stack, and 10,000 concurrent requests means 10,000
+threads and roughly 10 GB plus brutal scheduler pressure. **This is the C10K
+problem.**
+
+**Non-blocking I/O with event loops.** One thread manages thousands of
+connections by asking the kernel "which of these sockets are ready?" and handling
+only those.
+
+```
+select/poll →  O(n): pass in every socket, kernel scans them all, every call
+epoll/kqueue → O(1): register once, kernel hands back only what's ready
+```
+
+`epoll` (Linux) and `kqueue` (BSD/macOS) are why nginx, Node.js and Netty can
+hold hundreds of thousands of connections on a handful of threads. The cost is
+the programming model: nothing may block, ever, because one blocking call stalls
+every connection that thread owns — which is how callback hell and reactive
+chains happen.
+
+<Callout type="note" title="Virtual threads: getting both">
+Java 21's virtual threads resolve the trade-off rather than picking a side. A
+virtual thread is scheduled by the JVM, not the OS, onto a small pool of carrier
+threads. When it blocks on I/O, the JVM **unmounts** it from its carrier and
+runs something else — so blocking code gets the efficiency of an event loop
+while still reading top to bottom, with a usable stack trace and working
+try/finally.
+
+The catch worth knowing: a virtual thread **pinned** to its carrier can't
+unmount, which reintroduces the old limit. Pinning happens inside a
+`synchronized` block (largely fixed in Java 24) and in native calls, which is
+why the migration advice is to prefer `ReentrantLock` over `synchronized` around
+blocking operations. Details in
+[Java concurrency](/java/3-concurrency-senior-must-have).
+</Callout>
+
+### Concurrency hazards
+
+A **race condition** is when correctness depends on timing. The canonical case
+is that `count++` is three operations — read, add, write — and two threads can
+interleave so one increment vanishes. Fixes: synchronise, use an atomic, or
+avoid shared mutable state entirely (immutability is the fix that can't be
+misused).
+
+**Deadlock** is the one you can reason about rigorously, which is why it's
+asked. It requires all four **Coffman conditions** simultaneously:
+
+1. **Mutual exclusion** — a resource can't be shared.
+2. **Hold and wait** — a thread holds one resource while requesting another.
+3. **No preemption** — you can't forcibly take a resource away.
+4. **Circular wait** — A waits for B, B waits for A.
+
+Because all four are necessary, **breaking any one prevents deadlock**, and
+that's the structure of a good answer. In practice you break circular wait by
+**acquiring locks in a consistent global order** (for example, always lock the
+lower account ID first in a transfer), or you break hold-and-wait with
+`tryLock` plus a timeout and a retry. Naming the four conditions and then saying
+which one your fix breaks is a noticeably better answer than "lock ordering."
+
+**Livelock** is threads that keep responding to each other and never progress —
+two people stepping aside in a corridor, in lockstep. Randomised backoff is the
+standard fix, which is the same jitter that fixes
+[retry storms](/system-design/15-microservice-reliability-patterns).
+
+**Starvation** is a thread that never gets the resource, usually under an unfair
+lock or a priority scheme. **Priority inversion** is its famous cousin: a
+low-priority thread holds a lock a high-priority thread needs, and a
+medium-priority thread preempts the low one, so the high-priority thread waits
+on work that isn't running. Priority inheritance is the fix, and this bug once
+caused repeated resets on the Mars Pathfinder — a fun thing to know and a real
+concept.
+
+### Synchronization primitives
+
+| Primitive | What it is | Typical use |
+|---|---|---|
+| **Mutex** | One holder, and only the holder releases | Any critical section |
+| **Semaphore** | A counter — up to N holders | A pool of 10 connections |
+| **Monitor** | Mutex + condition variables | Java's `synchronized` + `wait`/`notify` |
+| **Read-write lock** | Many readers or one writer | Read-heavy shared state |
+| **Spinlock** | Busy-waits instead of sleeping | Very short critical sections, kernel |
+| **Barrier** | All N threads wait for each other | Parallel phase boundaries |
+
+Two distinctions that get probed:
+
+**Mutex vs semaphore** — a mutex has *ownership* (the locking thread must be the
+unlocking thread), a semaphore is just a counter anyone can signal. A binary
+semaphore is therefore not a mutex.
+
+**Spinlock vs mutex** — spinning burns CPU but avoids the ~1–10 µs context
+switch, so it wins only when the wait is shorter than that switch. On a single
+core, spinning is pure waste: the holder can't run while you spin.
+
+**Optimistic vs pessimistic locking** is the same idea at the data layer.
+Pessimistic locks up front (`SELECT … FOR UPDATE`); optimistic assumes no
+conflict and validates at commit time with a version column — JPA's `@Version`.
+Optimistic wins when conflicts are rare, which in most applications they are.
+
+### Scheduling, briefly
+
+Preemptive scheduling (the OS interrupts you) versus cooperative (you yield).
+Linux's CFS aims for fairness by tracking virtual runtime. The two things worth
+carrying into a backend interview: a **time slice** is typically a few
+milliseconds, so a thread that blocks for 10 ms has given up many slices' worth
+of opportunity; and **CPU affinity** matters because moving a thread to another
+core abandons its warm caches.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Process or thread?"** Isolation versus cost. Separate address space and a
+   crash boundary, or a shared heap and cheap switching.
+2. **"What does a context switch cost?"** 1–10 µs directly, plus the bigger
+   hidden cost of cold CPU caches — and a TLB flush if it's a process switch.
+3. **"Why doesn't adding threads add throughput?"** Switching and cache-warming
+   overhead grows while the cores stay the same. Size by workload: ~cores for
+   CPU-bound, much higher for I/O-bound.
+4. **"How many threads for an I/O-bound service?"** Roughly
+   `cores × (1 + wait/compute)`. If you wait 50 ms and compute 5 ms, that's ~11
+   per core.
+5. **"What's the C10K problem?"** Thread-per-connection doesn't reach 10,000
+   concurrent connections — memory and scheduler cost. Solved by event loops,
+   or now by virtual threads.
+6. **"select vs epoll?"** `select` is O(n) per call and rescans everything;
+   `epoll` registers once and returns only ready sockets, O(1).
+7. **"What do virtual threads change?"** Blocking code without the blocking
+   cost — the JVM unmounts the virtual thread from its carrier. Watch for
+   pinning.
+8. **"What are the four conditions for deadlock?"** Mutual exclusion, hold and
+   wait, no preemption, circular wait — and you only need to break one.
+9. **"How do you prevent it in practice?"** Consistent global lock ordering
+   (breaks circular wait) or `tryLock` with a timeout (breaks hold-and-wait).
+10. **"Deadlock vs livelock vs starvation?"** Stuck and idle; busy but not
+    progressing; never scheduled at all.
+11. **"Mutex vs semaphore?"** Ownership. A mutex must be released by its
+    locker; a semaphore is a counter.
+12. **"When is a spinlock right?"** When the expected wait is shorter than a
+    context switch, and never on a single core.
+13. **"What is thrashing?"** Working set exceeds RAM, so the machine pages
+    instead of computing and throughput collapses.
+14. **"Why is a system call expensive?"** It traps into the kernel — hundreds of
+    nanoseconds, which is why you buffer.
+15. **"Optimistic or pessimistic locking?"** Optimistic when conflicts are rare
+    — a version column and a retry beats holding a row lock.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Sizing a thread pool by guessing.** Too few starves throughput, too many
+  thrashes the scheduler.
+- **Blocking inside an event loop**, which stalls every connection that thread
+  owns.
+- **Locking in different orders in different methods** — the deadlock you only
+  see in production.
+- **Holding a lock across an I/O call.** You've serialised your service behind a
+  network round trip.
+- **Assuming `count++` is atomic.** It's three operations.
+- **`synchronized` around blocking calls on virtual threads**, which pins the
+  carrier and undoes the benefit.
+- **Ignoring the page cache** when reasoning about disk speed.
+</Callout>
+
+### Where this connects
+
+- [Java concurrency](/java/3-concurrency-senior-must-have) — the memory model,
+  `volatile`, executors and virtual threads, one layer up.
+- [1. Networking](/cs-fundamentals/1-networking) — where the blocking that
+  motivates all of this comes from.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — the page cache, and why Redis's speed isn't about disk.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — bulkheads are thread-pool isolation, and jitter is the livelock fix.
+- [SQL: transactions and isolation levels](/sql/4-transactions-isolation-levels)
+  — optimistic and pessimistic locking at the database layer.

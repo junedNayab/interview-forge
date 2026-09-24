@@ -1,0 +1,160 @@
+---
+title: "4. Your weekly rhythm (the shape of a day)"
+topic: "roadmap"
+order: 4
+difficulty: "easy"
+estimatedMinutes: 11
+tags: [roadmap, schedule, habits, consistency, low-energy-days]
+format: "mdx"
+summary: "A realistic weekday and week for someone with a full-time job, why two hours daily beats eight on Saturday, and a specific menu of what to do when you have no energy left."
+---
+
+## Two hours a day beats eight on Saturday
+
+This is the most important operational fact in the plan, and it is not a
+motivational claim — it follows from what you are actually trying to build.
+
+Interview skill is retrieval under pressure. You are not accumulating knowledge
+so much as making it reachable quickly while someone watches. Retrieval strength
+is built by spacing, not by duration: the same eight hours spread across four
+days produces substantially more durable recall than eight hours in one sitting,
+because each session forces you to retrieve what the previous one left behind.
+
+There is a second effect, which is that a Saturday-only schedule has no
+resilience. One busy weekend and you have lost a week. A daily schedule that you
+miss twice still delivers five sessions.
+
+The corollary: **a thirty-minute session you actually do is worth more than a
+three-hour session you keep deferring.** On days when the full block is not
+happening, do the reduced version rather than nothing. The point is the streak,
+not the hours.
+
+## The shape of a weekday
+
+Roughly two and a half hours, split into two unequal blocks. The split matters —
+the primary block is deep work on one track and should not be interrupted or
+subdivided.
+
+```
+Morning, before work        45 min   SECONDARY — DSA or light review
+Evening, after dinner       90 min   PRIMARY — the current phase's track
+Before sleep                10 min   Recall pass, no new material
+```
+
+**The morning block** is short and mechanical, which is what makes it survivable
+at that hour. One timed medium problem, narrated out loud. Or, if it is a
+maintenance week, fifteen minutes on
+[the rapid-fire self-test](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud)
+and twenty minutes reviewing yesterday's notes.
+
+Putting the secondary track in the morning is deliberate. If it goes in the
+evening it gets eaten by the primary block, and DSA in particular expands to
+fill any available time because it is the most comfortable thing on the list.
+
+**The evening block** is the phase's primary track — Java internals in phase 1,
+system design in phase 2, LLD in phase 3. Ninety minutes, one topic, no tab
+switching. If you are in phase 2, roughly half of these sessions should involve
+talking out loud at a whiteboard or a sheet of paper rather than reading.
+
+**The ten minutes before sleep** is a recall pass and it is much more valuable
+than its length suggests. Close everything, and say out loud what you learned
+today. No notes. What you cannot reproduce goes on tomorrow's list. This single
+habit does more for retention than any amount of re-reading.
+
+If two and a half hours is not available, the priority order is: evening block,
+then morning block, then the recall pass. Ninety minutes of primary work is a
+complete day.
+
+## The shape of a week
+
+| Day | Primary (90 min) | Secondary (45 min) |
+|---|---|---|
+| Monday | Current phase — new material | 1 timed DSA medium |
+| Tuesday | Current phase — new material | 1 timed DSA medium |
+| Wednesday | Current phase — **practice, not reading** | CS fundamentals rapid-fire |
+| Thursday | Current phase — new material | 1 timed DSA medium |
+| Friday | **Behavioral** — draft or rehearse one story | Light review, or off |
+| Saturday | **Long session** — 2 to 3 hours, one full mock or case study | Review the week |
+| Sunday | Off, or one light session | Update the tracker, plan the week |
+
+Four observations about this shape:
+
+**Wednesday is a practice day by design.** Mid-week is when the temptation to
+read rather than do is strongest, because reading feels like progress and costs
+nothing. Making one weekday explicitly a doing day — a case study attempted
+before reading the answer, a pattern implemented from scratch, a design spoken
+out loud — is what keeps the phase honest.
+
+**Friday is behavioral.** It is the lightest cognitive load of the week, it fits
+at the end of a work week better than concurrency does, and one story a week for
+six weeks gives you a complete story bank without ever having dedicated a phase
+to it.
+
+**Saturday is the long session, not the whole plan.** Two to three hours, and
+the right use of it is the thing that does not fit on a weekday: a full
+forty-five-minute design case with a timer, a ninety-minute machine coding
+problem, or a mock interview with another person. Do not use it to catch up on
+reading.
+
+**Sunday is off, or nearly.** Take it. Fifteen weeks is long enough that a
+seven-day schedule will break somewhere around week five, and it will break by
+collapsing rather than by tapering. Spend thirty minutes updating
+[the tracker](/roadmap/5-progress-tracking) and deciding what the coming week's
+primary track is, then stop.
+
+## When work eats the week
+
+It will, several times. Two rules that keep this from turning into an abandoned
+plan:
+
+**Protect the primary block, sacrifice the secondary.** If you have forty-five
+minutes, spend them on the phase's primary track, not on a DSA problem. The
+secondary track is maintenance and it tolerates gaps; the primary track is where
+the actual movement is.
+
+**Move the phase boundary, do not restart.** If you lose a week, phase 2 now ends
+in week 10 instead of week 9. Nothing is wrong. The instinct to start the plan
+over from the beginning because it "got messy" is the single most common way
+these plans die.
+
+## Low-energy days
+
+Some evenings you will sit down and have nothing. This is normal, particularly
+in weeks four through eight of a fifteen-week stretch, and the correct response
+is not to force a deep session — you will get forty minutes of low-quality work
+and reinforce the feeling that studying is unpleasant.
+
+Do one of these instead. All of them are genuinely useful, and none require much:
+
+- **Rapid-fire self-test.** Fifteen minutes of
+  [answering CS fundamentals out loud](/cs-fundamentals/5-rapid-fire-self-test-answer-out-loud).
+  Low effort, high value, and it is the kind of thing that otherwise never gets
+  done.
+- **Re-solve a problem you have already solved.** Not a new one. The point is
+  fluency, and the low cognitive load is exactly right for a tired evening.
+- **Read one case study you have already attempted** and diff it against what
+  you produced. Passive, and still useful because you have the contrast.
+- **Rehearse a behavioral story out loud.** Four minutes, from bullets. You can
+  do this while walking, which is sometimes the only way it happens.
+- **Skim a quick reference.** [What seniors say in interviews](/java/quick-reference-what-seniors-say-in-interviews)
+  or [the complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this).
+  Pure review, zero construction.
+- **Clean up your project or your notes.** Fix one thing in the URL shortener,
+  or write up one of the issues you found as a behavioral story outline.
+  Mechanical work that produces a real artifact.
+
+**Twenty minutes of one of these beats a skipped day, and it beats a forced deep
+session.** What it must not become is the default — if three consecutive days are
+low-energy days, the problem is sleep or the schedule, not motivation, and the
+fix is to shorten the plan rather than to push through it.
+
+## The thing to measure
+
+Not hours. Hours are easy to accumulate and tell you very little — an hour of
+reading system design lessons and an hour of attempting a design out loud both
+count as an hour, and only one of them is preparation.
+
+Count sessions where you produced something: a spoken answer, written code, a
+drawn design, a solved problem under time. Aim for four or five such sessions a
+week. [Progress tracking](/roadmap/5-progress-tracking) covers how to tell
+whether they are working.

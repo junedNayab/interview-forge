@@ -1,0 +1,279 @@
+---
+title: "1. The framework — how to drive a 45-minute design interview"
+topic: "system-design"
+order: 201
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 14
+tags: [framework, interview-technique, estimation, scoping]
+format: "mdx"
+summary: "R-E-A-H-D-B with the timings, the phrases, the recovery moves when you're stuck, and the rubric interviewers are actually scoring you against."
+---
+
+## Layer 1 — The mental model
+
+**There is no correct answer, and the interviewer is not looking for one.**
+
+They have 45 minutes and a scorecard. They are trying to answer one question:
+*would I trust this person to own an ambiguous system at my company?* The design
+is just the medium. What they record is whether you scoped the problem, justified
+your choices with numbers, noticed your own bottlenecks, and could go deep when
+pushed.
+
+This reframes everything. A "simpler" design that you drive confidently and
+critique honestly outscores a Kafka-and-Kubernetes diagram you can't defend.
+Which leads to the single most common failure:
+
+<Callout type="pitfall" title="The #1 mistake">
+Jumping straight to boxes. A candidate hears "design Twitter", says "so we'll
+have a microservices architecture with an API gateway, Kafka, Cassandra and a
+CDN" — and has now failed, in minute two, before drawing anything.
+
+Why it fails: complexity with no stated justification reads as pattern-matching
+rather than engineering. The interviewer can't tell whether you understand the
+components or just know their names, and the follow-up ("why Cassandra?") has no
+good answer because you never established a requirement it satisfies.
+
+**Start with a monolith and one database. Add each component only when you have
+just named the bottleneck it solves.** Every addition should sound like: *"At
+12,000 reads per second this database is the constraint, so I'll put a cache in
+front of it — and here's what happens on a cache miss."*
+</Callout>
+
+**R-E-A-H-D-B.** Memorise it. When you're nervous and your mind goes blank, the
+mnemonic is the thing that keeps you moving.
+
+```
+1. REQUIREMENTS   (5 min)  functional, non-functional, and what's OUT of scope
+2. ESTIMATE       (5 min)  DAU, read/write QPS, storage/year, bandwidth
+3. API            (5 min)  the handful of endpoints
+4. HIGH-LEVEL     (10 min) client → LB → service → cache → DB, and the data flow
+5. DEEP DIVE      (15 min) they pick 1–2; this is where your level is decided
+6. BOTTLENECKS    (5 min)  SPOFs, hot spots, what you'd do next
+```
+
+---
+
+## Layer 2 — Running each phase
+
+### 1. Requirements (5 min)
+
+Open by asking questions, not by answering. Three or four good ones, then
+summarise your understanding and **get explicit agreement before moving on.**
+
+The questions that always earn their keep:
+
+- "Who are the users, and how many?"
+- "Which two or three features are we designing? Should I treat the rest as out
+  of scope?"
+- "Is this read-heavy or write-heavy?"
+- "Does this need to be strongly consistent, or is eventual fine for some parts?"
+- "Global or single-region?"
+
+Then split what you heard:
+
+**Functional** — what it *does*, limited to two or three core features. "Post a
+tweet, view a timeline, follow a user." Resist listing ten; you cannot design ten
+in 45 minutes and trying to is a scoping failure.
+
+**Non-functional** — the properties that actually shape the architecture: scale,
+latency target, availability, consistency, durability. These are the constraints
+you'll cite later when justifying every component.
+
+**Out of scope — say it out loud.** "I'm not going to design the ML ranking model
+or the ads system; I'll assume ranking is a service I call." This is not
+dodging. It is the single clearest signal of someone who has shipped under a
+deadline, and it protects your remaining 40 minutes.
+
+Finish the phase by restating: *"So: 100 million daily users, read-heavy at
+roughly 100 to 1, timelines can be a few seconds stale, tweet creation must be
+durable. Sound right?"* If you misheard something, you've just saved the
+interview.
+
+### 2. Estimate (5 min)
+
+Do the arithmetic **out loud and visibly**, and round aggressively. Nobody cares
+whether it's 38 or 42 writes per second; they care whether you can turn "100
+million users" into "this fits on one machine" or "this needs 200 machines."
+
+The pattern:
+
+```
+DAU × actions/user/day ÷ 86,400         = average QPS
+average QPS × 2–3                       = peak QPS
+QPS × bytes/record × 86,400 × 365       = storage/year
+read QPS × response size                = egress bandwidth
+```
+
+Two shortcuts worth memorising: **86,400 seconds/day ≈ 10^5**, and 1 million
+requests/day ≈ 12 QPS. See
+[back-of-the-envelope estimation](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize)
+for the full number set.
+
+**The estimate is worthless unless you draw a conclusion from it.** This is the
+step candidates skip, and it's most of the value:
+
+- "40 writes per second — that's one Postgres instance, so I won't shard."
+- "600 GB per year — a single node holds years of data. Sharding would be
+  premature."
+- "12,000 reads per second against a 2 GB hot set — that fits in memory, so a
+  cache should take almost all of it."
+
+Each of those sentences pre-justifies a later decision. When you then say "no
+sharding," it lands as a judgement rather than an omission.
+
+### 3. API design (5 min)
+
+Five endpoints at most, with the shape of the request and response:
+
+```
+POST /v1/tweets        { text, mediaIds[] }         → 201 { tweetId }
+GET  /v1/feed?cursor=  &limit=20                    → 200 { items[], nextCursor }
+POST /v1/users/{id}/follow                          → 204
+```
+
+This phase is short but disciplines the design: it forces you to decide what the
+client actually needs, which determines your data model. Two details that reliably
+earn credit — **cursor-based pagination** rather than offset (offset drifts and
+gets slower the deeper you go), and **idempotency** for anything that creates or
+charges.
+
+### 4. High-level design (10 min)
+
+Draw the skeleton, narrate the data flow, keep it boring:
+
+```
+Client → CDN → Load Balancer → API service ─→ Cache ─→ Database
+                                    │                      │
+                                    └──→ Queue → Workers ──┘
+```
+
+Then walk one request end to end, out loud: *"A read comes in, hits the load
+balancer, the service checks Redis, on a miss it reads the primary, populates the
+cache, returns. A write goes to the database and publishes an event; the worker
+does the fan-out asynchronously."*
+
+Tracing a concrete request is what makes a diagram a design. And when you reach
+for a component, attach the justification in the same breath — the cache exists
+because of the read QPS you calculated, the queue exists because fan-out is slow
+and the user shouldn't wait for it.
+
+### 5. Deep dive (15 min)
+
+**This is the longest phase and the one that sets your level.** The interviewer
+picks one or two areas and drills. Typically: the data model, sharding strategy,
+the caching layer, a consistency question, or "what's your bottleneck?"
+
+How to handle it well:
+
+- **Offer a menu.** *"I could go deeper on the fan-out strategy, the sharding
+  scheme, or how I'd keep the cache coherent — which is most useful?"* You look
+  organised and you steer toward ground you know.
+- **Give the tradeoff, not the answer.** "Fan-out on write makes reads trivial
+  but is brutal for celebrity accounts; fan-out on read is the reverse. I'd do
+  hybrid: precompute for normal users, read-time merge for the few thousand
+  accounts above a follower threshold." Two options plus a decision plus a reason
+  is the shape of every good answer.
+- **Go one level below the buzzword.** Saying "I'd use a cache" is table stakes.
+  The level shows in: which eviction policy, what TTL, cache-aside or
+  write-through, what happens on a miss stampede, how you handle a hot key.
+- **Numbers over adjectives.** Not "that would be fast" but "that's one memory
+  lookup, so sub-millisecond, versus a cross-region round trip at 80."
+
+<Callout type="tip" title="When you don't know, say so — then reason">
+"I haven't worked with that directly" followed by real reasoning scores *far*
+better than confident invention, because interviewers catch invention almost
+every time and it costs you trust for the rest of the loop.
+
+The recovery move: **reason from properties you do know.** "I haven't used Druid,
+but this is a high-cardinality aggregation over append-only events, so I want a
+columnar store with pre-aggregation rather than a row store — whichever product
+does that." You've demonstrated the thinking that matters, which is the thing
+being scored.
+
+And if you're genuinely stuck, go back to the data: *"Let me re-check the write
+volume, because that decides this."* Returning to the numbers is always a legal
+move and it buys you thinking time.
+</Callout>
+
+### 6. Bottlenecks and tradeoffs (5 min)
+
+Close by critiquing your own design, before they do. Reserve time for this — it
+is disproportionately valuable because **senior engineers are expected to know
+where their design is weak.**
+
+Run the checklist out loud:
+
+- **Single points of failure.** What breaks everything if it dies? For each:
+  replicate, fail over, or degrade gracefully.
+- **Hot spots.** Celebrity users, viral items, a single trending key. Note that
+  sharding does not fix a hot *key*.
+- **What breaks at 10×?** Which component hits its ceiling first, and what
+  replaces it.
+- **What did I trade away?** "I chose eventual consistency for the feed, so a
+  user might briefly not see their own post — I'd fix that specific case by
+  reading their own writes from the primary."
+
+Then state what you'd build first if this were real, and what you'd defer. That
+answers the "would I trust them to own this?" question directly.
+
+---
+
+## Layer 3 — The rubric
+
+Interviewers at product companies are usually scoring roughly these axes. Knowing
+them tells you where to spend effort:
+
+| Signal | What earns it |
+|---|---|
+| **Problem framing** | Clarifying questions, scoping down, stating what's out of scope |
+| **Quantitative reasoning** | Estimates done out loud, and *conclusions drawn from them* |
+| **Technical depth** | One level below the buzzword: eviction policies, quorums, index choice |
+| **Tradeoff reasoning** | Two options, a decision, and the reason — not a single assertion |
+| **Self-critique** | Naming your own SPOFs and hot spots before being asked |
+| **Communication** | Driving the conversation without needing to be prompted |
+
+<Callout type="interview" title="Phrases that do real work">
+- *"Before I design, let me confirm the scope…"* — opens on framing.
+- *"I'll treat X as out of scope."* — earns the scoping signal explicitly.
+- *"That's about 40 writes a second, which means…"* — quantitative, with a
+  conclusion.
+- *"Let me start simple and add complexity where it's needed."* — pre-empts the
+  over-engineering trap.
+- *"Two options here. A gives us X at the cost of Y; I'd pick A because…"* — the
+  tradeoff shape.
+- *"The weak point in what I've drawn is…"* — self-critique, unprompted.
+- *"Is it more useful to go deeper here, or move to the data model?"* — hands
+  them control while showing you're tracking time.
+</Callout>
+
+<Callout type="pitfall" title="Red flags to avoid">
+- **Silence while thinking.** Narrate. An interviewer cannot score thoughts.
+- **Designing ten features.** You'll finish none. Scope to two or three.
+- **Naming technologies as answers.** "Use Cassandra" is not a design; the access
+  pattern that makes Cassandra right is.
+- **Ignoring the numbers you just calculated.** Sharding a 600 GB dataset after
+  estimating 600 GB reads as if you weren't listening to yourself.
+- **Defending a choice past its expiry.** If the interviewer pushes twice,
+  they're usually telling you something. "That's fair — if writes dominate, my
+  choice is wrong, and I'd switch to…" is a strong recovery, not a loss.
+- **Running out of time in the deep dive** with no bottleneck discussion. Watch
+  the clock and reserve the last five minutes.
+</Callout>
+
+### How to practise this
+
+Reading this lesson does approximately nothing on its own. The framework only
+becomes usable under pressure once it's automatic:
+
+1. Pick a case study. Set a **45-minute timer**.
+2. Talk **out loud**, standing at a whiteboard or paper. Silent practice does not
+   transfer — the bottleneck in a real interview is verbalising while thinking.
+3. Record yourself. Play it back and check: did you state scope? Did you draw a
+   conclusion from every estimate? Did you critique your own design?
+4. Then read the lesson's answer and diff it against yours.
+
+Start with [Case 1: the URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+— it's your own project, so you can defend every decision from real experience —
+and grade yourself with
+[how to self-grade your practice](/system-design/how-to-self-grade-your-practice).

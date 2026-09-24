@@ -1,0 +1,305 @@
+---
+title: "1. Networking"
+topic: "cs-fundamentals"
+order: 801
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [networking, tcp, http, tls, dns, latency]
+format: "mdx"
+summary: "The google.com question answered at the depth interviewers probe — TCP handshakes and congestion control, why HTTP/2 didn't fix head-of-line blocking, what TLS actually proves, and the connection-pool bugs all of this explains."
+---
+
+## Layer 1 — The mental model
+
+Backend interviewers don't ask networking questions to test your networking.
+They ask because **almost every production incident you'll debug is a
+networking incident wearing a disguise**: a timeout, an exhausted connection
+pool, a retry storm, a mysterious 502.
+
+So the useful mental model isn't the seven-layer OSI diagram. It's this:
+
+> Every network call is a **request to a machine that might not answer**, over a
+> link with a **latency floor you cannot beat**, through a **connection that is
+> expensive to create** and will be **closed by something in the middle when you
+> aren't looking**.
+
+Four facts, and each one generates a class of production bug:
+
+| Fact | The bug it causes |
+|---|---|
+| Might not answer | You need timeouts. The default is usually infinite. |
+| Latency floor | Chatty APIs are slow no matter how fast your code is. |
+| Connections are expensive | Pool them — and then exhaust the pool. |
+| Something closes them | Stale connections in the pool, dropped WebSockets. |
+
+The numbers that set the floor, worth memorising because they anchor every
+estimate:
+
+```
+Same datacenter round trip       ~ 0.5 ms
+Same region                      ~ 1–2 ms
+Cross-country (NY ↔ SF)          ~ 60 ms
+Cross-continent (NY ↔ London)    ~ 80 ms
+Round the world                  ~ 250 ms
+```
+
+That's the speed of light in fibre plus routing, and no amount of engineering
+reduces it. It's why a design that makes five sequential cross-region calls has
+a 400 ms floor before executing a single line of your code — and why "can these
+calls be parallel?" is a real design question.
+
+---
+
+## Layer 2 — The mechanism
+
+### "What happens when you type google.com and hit Enter?"
+
+The classic. Almost everyone can list the steps; the signal is in the details
+at each one. Narrate it, and be ready to be stopped anywhere and asked "why?"
+
+**1. DNS resolution.** Browser cache → OS cache → your configured resolver
+(often your ISP's or 8.8.8.8) → root servers → `.com` TLD servers →
+authoritative nameserver → an IP. Over UDP port 53, because the query fits in
+one packet and a retry is cheaper than a handshake. Every layer caches by TTL,
+which is why **a DNS change doesn't take effect immediately** and why DNS is a
+poor failover mechanism.
+
+**2. TCP three-way handshake** to that IP on port 443.
+
+```
+Client ── SYN,  seq=x ────────────► Server
+Client ◄─ SYN-ACK, seq=y, ack=x+1 ─ Server
+Client ── ACK,  ack=y+1 ──────────► Server     (1 round trip before any data)
+```
+
+Three messages, but only **one full round trip** of delay before the client can
+send. The purpose is to agree on starting sequence numbers and confirm both
+directions work.
+
+**3. TLS handshake.** Historically two more round trips; **TLS 1.3 cut it to
+one**, and to zero for resumed sessions (0-RTT). So an HTTPS connection costs
+roughly 2 round trips before the first byte of your request — ~160 ms
+transatlantic, purely in setup. **This is the entire argument for connection
+reuse.**
+
+**4. HTTP request** — `GET / HTTP/2`, headers, cookies.
+
+**5. Server side** — load balancer picks a backend, app server runs, maybe a
+cache or database call, response built.
+
+**6. Response** — HTML returns; the browser parses and fetches CSS, JS and
+images, usually from a CDN closer to the user.
+
+**7. Render** — DOM plus CSSOM into a render tree, layout, paint.
+
+The best thing you can add unprompted: **"the interesting part is that steps 1–3
+are pure latency — roughly three round trips before the server sees a single
+byte of my request. That's why keep-alive, TLS session resumption and CDNs
+matter more than server speed for the first byte."**
+
+### TCP, beyond the handshake
+
+**Reliability** comes from sequence numbers and acknowledgements: every byte is
+numbered, the receiver acks what it got, and unacked data is retransmitted after
+a timeout. Out-of-order packets are buffered and reassembled. This is why TCP
+delivers an ordered byte stream, and also why it can stall.
+
+**Flow control** stops a fast sender overwhelming a slow receiver: the receiver
+advertises a window ("I have room for N more bytes") and the sender respects it.
+
+**Congestion control** stops senders overwhelming the *network*, and it's the
+part worth knowing because it explains a real performance effect. A new
+connection starts in **slow start** with a small congestion window (~10 packets,
+about 14 KB) and doubles it each round trip until it sees loss.
+
+The consequence: **a brand-new TCP connection is slow for its first few round
+trips**, regardless of your bandwidth. A 200 KB response on a fresh connection
+needs several round trips just to ramp up. A warm, pooled connection has already
+paid that cost — which is the second reason connection reuse matters, after the
+handshake.
+
+<Callout type="pitfall" title="TIME_WAIT, and the server that can't open connections">
+After closing, a TCP socket sits in `TIME_WAIT` for up to 2× the maximum segment
+lifetime (typically 60 seconds on Linux) so that delayed packets from the old
+connection can't be mistaken for part of a new one on the same port pair.
+
+The side effect: a service that opens and closes many short-lived connections
+accumulates thousands of sockets in `TIME_WAIT` and can exhaust its ephemeral
+port range (~28,000 ports by default), at which point **it cannot open new
+outbound connections at all** — while showing low CPU and low memory. It looks
+like the network broke.
+
+The fix is almost always **connection pooling with keep-alive**, not tuning
+`net.ipv4.tcp_tw_reuse`. This is a genuinely common production incident and
+knowing it by name is a strong signal.
+</Callout>
+
+### TCP vs UDP
+
+| | TCP | UDP |
+|---|---|---|
+| Connection | Handshake first | Fire and forget |
+| Reliability | Ordered, retransmitted | May drop, duplicate, reorder |
+| Overhead | 20-byte header, acks, state | 8-byte header, no state |
+| Congestion control | Yes | No (you build it) |
+| Used by | HTTP/1.1 and /2, databases, SSH | DNS, video, gaming, QUIC |
+
+The nuance worth having: **UDP isn't "unreliable," it's "unopinionated."** It
+gives you a raw datagram and lets you decide what to do about loss. For a video
+call, retransmitting a frame from 300 ms ago is worse than dropping it — TCP's
+guarantee is actively harmful. QUIC takes this further, rebuilding reliability
+*on top of* UDP so it can make different choices than TCP does.
+
+### HTTP/1.1 vs HTTP/2 vs HTTP/3
+
+**HTTP/1.1** sends one request at a time per connection and waits for the
+response. Browsers worked around it by opening 6 connections per host. That's
+**application-layer head-of-line blocking**: one slow response blocks everything
+queued behind it on that connection.
+
+**HTTP/2** multiplexes many streams over one TCP connection, with binary framing
+and HPACK header compression. It fixed the application-layer problem — and then
+hit a deeper one.
+
+<Callout type="note" title="Why HTTP/2 still has head-of-line blocking">
+HTTP/2 puts many independent streams on **one TCP connection**. But TCP
+guarantees an ordered byte stream, so if a single packet is lost, TCP holds back
+*everything* that arrived after it until the retransmission lands — including
+bytes belonging to completely unrelated streams.
+
+**HTTP/2 moved head-of-line blocking from the application layer down to the
+transport layer**, where it can't fix it. And under packet loss HTTP/2 can be
+*worse* than HTTP/1.1, because HTTP/1.1's six separate connections meant a loss
+only stalled one of them.
+
+That's the whole reason **HTTP/3 runs over QUIC on UDP**: QUIC implements
+per-stream reliability, so a lost packet stalls only its own stream. It also
+folds the TLS handshake into the transport handshake (1-RTT setup, 0-RTT on
+resumption) and supports connection migration, so switching from Wi-Fi to
+cellular doesn't drop the connection.
+
+Being able to explain *why* HTTP/3 abandoned TCP is a much better answer than
+listing the three versions.
+</Callout>
+
+### Idempotency and status codes
+
+**Idempotent** means calling it N times has the same effect as calling it once.
+This is not trivia — it's the property that decides **whether a retry is safe**,
+which makes it the link between this lesson and every reliability pattern.
+
+| Method | Safe | Idempotent | Note |
+|---|---|---|---|
+| `GET` | Yes | Yes | Never change state in a GET |
+| `PUT` | No | **Yes** | Replaces with the same body |
+| `DELETE` | No | **Yes** | Second call is a no-op (404 or 204) |
+| `PATCH` | No | **No** in general | "add 5" isn't idempotent |
+| `POST` | No | **No** | Use an idempotency key to make it so |
+
+The codes you must place instantly: `201 Created` with a `Location` header;
+`204 No Content` for a successful delete; `301` permanent vs `302`/`307`
+temporary redirect (**your url-shortener's choice — 301 is cached by the
+browser, so you stop seeing the click**); `401` means *not authenticated* while
+`403` means *authenticated but not allowed*; `409 Conflict` for a duplicate;
+`429 Too Many Requests`, which should carry `Retry-After`; and the `502` versus
+`503` versus `504` distinction — bad upstream response, no capacity, upstream
+timeout — which tells you where to look during an incident.
+
+### TLS: what it actually proves
+
+Three properties, and candidates usually name only the first: **confidentiality**
+(nobody can read it), **integrity** (nobody can modify it undetected), and
+**authentication** (you're talking to who you think you are).
+
+The mechanism in one paragraph: the server presents a certificate binding its
+domain to a public key, signed by a certificate authority your OS already
+trusts. The client verifies that chain, then the two sides use asymmetric
+cryptography to agree on a **symmetric session key** — because asymmetric crypto
+is far too slow for bulk data. Everything after the handshake uses that
+symmetric key.
+
+Two follow-ups worth having ready. **Why not asymmetric for everything?** Orders
+of magnitude slower. **What does the certificate actually prove?** Only that
+whoever controls the private key controls that domain — it says nothing about
+whether they're trustworthy, which is why "it has a padlock" isn't a security
+claim. And **mTLS** simply adds a client certificate so the server authenticates
+the client too; it's the common answer for service-to-service auth inside a
+cluster.
+
+### REST vs gRPC vs GraphQL
+
+| | REST | gRPC | GraphQL |
+|---|---|---|---|
+| Format | JSON over HTTP | Protobuf over HTTP/2 | JSON, one endpoint |
+| Contract | OpenAPI, optional | `.proto`, enforced | Schema, enforced |
+| Streaming | No (SSE/WS separately) | **Bidirectional** | Subscriptions |
+| Best for | Public APIs, browsers | **Service-to-service** | Varied clients, over-fetching |
+| Cost | Verbose, chatty | Not browser-native, binary | Query complexity, caching is hard |
+
+The decision rule: **gRPC internally, REST at the edge.** gRPC's binary encoding
+and multiplexing are a real win between services you control; REST wins where
+you need browser support, caching by URL, and a client you don't own.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What happens when you type google.com?"** Narrate all seven steps, then
+   add that steps 1–3 are ~3 round trips of pure latency before the server sees
+   your request.
+2. **"Why is the first request to a server slow?"** DNS, TCP handshake, TLS
+   handshake, plus TCP slow start ramping the congestion window.
+3. **"Why reuse connections?"** You skip ~2 round trips of handshake *and*
+   inherit an already-widened congestion window.
+4. **"TCP or UDP, and why?"** Whether in-order guaranteed delivery helps or
+   hurts. For live video, retransmitting a stale frame is worse than dropping
+   it.
+5. **"What does the TCP handshake accomplish?"** Agreeing initial sequence
+   numbers and confirming both directions work — one round trip of cost.
+6. **"What's TIME_WAIT and why should I care?"** Closed sockets linger ~60 s; a
+   service making many short connections exhausts ephemeral ports and can't
+   connect at all. Pool connections.
+7. **"Did HTTP/2 fix head-of-line blocking?"** Only at the application layer. It
+   moved the problem into TCP, where one lost packet stalls every stream.
+8. **"Why does HTTP/3 use UDP?"** So QUIC can do per-stream reliability, merge
+   the TLS handshake into transport setup, and survive a network change.
+9. **"Which methods are idempotent, and why does it matter?"** GET, PUT, DELETE
+   are; POST and generally PATCH are not. It decides whether a retry is safe.
+10. **"401 or 403?"** 401 = I don't know who you are. 403 = I know, and no.
+11. **"502 vs 503 vs 504?"** Bad upstream response, no capacity, upstream
+    timeout. Different places to look.
+12. **"What does TLS give you?"** Confidentiality, integrity *and*
+    authentication. Asymmetric to agree a key, symmetric for the data.
+13. **"301 or 302 for a URL shortener?"** 302 if you want to keep counting
+    clicks; a cached 301 means the browser stops asking you.
+14. **"gRPC or REST?"** gRPC between services, REST at the edge.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **No timeout on an HTTP client.** The default is often infinite; one slow
+  dependency parks every thread you have.
+- **A new connection per request**, paying handshakes forever and filling
+  `TIME_WAIT`.
+- **Retrying non-idempotent requests** without an idempotency key, so a timeout
+  becomes a duplicate order.
+- **Treating DNS as failover.** TTLs are cached far past what you set.
+- **Sequential cross-region calls.** Five in a row is a 400 ms floor.
+- **Assuming HTTP/2 is strictly better.** Under packet loss it can be worse than
+  HTTP/1.1.
+- **Stale pooled connections** — the far end closed it and you find out by
+  sending a request into a dead socket. Validate on borrow.
+</Callout>
+
+### Where this connects
+
+- [4. Load balancing](/system-design/4-load-balancing) — L4 and L7 are these
+  layers, and TLS termination is this handshake.
+- [Case 4: chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  — the WebSocket upgrade and why idle timeouts kill it.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — timeouts, retries and idempotency, which is where this lesson pays off.
+- [4. Security](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements)
+  — what TLS protects and what it doesn't.
+- [2. Operating systems and concurrency](/cs-fundamentals/2-operating-systems-concurrency)
+  — what a socket costs the OS, and why blocking I/O caps your throughput.

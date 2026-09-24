@@ -1,0 +1,152 @@
+---
+title: "Overview"
+topic: "dsa"
+order: 100
+difficulty: "medium"
+estimatedMinutes: 9
+tags: [overview, dsa, patterns, reading-order, practice-method]
+format: "mdx"
+summary: "Why the coding round scores narration and recognition rather than clever solutions, the order to work through the 15 patterns plus the meta-lessons, and the timed self-check that says you are sharp again."
+---
+
+## What this track is assessed on
+
+People assume the coding round is a pass-or-fail test of whether the solution works. It is
+not, and believing it is produces behaviour that costs the round: going silent for eight
+minutes, coding before there is a plan, treating a hint as an accusation.
+
+**What is scored is how you get to the solution; the solution is evidence rather than the
+thing itself.** Interviewers record specific signals: did the candidate clarify the
+constraints, state a brute-force approach before optimising, explain the trade-off, write
+code that compiles and reads cleanly, test an edge case unprompted, and state the complexity
+correctly. Someone who reaches the optimal answer in silence and cannot explain why it works
+scores below someone who narrates a clean path to a slower solution and then spots the
+improvement themselves.
+
+The second thing assessed, and the reason this track is organised around patterns rather
+than problems, is recognition speed. Roughly 90 percent of questions are variations on about
+fifteen shapes, and nobody derives a monotonic stack from first principles under a 30-minute
+timer. A strong candidate reads "next greater element" and recognises the shape in twenty
+seconds, which buys the rest of the time for the parts that are actually scored.
+
+So the goal is not to teach you algorithms you do not know. It is to make the recognition
+automatic and the narration fluent.
+
+## Where you stand, and what to prioritise
+
+You have solved several hundred problems, and DSA is one of your two strong tracks alongside
+SQL. **This is a refresh, not a grind, and treating it like a from-scratch course is the main
+way to waste time here.**
+
+Your bottleneck is retrieval latency and verbalisation, not knowledge. You have written a BFS
+before; the question is whether you can write it from memory in four minutes while explaining
+it, without pausing to remember whether the visited check goes before or after the enqueue.
+So structure the work around two things.
+
+**Timed reps, not reading.** Two or three problems per pattern with a 25-to-35 minute timer
+is enough to reload a pattern you already know. Read the lesson, close it, solve.
+
+**Talking while you code.** This is genuinely new for most self-taught practice, because
+nobody narrates alone — and it is the part being graded. It feels absurd for the first few
+sessions and then becomes automatic, which is why it has to be practised rather than planned.
+
+The patterns most likely to feel rusty are dynamic programming, backtracking and tries, since
+they are least used in backend work; graphs and heaps come back fastest. Flag whatever feels
+slow and redo it after three days and again after seven.
+
+## The order to work through it
+
+The two meta-lessons come first. They are about the round rather than about
+algorithms, and they change how every subsequent practice rep should be run.
+
+1. [How to approach ANY coding problem (say this out loud in the interview)](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+   — first, because it defines the script you will use on every problem after
+   this. Without it, your practice reps train the wrong habit.
+2. [Complexity cheat sheet (memorize this)](/dsa/complexity-cheat-sheet-memorize-this)
+   — short, and worth having in recall before you start, since you will state a
+   complexity at the end of every single problem.
+
+Then the fifteen patterns, in order. The sequence is deliberate: each one reuses
+machinery from an earlier one, so working through it in order means you are always
+adding one idea rather than several.
+
+3. [Pattern 1 — Arrays & Hashing](/dsa/pattern-1-arrays-hashing) — the trade you
+   make in every other pattern, memory for time.
+4. [Pattern 2 — Two Pointers](/dsa/pattern-2-two-pointers) — the first structured
+   way to avoid a nested loop.
+5. [Pattern 3 — Sliding Window](/dsa/pattern-3-sliding-window) — two pointers with
+   state carried between steps.
+6. [Pattern 4 — Binary Search](/dsa/pattern-4-binary-search) — including search on
+   the answer space, which is the version that actually gets asked.
+7. [Pattern 5 — Stack](/dsa/pattern-5-stack) — monotonic stacks, the highest
+   recognition-value shape in the list.
+8. [Pattern 6 — Linked List](/dsa/pattern-6-linked-list) — pointer manipulation,
+   and the foundation for the LRU cache question in the
+   [Java track](/java/practice-lru-cache).
+9. [Pattern 7 — Trees (DFS & BFS)](/dsa/pattern-7-trees-dfs-bfs) — recursion
+   discipline, and the prerequisite for graphs.
+10. [Pattern 8 — Tries (Prefix Trees)](/dsa/pattern-8-tries-prefix-trees) — a tree
+    with a different node shape; usually the rustiest of the tree patterns.
+11. [Pattern 9 — Heaps / Priority Queue](/dsa/pattern-9-heaps-priority-queue) —
+    top-K and streaming problems, and directly useful in design rounds.
+12. [Pattern 10 — Backtracking](/dsa/pattern-10-backtracking) — after trees,
+    because it is a DFS over a decision space rather than over nodes.
+13. [Pattern 11 — Graphs (BFS/DFS/Union-Find)](/dsa/pattern-11-graphs-bfs-dfs-union-find)
+    — the largest single lesson here, and the one with the widest question
+    surface.
+14. [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) —
+    after backtracking, because memoised recursion is backtracking plus a cache,
+    and framing it that way is what makes DP tractable rather than mysterious.
+15. [Pattern 13 — Greedy](/dsa/pattern-13-greedy) — after DP, so that you can
+    articulate why a greedy choice is safe, which is the real question being
+    asked.
+16. [Pattern 14 — Intervals](/dsa/pattern-14-intervals) — sorting plus a sweep;
+    short, and very commonly asked.
+17. [Pattern 15 — Bit Manipulation & Math](/dsa/pattern-15-bit-manipulation-math)
+    — last, because it is the least transferable and mostly appears as a single
+    trick question.
+
+Then the two lessons that turn all of that into a schedule and a performance.
+
+18. [6-week DSA sprint (pairs with the Master Roadmap, Phase 1-2)](/dsa/6-week-dsa-sprint-pairs-with-the-master-roadmap-phase-1-2)
+    — the week-by-week plan; use it to pace the patterns above rather than doing
+    them all in one push.
+19. [Coding-round survival tips](/dsa/coding-round-survival-tips) — read a few
+    days before an actual interview: what to do when you are stuck, how to take a
+    hint well, and how to manage the clock.
+
+Solve everything in Java. It is your strongest language and it is what you will
+use in the interview, and the muscle memory for `Deque`, `PriorityQueue` and
+`Map.computeIfAbsent` is worth building deliberately.
+
+## What "ready" looks like
+
+Pick a medium problem you have not seen, set a 30-minute timer, record yourself,
+and check all of these were true.
+
+- Within two minutes you restated the problem, asked about input constraints, and
+  confirmed an edge case.
+- You stated a brute-force approach and its complexity before writing code.
+- You said which pattern you recognised, and why, out loud.
+- You narrated continuously, with no silence longer than about fifteen seconds.
+- The code compiled on the first or second attempt.
+- You traced an example by hand unprompted and checked an empty or single-element
+  input.
+- You stated time and space complexity correctly, including the recursion stack.
+
+The knowledge bar underneath: you can write BFS, DFS, binary search on an answer
+space, a monotonic stack template, union-find with path compression, and a
+one-dimensional DP from memory in under five minutes each, without looking anything
+up. Finishing the starred problems in each pattern, roughly 75, makes you
+interview-ready; all 150 makes you comfortable rather than merely prepared.
+
+## How long this track takes
+
+About 55,000 words across the fifteen patterns, but the reading is not where the time goes.
+Budget six hours on the patterns and between 40 and 60 hours of timed problem solving, which
+is what the six-week sprint is sized for.
+
+Because this is your strong track, the correct instinct is to protect time for
+[system design](/system-design) rather than over-invest here. Keep DSA at two or three
+problems every weekday as maintenance and spend weekend blocks on design. Sharpness here
+decays slowly once reloaded; design skill has to be built from zero.

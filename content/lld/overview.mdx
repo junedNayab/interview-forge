@@ -1,0 +1,100 @@
+---
+title: "Overview"
+topic: "lld"
+order: 400
+difficulty: "easy"
+estimatedMinutes: 7
+tags: [lld, machine-coding, ood, orientation]
+format: "mdx"
+summary: "What an LLD or machine-coding round actually tests, how it differs by company, and the order to work through this track as a beginner."
+---
+
+## What this round actually is
+
+At most Indian product companies — Flipkart, Uber, Swiggy, Razorpay, PhonePe,
+Atlassian, Zeta, Navi, Groww — an L4 or L5 loop contains a round that is neither
+DSA nor distributed-systems design. You get a paragraph of prose describing a
+real-world thing ("design a parking lot", "build a splitwise clone", "model a
+vending machine") and you have to turn it into classes.
+
+The names differ and the format differs with them:
+
+| Round name | Typical length | What you produce |
+|---|---|---|
+| **Machine coding** | 90–180 min, often take-home-style but supervised | A compiling, runnable program with a `main` driver |
+| **LLD / OOD** | 45–60 min, whiteboard or shared doc | A class diagram plus the two or three most important classes written out |
+| **Low-level extension of HLD** | last 15 min of a system design round | "Now write the `RateLimiter` interface and one implementation" |
+
+They are the same skill sampled at different resolutions. This track prepares
+you for all three, and the hardest one — machine coding — subsumes the others.
+
+## What is being assessed
+
+Two things, and it is worth being blunt about them because beginners usually
+optimise for the wrong one.
+
+**First: can you turn ambiguous prose into classes with clear
+responsibilities?** The problem statement is deliberately underspecified. An
+interviewer wants to see you ask what varies, decide what is in scope, and then
+produce a set of classes where each one has an obvious job you can state in a
+sentence. The failure mode is a single `ParkingLotManager` class with fifteen
+methods and a `switch` in the middle of each one.
+
+**Second: can you write code that compiles, under time pressure?** This is the
+part DSA practice does not prepare you for. DSA is one function; LLD is fifteen
+files that have to agree with each other. If you have never built a
+fifteen-class program from a blank editor with a clock running, the first time
+you try it will not go well — which is exactly why this track ends in timed
+practice rather than more reading.
+
+Notice what is *not* being assessed: algorithmic cleverness, framework
+knowledge, or the number of design patterns you can name. **A candidate who
+builds a simple, working, extensible design and can explain why each class
+exists beats a candidate who sprinkles six patterns over a half-finished
+program, every time.**
+
+## How to use this track
+
+Work through it in order. Each lesson assumes the previous one.
+
+1. [HLD vs LLD — get this clear first](/lld/hld-vs-lld-get-this-clear-first) —
+   ten minutes that stop you from answering the wrong question.
+2. [Part 1 — the four OOP pillars, applied](/lld/part-1-the-foundation-oop-the-4-pillars-applied)
+   — encapsulation, abstraction, inheritance and polymorphism as design tools
+   rather than definitions, plus the dispatch rules that get asked as trick
+   questions.
+3. [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+   — the longest and most important lesson in the track. Every design decision
+   you make in a round is downstream of this.
+4. [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) —
+   organised by the problem each one solves, with the honest warning about
+   naming patterns you cannot justify.
+5. [Part 4 — how to drive the round](/lld/part-4-how-to-drive-an-lld-interview-the-method)
+   — a repeatable method with time boxes and the sentences to say out loud.
+6. [Part 5 — the parking lot, worked end to end](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+   — the full example, including the concurrency follow-up that separates
+   candidates and the bad design shown alongside the good one.
+7. [Part 6 — practice problems](/lld/part-6-practice-problems-beginner-advanced)
+   — fourteen classic problems with the decision each is really testing.
+8. [Part 7 — a four-week plan](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build)
+   — what to build each week, and how to check you are ready.
+9. [Part 8 — machine-coding survival tips](/lld/part-8-machine-coding-round-survival-tips)
+   — the tactics that matter when there is a clock and an empty editor.
+
+<Callout type="tip" title="The one habit that makes the difference">
+LLD is learned by writing code and then changing it. Reading about the Strategy
+pattern teaches you its shape; implementing a parking lot, then being told
+"now add electric-vehicle charging spots", teaches you *why* the shape exists —
+because you either touch one new class or you touch six existing ones, and the
+difference is immediately physical rather than theoretical.
+
+Budget at least two thirds of your preparation time for typing.
+</Callout>
+
+If you also have a system design round in the loop, run it in parallel: start
+with [the 45-minute design framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview).
+And since everything here is Java, keep
+[OOP and design principles](/java/5-oop-design-principles) and
+[Java concurrency](/java/3-concurrency-senior-must-have) within reach — the
+concurrency follow-up shows up in almost every LLD round that involves a shared
+resource.

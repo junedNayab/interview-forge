@@ -1,0 +1,464 @@
+---
+title: "5. OOP & Design Principles"
+topic: "java"
+order: 505
+group: "Core Java"
+difficulty: "hard"
+estimatedMinutes: 26
+tags: [solid, liskov, composition, immutability, equals-hashcode, dispatch, records]
+format: "mdx"
+summary: "SOLID read as the cost of change, why Liskov is the only principle with real teeth, the inheritance failure HashSet.addAll causes, the five rules for an immutable class, why a correct equals is impossible for an extensible class, and why overloading resolves at compile time."
+---
+
+## Layer 1 — The mental model
+
+Everyone can recite SOLID. Very few can say what it is *for*, and that gap is
+exactly what a design interview is probing. The unifying idea:
+
+> Every one of these principles is a bet about **which change is coming next**.
+> A design isn't "good" in the abstract — it is good when the change that
+> actually arrives touches one class instead of nine. **Design principles are
+> a way of pre-paying for a change you expect, and every one of them costs
+> something up front.**
+
+That framing does two things for you in an interview. It stops you reciting
+definitions, and it lets you be honest about the trade: applying a principle to
+a change that never arrives is over-engineering, and saying so out loud is a
+senior signal.
+
+| Principle | The change it makes cheap | What it costs you now |
+|---|---|---|
+| Single Responsibility | A change to one *policy* touches one class | More classes, more wiring |
+| Open/Closed | Adding a *variant* adds a file, edits none | An abstraction you must get right |
+| Liskov | Swapping an implementation doesn't break callers | Discipline about contracts, not just signatures |
+| Interface Segregation | A client isn't recompiled or broken by a method it never calls | More, smaller interfaces |
+| Dependency Inversion | Swapping infrastructure doesn't touch business logic | An interface plus a composition root |
+
+Two of these are usually misread. **SRP is about the reason to change, not the
+number of lines**, and **LSP is the only one of the five describing a property
+the compiler cannot check for you** — which is why it is the one interviews dig
+into.
+
+The four pillars sit underneath all of this: encapsulation hides *how* so it can
+change, abstraction names *what* so callers can depend on it, inheritance and
+polymorphism let one call site serve many implementations. The rest of this
+lesson is the part that gets scored.
+
+---
+
+## Layer 2 — The mechanism
+
+### SRP: "one reason to change" is not "does one thing"
+
+The common reading — "a class should do one thing" — is useless, because "one
+thing" has no fixed granularity. Uncle Bob's later restatement is the one to
+quote: **a module should have one, and only one, reason to change**, where a
+reason to change means *one group of stakeholders who can ask for it*.
+
+That is a sharper test. A `Report` class that both computes a payroll total and
+renders it as HTML has two reasons to change: finance changes the calculation,
+design changes the layout. Two stakeholders, two classes. Meanwhile a `Money`
+class with twenty arithmetic methods has one reason to change and is perfectly
+fine, even though by the "does one thing" reading it does twenty.
+
+```java
+// BROKEN as a design: two stakeholders own one file
+class Invoice {
+    BigDecimal total() { /* finance rules */ }
+    String toHtml()    { /* presentation rules */ }
+    void save()        { /* persistence rules */ }
+}
+
+// FIXED: split by who asks for the change
+record Invoice(List<LineItem> items) { BigDecimal total() { /* … */ } }
+class InvoiceHtmlRenderer { String render(Invoice i) { /* … */ } }
+class InvoiceRepository   { void save(Invoice i)    { /* … */ } }
+```
+
+### OCP: closed to modification because you extend through a type
+
+"Open for extension, closed for modification" is achieved by one concrete
+mechanism in Java: **a call site that talks to an interface, plus a new
+implementation of it**. The strategy pattern is OCP with a name.
+
+```java
+interface DiscountPolicy { BigDecimal apply(Order order); }
+
+class SeasonalDiscount implements DiscountPolicy { /* … */ }
+class LoyaltyDiscount  implements DiscountPolicy { /* … */ }
+
+class Checkout {
+    private final DiscountPolicy policy;              // closed to modification
+    Checkout(DiscountPolicy policy) { this.policy = policy; }
+    BigDecimal price(Order o) { return policy.apply(o); }
+}
+```
+
+The honest caveat, worth volunteering: OCP is only satisfied for the axis of
+change you anticipated. Adding a discount type is free; changing the *shape* of
+`apply` breaks every implementation at once. Choosing the axis is the design
+work — the pattern is just bookkeeping.
+
+### LSP: the one with real teeth
+
+Liskov substitution says a program using a base type must keep working when you
+hand it a subtype. The compiler enforces the *signature*; LSP is about the
+*contract*, and the contract is invisible to `javac`. That is why the violations
+compile cleanly and fail in production.
+
+The classic demonstration is Rectangle and Square. Mathematically a square is a
+rectangle, so inheritance looks obvious.
+
+```java
+class Rectangle {
+    protected int w, h;
+    void setWidth(int w)  { this.w = w; }
+    void setHeight(int h) { this.h = h; }
+    int area() { return w * h; }
+}
+
+// BROKEN: compiles, type-checks, violates the contract
+class Square extends Rectangle {
+    @Override void setWidth(int w)  { this.w = w; this.h = w; }
+    @Override void setHeight(int h) { this.h = h; this.w = h; }
+}
+
+void resize(Rectangle r) {
+    r.setWidth(5);
+    r.setHeight(4);
+    assert r.area() == 20;   // holds for Rectangle, fails (16) for Square
+}
+```
+
+Note what actually went wrong. `Square` did not break a signature; it broke an
+**invariant that `Rectangle` implicitly promised** — that width and height vary
+independently. The lesson generalises: *is-a* in English is not *is-a* in a type
+system. The type-system version is "supports every guarantee the supertype
+made."
+
+Those guarantees come in three kinds, and the rules are worth stating precisely
+because interviewers ask for them almost verbatim:
+
+- **Preconditions may be weakened, never strengthened.** A subtype must accept
+  at least everything the supertype accepted. If `save(String name)` accepted
+  any non-null string, an override that additionally rejects names longer than
+  ten characters breaks callers who were writing correct code.
+- **Postconditions may be strengthened, never weakened.** A subtype must
+  promise at least as much. If `find()` promised a non-null result, an override
+  returning `null` breaks every caller.
+- **Invariants must be preserved.** Anything true of the supertype for its whole
+  lifetime must stay true — that is the rule `Square` violated.
+
+There is a fourth, less-quoted rule that scores well: **the history constraint**.
+A subtype must not introduce mutability the supertype ruled out. Subclassing an
+immutable `Point` with a `MutablePoint` that adds setters violates LSP even
+though every existing method behaves identically, because callers were entitled
+to assume a `Point` never changes.
+
+Java's own type system enforces two of these mechanically and leaves the rest to
+you. An override may **widen** its access modifier and may **narrow** its return
+type (covariant returns) and may throw **fewer or narrower** checked exceptions
+— all of these are precondition-weakening and postcondition-strengthening made
+syntactic. Everything semantic is on you.
+
+The practical fix when you hit an LSP problem is almost always the same: stop
+inheriting. Model `Shape` as an interface with `area()`, make `Rectangle` and
+`Square` two independent implementations, and the impossible substitution
+becomes impossible to write.
+
+### ISP: fat interfaces force lies
+
+An interface that forces implementers to supply methods they cannot honour makes
+them lie — usually by throwing `UnsupportedOperationException`. That is an LSP
+violation manufactured by an ISP violation, which is why the two principles keep
+appearing together. The canonical example is in the JDK itself: `Arrays.asList`
+returns a `List` whose `add` throws, because the interface demands a mutation
+method the implementation cannot provide.
+
+### DIP, dependency injection and IoC are three different things
+
+People use these interchangeably. Separating them cleanly is a cheap way to
+sound precise.
+
+- **Dependency inversion** is a *design principle about the direction of source
+  dependencies*. High-level policy should not depend on low-level detail; both
+  should depend on an abstraction — and crucially, **the abstraction belongs to
+  the high-level module**. `OrderService` declares `interface OrderRepository`;
+  the JDBC implementation in the infrastructure layer depends inward on it. The
+  arrow that used to point from policy to detail now points the other way.
+- **Inversion of control** is a *broader architectural style*: your code no
+  longer calls the framework, the framework calls your code. A servlet
+  container, a test runner and a UI event loop are all IoC, with no interfaces
+  or injection involved.
+- **Dependency injection** is a *mechanism*: something else supplies your
+  collaborators instead of you constructing them. It is one way to implement
+  IoC, and it makes DIP practical, but it is neither.
+
+You can have DI without DIP — injecting a concrete `MySqlOrderRepository`
+inverts nothing — and DIP without any framework, since passing an interface to a
+constructor by hand is the whole idea. Spring's container is covered in
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies).
+
+### Composition over inheritance, and the bug that proves it
+
+"Favour composition" is repeated so often it has stopped meaning anything. There
+are two concrete reasons behind it.
+
+**Inheritance is fixed at compile time.** A `Car extends Vehicle` cannot become a
+`Boat` at runtime, whereas a `Car` holding a `PropulsionStrategy` can swap it per
+instance. Behaviour you compose is behaviour you can vary.
+
+**Inheritance breaks encapsulation.** This is the real argument, and the classic
+demonstration is a counting set:
+
+```java
+// BROKEN: reports 6 after adding 3 elements
+class CountingSet<E> extends HashSet<E> {
+    private int addCount = 0;
+
+    @Override public boolean add(E e) {
+        addCount++;
+        return super.add(e);
+    }
+
+    @Override public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return super.addAll(c);
+    }
+
+    public int getAddCount() { return addCount; }
+}
+
+var s = new CountingSet<String>();
+s.addAll(List.of("a", "b", "c"));
+s.getAddCount();   // 6, not 3
+```
+
+The reason is that `HashSet.addAll` is implemented by looping and calling
+`this.add`, which dynamic dispatch routes back into the override, so the
+subclass counted three in `addAll` and three more in `add`. **Nothing in
+`HashSet`'s public documentation told you that `addAll` calls `add` — it is an
+implementation detail, and the subclass silently depends on it.** A later JDK
+release could change it and break you without changing a signature. That is what
+"inheritance breaks encapsulation" means concretely: a subclass is coupled to
+its superclass's *implementation*, not just its interface.
+
+The fix is a forwarding wrapper, which depends only on the published interface:
+
+```java
+// FIXED: composition — no dependency on how Set implements anything
+class CountingSet<E> implements Set<E> {
+    private final Set<E> delegate;
+    private int addCount = 0;
+
+    CountingSet(Set<E> delegate) { this.delegate = delegate; }
+
+    @Override public boolean add(E e) { addCount++; return delegate.add(e); }
+    @Override public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return delegate.addAll(c);     // delegate's internal calls stay internal
+    }
+    // remaining Set methods forward to delegate
+}
+```
+
+The rule that follows: **inherit only when the superclass was designed and
+documented for it**, and otherwise compose. This is also why `final` classes
+exist. `String` is final so that no subclass can override `equals`, `hashCode`
+or `length` — which matters because strings are passed to security-sensitive
+APIs after validation, are shared in the string pool across unrelated code, and
+cache their hash code on the assumption that their contents never change. A
+mutable or overridable `String` would make all three unsound.
+
+### Immutability: five rules, and why it is the cheapest concurrency strategy
+
+1. Do not provide any method that mutates state.
+2. Prevent subclassing — make the class `final`, or keep the constructor private
+   and expose a static factory. Otherwise a subclass can add mutability.
+3. Make every field `private final`.
+4. **Defensively copy every mutable component, on the way in and on the way
+   out.** A stored `Date` or `List` the caller still holds a reference to is not
+   encapsulated.
+5. Do not let `this` escape during construction — no registering listeners or
+   starting threads from the constructor, or another thread can observe a
+   half-built object.
+
+The payoff worth stating in one sentence: **an immutable object is thread-safe
+with no locks, because there is no write for a read to race with.** No
+synchronisation, no memory-visibility reasoning, no lost updates, free sharing
+and safe caching. Every other concurrency strategy costs either contention or
+care; this one costs an allocation. That is also why immutable objects make
+correct `HashMap` keys — see
+[the collections deep dive](/java/2-collections-framework-deep-dive).
+
+### The equals, hashCode and compareTo contracts
+
+`equals` must be reflexive, symmetric, transitive, consistent, and false for
+`null`. `hashCode` must return the same value for equal objects. `compareTo`
+must be antisymmetric, transitive, and — *strongly recommended* but not required
+— consistent with `equals`.
+
+That last "recommended" bites. `new BigDecimal("1.0")` and
+`new BigDecimal("1.00")` are `compareTo`-equal but not `equals`-equal, so a
+`HashSet` keeps both and a `TreeSet` keeps one. Sorted collections use
+`compareTo`, hash collections use `equals`, and when the two disagree the same
+data produces different answers depending on which collection you chose.
+
+Now the deep one. **You cannot write an `equals` that is both correct and
+usable across an extensible class hierarchy.** Take a `Point` and a `ColorPoint`
+that adds a colour:
+
+```java
+// BROKEN: symmetry violation
+class ColorPoint extends Point {
+    private final Color color;
+    @Override public boolean equals(Object o) {
+        if (!(o instanceof ColorPoint cp)) return false;   // rejects plain Points
+        return super.equals(o) && cp.color == this.color;
+    }
+}
+
+Point p  = new Point(1, 2);
+Point cp = new ColorPoint(1, 2, RED);
+p.equals(cp);    // true  — Point only compares coordinates
+cp.equals(p);    // false — asymmetric, and now a List.contains result depends on order
+```
+
+Make `ColorPoint.equals` ignore colour when compared to a plain `Point` and you
+restore symmetry but lose transitivity: two `ColorPoint`s of different colours
+both equal the same `Point`, yet not each other. Use `getClass()` instead of
+`instanceof` and you get all three properties — but you have broken LSP, because
+a `Point` subclass can then never be equal to a `Point`.
+
+**There is no version that satisfies all of equality's properties and
+substitutability at once.** The accepted resolution is the one Effective Java
+gives: **favour composition** — let `ColorPoint` *hold* a `Point` and expose
+`asPoint()` — and add value semantics only to classes that are not extended.
+Which is precisely what a `record` is: implicitly final, all fields final, with
+a generated `equals`, `hashCode` and `toString` derived from the components. A
+record cannot have this bug because a record cannot be subclassed.
+
+### Default methods and the diamond rule
+
+Default methods were added in Java 8 for one reason: to let the JDK add
+`stream()` to `Collection` without breaking every existing implementation. They
+create the possibility of inheriting two implementations of the same signature,
+and Java resolves it with three rules in order:
+
+1. **A class wins over an interface.** A concrete method in a superclass always
+   beats any default.
+2. **The more specific interface wins.** If `B` extends `A` and both declare a
+   default, `B`'s is chosen.
+3. **Otherwise it is a compile error**, and you must disambiguate explicitly
+   with `InterfaceName.super.method()`.
+
+Java deliberately refuses to guess: there is no C++-style linearisation and no
+silent first-parent-wins.
+
+### Static versus dynamic dispatch, the favourite trick question
+
+**Overriding is resolved at runtime by the object's dynamic type. Overloading is
+resolved at compile time by the arguments' static types.** One sentence, and it
+answers a question that is asked constantly.
+
+```java
+static void print(Object o) { System.out.println("Object"); }
+static void print(String s) { System.out.println("String"); }
+
+Object o = "hello";
+print(o);        // prints "Object" — javac only sees the declared type
+print((String) o); // prints "String"
+```
+
+The bytecode explains why. `javac` picks the overload and writes the chosen
+method's exact descriptor into an `invokestatic` or `invokevirtual`
+instruction; at that point the decision is permanent. Virtual dispatch then
+happens *within* that signature: the JVM looks the receiver's actual class up in
+a vtable (`invokevirtual`) or itable (`invokeinterface`) and calls its override.
+So the signature is chosen by the compiler and the implementation by the JVM.
+
+Two corollaries that get asked as follow-ups. `private`, `static` and
+constructor calls compile to `invokespecial` or `invokestatic` and are never
+virtual — they cannot be overridden, only *hidden*. And **fields are not
+polymorphic at all**: a field access is resolved entirely from the static type,
+so a subclass field with the same name shadows rather than overrides.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What does SRP actually mean?"** One reason to change, where a reason is a
+   stakeholder who can request it — not "does one thing," which has no fixed
+   granularity.
+2. **"How do you satisfy OCP in Java?"** Depend on an interface at the call site
+   and add implementations; the strategy pattern. It only holds for the axis of
+   change you anticipated.
+3. **"Give an LSP violation that compiles."** Square extending Rectangle: the
+   override preserves signatures but breaks the invariant that width and height
+   are independent.
+4. **"State the LSP rules."** A subtype may weaken preconditions and strengthen
+   postconditions, never the reverse, must preserve invariants, and must not add
+   mutability the supertype ruled out.
+5. **"Which of those does Java enforce?"** Only the syntactic shadows —
+   covariant return types, wider access, fewer or narrower checked exceptions.
+   Everything semantic is unchecked.
+6. **"DIP, IoC and DI — what's the difference?"** DIP is a principle about
+   dependency direction, with the interface owned by the high-level module; IoC
+   is the style where the framework calls you; DI is the mechanism. You can have
+   DI without DIP.
+7. **"Why composition over inheritance?"** Inheritance is fixed at compile time
+   and couples you to the superclass's implementation, not just its interface.
+8. **"Show me that coupling."** A counting subclass of `HashSet` double-counts,
+   because `addAll` internally calls `add` — an undocumented detail the subclass
+   silently depends on.
+9. **"Why is `String` final?"** So no subclass can override `equals` or
+   `hashCode`: strings are validated then handed to security-sensitive APIs,
+   shared in the pool, and cache their hash code.
+10. **"How do you make a class immutable?"** No mutators, final class, private
+    final fields, defensive copies in and out, and never let `this` escape the
+    constructor.
+11. **"Why is immutability good for concurrency?"** There is no write, so there
+    is nothing for a read to race with — thread safety with zero synchronisation.
+12. **"Can you write a correct `equals` for an extensible class?"** No.
+    `instanceof` breaks symmetry or transitivity, and `getClass()` breaks
+    substitutability. Compose instead, or use a record.
+13. **"What problem do records solve here?"** They are implicitly final with
+    generated value semantics, so the extensible-equals problem cannot arise.
+14. **"Two interfaces give the same default method — what happens?"** Class beats
+    interface, more specific interface beats less specific, otherwise a compile
+    error you resolve with `Interface.super.method()`.
+15. **"`print(Object)` and `print(String)` with an `Object` holding a `String` —
+    which runs?"** `print(Object)`. Overloads are chosen by `javac` from static
+    types; only overriding is dynamic.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Extending a class that wasn't documented for extension.** If the Javadoc
+  doesn't describe self-use, treat the class as final.
+- **`protected` fields.** They are public API forever, and they make every
+  subclass part of your refactoring blast radius.
+- **Calling an overridable method from a constructor.** The subclass override
+  runs before the subclass's fields are initialised, so it sees nulls and zeros.
+- **Returning the internal mutable collection** from a getter, which undoes
+  encapsulation and immutability in one line. Return a copy or an unmodifiable
+  view.
+- **`equals` without `hashCode`**, or either one defined over mutable fields.
+- **A `compareTo` inconsistent with `equals`**, which makes `TreeSet` and
+  `HashSet` disagree about the same data.
+- **Treating SOLID as a checklist.** Every principle costs indirection now to
+  buy flexibility later; if the change never arrives you only paid the cost.
+</Callout>
+
+### Where this connects
+
+- [SOLID in an LLD interview](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — the same principles on a whiteboard under time pressure.
+- [Java 8+ features](/java/4-java-8-features) — records, sealed types and
+  default methods, which change a lot of the classical advice here.
+- [Collections deep dive](/java/2-collections-framework-deep-dive) — the
+  `equals`/`hashCode` contract as the bug it prevents.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — what
+  a container does with the dependencies you inverted.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — safe publication,
+  the other half of the immutability argument.

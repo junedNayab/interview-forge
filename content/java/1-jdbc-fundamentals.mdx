@@ -1,0 +1,375 @@
+---
+title: "1. JDBC Fundamentals"
+topic: "java"
+order: 601
+group: "Java + SQL"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [jdbc, hikaricp, connection-pool, preparedstatement, batching, sql-injection, fetch-size]
+format: "mdx"
+summary: "Why a connection costs a TCP handshake plus a server process, how to size a pool and recognise exhaustion before the pager does, what PreparedStatement precompilation actually buys, and why parameterisation rather than escaping is the SQL injection fix."
+---
+
+## Layer 1 — The mental model
+
+Most people learn JDBC as four objects you create in order: `DataSource`,
+`Connection`, `PreparedStatement`, `ResultSet`. That framing explains none of
+the questions you will be asked. Here is the one that does:
+
+> A JDBC `Connection` is not an object. It is a **lease on three scarce things
+> at once** — a TCP socket, an authenticated session, and a process or thread on
+> the database server holding its own megabytes of memory. Every JDBC feature
+> you will be asked about is an answer to a single question: *how much useful
+> work can I get done per lease, and how few leases can I get away with?*
+
+Pooling reuses the lease. Prepared statements reuse the parse and the plan
+*inside* the lease. Batching reuses the round trip. Fetch size limits how much
+of the result the lease must hold. Transactions decide how long it is held
+exclusively. Five answers, one question.
+
+"Connections are expensive" is repeated without a number behind it, so it is
+worth seeing literally:
+
+```
+Without a pool -- every request pays all of this:
+
+  app                                         postgres
+   |-- TCP SYN, SYN/ACK, ACK ------------------>|  ~1 round trip
+   |-- TLS ClientHello, cert, key exchange ---->|  ~2 round trips
+   |-- StartupMessage (user, database) -------->|
+   |<- AuthenticationSASL (SCRAM-SHA-256) ------|  ~2 round trips
+   |-- client-first / server-final ------------>|
+   |                                            |  fork() a backend process,
+   |                                            |  allocate its work_mem etc.
+   |-- SELECT 1 -------------------------------->|  the actual work: 1 round trip
+   |-- Terminate ------------------------------->|  ...and destroy it all
+
+With a pool -- the first few requests pay it once, and nobody pays it again.
+```
+
+On a local network that setup is five to thirty milliseconds; across an
+availability zone with TLS, comfortably more. **If your query takes three
+milliseconds and your connection setup takes thirty, you have built an
+application that is ninety percent overhead.** That ratio is the whole argument
+for pooling, and a much better answer than "pooling is faster."
+
+---
+
+## Layer 2 — The mechanism
+
+### What a connection pool actually is
+
+HikariCP is a bounded collection of already-open physical connections, a
+lock-free structure for handing them out, and a housekeeping thread that retires
+old and idle ones.
+
+The part that surprises people first: **the `Connection` you receive from
+`dataSource.getConnection()` is a proxy, and calling `close()` on it does not
+close anything.** It returns the physical connection to the pool. That is why
+`try (Connection conn = ...)` is cheap rather than wasteful, and why *failing*
+to close is worse than a normal resource leak — you have not leaked a socket,
+you have permanently removed one connection from a pool of ten.
+
+The settings that matter, and what each protects you from:
+
+| Setting | Default | What it is for |
+|---|---|---|
+| `maximumPoolSize` | 10 | The hard ceiling on concurrent database work |
+| `minimumIdle` | = max | Keep it equal to max; a fixed-size pool avoids churn |
+| `connectionTimeout` | 30 s | How long a thread waits for a lease before failing |
+| `idleTimeout` | 10 min | Retires surplus idle connections (only if idle is below max) |
+| `maxLifetime` | 30 min | Retires connections *before* the database or a proxy kills them |
+| `leakDetectionThreshold` | off | Logs the borrower's stack trace if a lease is held too long |
+
+`maxLifetime` is the one people skip and then debug for a week. Databases, load
+balancers and NAT gateways all silently drop idle TCP connections, and handing
+out one the network killed twenty minutes ago produces a confusing intermittent
+failure. **Set it below the shortest idle timeout in the network path.**
+
+### Why pool size is not "bigger is better"
+
+The formula from the PostgreSQL wiki, which HikariCP's documentation adopted and
+which you should be able to recite:
+
+```
+connections = ((core_count * 2) + effective_spindle_count)
+```
+
+For a four-core database server on SSD, that is roughly nine or ten. People
+assume it must be a typo, because their application serves thousands of requests
+per second.
+
+A database executes queries on CPU cores, so a four-core machine runs exactly
+four queries at any instant and everything else is waiting. The `* 2` exists
+because a query is not CPU-bound the whole time — it blocks on disk and network,
+and during that block another query can use the core. The spindle term is the
+same idea for rotational disks; on SSD it folds into the multiplier.
+
+So what happens at a pool of 100? The database does not get faster. It gets 100
+connections competing for four cores: constant context switching, a working set
+that thrashes the CPU caches, more contention on internal latches, and — in
+PostgreSQL, where each connection is a separate OS process — a hundred
+processes' worth of memory. **Throughput stays flat while latency climbs, so a
+smaller pool frequently produces both higher throughput and lower p99 latency
+than a larger one.** That sentence is the interview answer.
+
+The precise version: the service rate is fixed by the database's cores, so
+concurrency above that adds only queueing. **Since some queueing is inevitable,
+you want it in the pool — cheap and observable — rather than inside the
+database, where it is expensive and invisible.**
+
+<Callout type="pitfall" title="Pool exhaustion — the number one production symptom, and it does not look like a database problem">
+The first phase produces **no errors at all**. Every thread that calls
+`getConnection()` blocks waiting for a lease, requests pile up, and the p99
+latency chart goes from forty milliseconds to a vertical line. Nothing is
+logged, because nothing has failed — threads are simply parked. Then, exactly
+`connectionTimeout` milliseconds later, the failures arrive together:
+
+```
+SQLTransientConnectionException: HikariPool-1 - Connection is not available,
+request timed out after 30000ms
+```
+
+The trap is that every dashboard now points at the database, and **the database
+is idle.** Low CPU, no slow queries, no locks. The bottleneck is a pool of ten
+in front of a server that was never asked to do anything.
+
+The usual causes: a leaked connection on a path that never returns its lease
+(ten leaks kills a default pool permanently, and a restart "fixes" it); a
+transaction spanning a slow remote call; Open Session In View; or `REQUIRES_NEW`
+in a loop.
+
+Alert on **`hikaricp.connections.pending`**, not utilisation, which is fine at
+100%. Sustained queueing is the indicator that arrives before the timeouts, and
+`leakDetectionThreshold` finds the leak by logging the stack trace of whoever
+borrowed and never returned.
+</Callout>
+
+### Statement, PreparedStatement, and the server-side plan cache
+
+A plain `Statement` sends SQL text on every execution, and the server must lex,
+parse, resolve names, rewrite, plan and only then execute. For a trivial lookup,
+planning can cost more than execution. `prepareStatement(sql)` opens the door to
+skipping most of that: the text is sent once, the server parses and plans it,
+and later executions send only a handle plus the parameter values.
+
+"Opens the door to" is load-bearing, and the detail separates people who have
+read a tutorial from people who have profiled a system:
+
+- **The PostgreSQL JDBC driver does not server-prepare on the first execution.**
+  `prepareThreshold` defaults to 5, so the statement must execute five times on
+  the same physical connection before promotion. This is another reason pooling
+  matters: a long-lived connection accumulates warm prepared statements, so the
+  application genuinely gets faster after warm-up, while a
+  connection-per-request design never reaches the threshold at all.
+- **MySQL's Connector/J has `useServerPrepStmts=false` by default**, so there is
+  no server-side plan reuse until you turn it on alongside `cachePrepStmts`.
+- The honest downside: once PostgreSQL switches to a **generic plan** — chosen
+  without looking at your values — a query over skewed data can get dramatically
+  worse, because the plan that suits `status = 'ACTIVE'` (ninety percent of rows)
+  is wrong for `status = 'FAILED'` (three rows). Naming this shows you know
+  precompilation is not free.
+
+### Parameterisation is not escaping, and that is the whole point
+
+This is the security answer, and there is a precise version of it that is much
+better than the usual one.
+
+```java
+// BROKEN: the value becomes part of the SQL text, so it can become syntax.
+stmt.executeQuery("SELECT * FROM users WHERE email = '" + email + "'");
+
+// FIXED: the value never enters the SQL text at all.
+PreparedStatement ps = conn.prepareStatement(
+        "SELECT * FROM users WHERE email = ?");
+ps.setString(1, email);
+```
+
+The weak explanation is "PreparedStatement escapes the quotes for you." It does
+not — and escaping would be a weak defence anyway, because it is a blacklist,
+and blacklists lose to multi-byte character set tricks, nested encodings, and
+second-order injection where the payload is stored clean and concatenated later.
+
+The real mechanism is that **the statement text and the parameter values travel
+in separate fields of the wire protocol, and the server parses the statement
+into a finished execution plan before it has ever seen a value.** There is no
+moment at which a value could become syntax, because by the time it arrives the
+grammar is already resolved. This is not sanitisation; it is a structural
+separation of the code channel from the data channel. A `'; DROP TABLE users; --`
+parameter is simply an email address that nobody has.
+
+The limit, and the natural follow-up: **you cannot parameterise identifiers.**
+Table names, column names and sort direction are grammar, not values, so `?` is
+illegal there. A user-selectable sort column must be validated against an
+allow-list before it is concatenated — there is no other safe option.
+
+### Batching, and why the flag matters more than the API
+
+Every `executeUpdate()` is a network round trip, and a round trip is latency no
+amount of SQL tuning removes. Ten thousand single-row inserts over a
+one-millisecond network spend ten seconds doing nothing but waiting.
+
+```java
+try (PreparedStatement ps = conn.prepareStatement(
+        "INSERT INTO orders (customer_id, amount) VALUES (?, ?)")) {
+    conn.setAutoCommit(false);
+    int n = 0;
+    for (Order o : orders) {
+        ps.setLong(1, o.customerId());
+        ps.setBigDecimal(2, o.amount());
+        ps.addBatch();
+        if (++n % 500 == 0) ps.executeBatch();   // bound the memory and packet size
+    }
+    ps.executeBatch();
+    conn.commit();
+}
+```
+
+Here is why batching sometimes appears to do nothing. **`addBatch()` alone does
+not necessarily reduce the number of statements the server sees.** By default
+MySQL's Connector/J still sends N separate `INSERT` statements and merely
+pipelines them; the rewrite into a single multi-row `INSERT` needs
+`rewriteBatchedStatements=true` in the JDBC URL, and PostgreSQL has the
+equivalent `reWriteBatchedInserts=true`. That one-line change is routinely a
+ten-to-hundred times improvement on bulk inserts.
+
+`setAutoCommit(false)` around the batch is not optional either: in autocommit
+mode every statement is its own transaction and therefore its own durable write,
+and the commit fsync dominates everything else.
+
+### ResultSet, fetch size, and the query that OOMs instead of running slowly
+
+Ask what happens when you `SELECT` ten million rows and most people say "it will
+be slow." On PostgreSQL the truthful answer is worse: **by default the driver
+reads the entire result set into the client's heap before `executeQuery()`
+returns.** Not a slow query — an `OutOfMemoryError` whose stack trace points at
+the driver rather than your code.
+
+The fix is a server-side cursor, and it needs two things together:
+
+```java
+conn.setAutoCommit(false);   // REQUIRED -- fetch size is ignored in autocommit
+ps.setFetchSize(1000);       // now the driver uses a server-side cursor
+```
+
+Setting only the fetch size does nothing, because a cursor cannot outlive a
+transaction and autocommit ends the transaction after each statement — a good
+interview detail because it explains *why* the rule exists.
+
+MySQL differs: Connector/J ignores fetch size unless you set it to
+`Integer.MIN_VALUE`, which streams row by row and blocks any other statement on
+that connection until you drain the `ResultSet`. Hibernate's
+`hibernate.jdbc.fetch_size` passes straight through, so the same rules apply.
+
+### Transactions at the JDBC layer, and the pooling interaction
+
+Autocommit is **on** by default, so a bare JDBC statement is a full transaction
+with a durable commit; `conn.setAutoCommit(false)` switches to explicit control.
+`conn.setTransactionIsolation(...)` maps the JDBC constants onto the levels
+described in
+[transactions and isolation levels](/sql/4-transactions-isolation-levels).
+
+The part specific to JDBC is the pooling interaction. **A pooled connection is
+reused, so any session state you change and do not reset is inherited by the
+next borrower** — autocommit, isolation, read-only flag, schema and session
+variables are all sticky. HikariCP captures the configured defaults and resets
+on return, which is why you set these on the `HikariConfig` rather than mutating
+individual connections and hoping.
+
+### try-with-resources, and exactly what leaks without it
+
+```java
+// FIXED: closes in reverse order -- ResultSet, then Statement, then Connection.
+try (Connection conn = dataSource.getConnection();
+     PreparedStatement ps = conn.prepareStatement(sql)) {
+    ps.setString(1, department);
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) { /* ... */ }
+    }
+}
+```
+
+Three things follow from the mechanics rather than from style.
+
+A forgotten `Connection.close()` does not leak a socket, it **starves the pool**.
+The application works until the tenth leak, then stops entirely, and a restart
+appears to fix it — the profile of a bug that survives for months.
+
+A forgotten `Statement.close()` leaves a server-side cursor allocated. On Oracle
+that surfaces as `ORA-01000: maximum open cursors exceeded`, a message that
+describes a database limit while the cause is a missing `finally` block in Java.
+
+And a detail worth catching in review: you cannot call `conn.rollback()` in the
+`catch` of a try-with-resources that *declares* `conn`, because the variable is
+out of scope. **That common shape is a compile error, not a subtle bug.**
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why do we pool connections?"** A TCP handshake, a TLS handshake, an
+   authentication exchange and a new server process — tens of milliseconds and
+   megabytes, to run a query that takes three milliseconds.
+2. **"What does `close()` do on a pooled connection?"** Returns the lease. The
+   object you hold is a proxy; the socket stays open.
+3. **"How do you size a pool?"** Roughly `(cores * 2) + spindles`, so around ten
+   for a four-core server on SSD. The database runs one query per core; beyond
+   that you are adding context switching, not throughput.
+4. **"Isn't a bigger pool faster under load?"** No. Throughput plateaus while
+   latency climbs. A smaller pool often improves both, because queueing moves
+   into the pool where it is cheap and measurable.
+5. **"How does pool exhaustion present?"** First a latency cliff with no errors,
+   because threads are parked in `getConnection()`. Then a wave of
+   `SQLTransientConnectionException`. The database looks idle throughout.
+6. **"What do you alert on?"** Pending threads, not utilisation. Full
+   utilisation is normal; sustained queueing is not.
+7. **"Statement versus PreparedStatement?"** Precompilation, plan reuse and
+   parameter binding. On PostgreSQL the driver only server-prepares after
+   `prepareThreshold` executions, which defaults to five.
+8. **"How does PreparedStatement prevent SQL injection?"** Not by escaping. Text
+   and values travel in separate protocol fields and the server finishes planning
+   before it sees a value, so a value can never become syntax.
+9. **"What can't you parameterise?"** Identifiers — table names, column names,
+   sort direction. Those need an allow-list in application code.
+10. **"Why is my batch insert still slow?"** `addBatch()` alone may not reduce
+    statement count. You need `rewriteBatchedStatements=true` on MySQL or
+    `reWriteBatchedInserts=true` on PostgreSQL, plus autocommit off.
+11. **"What happens if I select ten million rows?"** On PostgreSQL the driver
+    buffers the whole result into the heap, so you get an `OutOfMemoryError`. A
+    server-side cursor needs `setFetchSize` *and* autocommit off.
+12. **"What is `maxLifetime` for?"** Retiring connections before a firewall or
+    the database silently kills them.
+13. **"What leaks without try-with-resources?"** A lost connection starves the
+    pool; a lost statement leaves server-side cursors open, which is where
+    Oracle's `ORA-01000` originates.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Building SQL by concatenation "just this once"** for an admin screen nobody
+  will ever attack.
+- **Sizing the pool by guessing** — 100 connections in front of a four-core
+  database is common and expensive.
+- **Holding a transaction across an HTTP call**, pinning a connection for the
+  full remote timeout.
+- **Never setting `leakDetectionThreshold`**, then chasing an intermittent outage
+  that a restart always fixes.
+- **Assuming `addBatch()` batches.** Without the driver rewrite flag it often
+  does not.
+- **Selecting unbounded result sets** and calling the `OutOfMemoryError` a
+  capacity problem.
+- **Mutating autocommit or isolation on a pooled connection.**
+</Callout>
+
+### Where this connects
+
+- [Transaction management](/java/5-transaction-management-transactional) — what
+  Spring's proxy does with this connection, and why `REQUIRES_NEW` is a
+  pool-sizing concern.
+- [Security fundamentals](/cs-fundamentals/4-security-also-see-your-projects-owasp-requirements)
+  — injection in the wider context, including the second-order case escaping
+  cannot handle.
+- [Transactions and isolation levels](/sql/4-transactions-isolation-levels) —
+  what the JDBC isolation constants mean at the database.
+- [Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate) — the layer
+  that generates all of this, and hides it until it breaks.

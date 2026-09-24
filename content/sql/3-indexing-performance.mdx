@@ -1,0 +1,349 @@
+---
+title: "3. Indexing & Performance"
+topic: "sql"
+order: 703
+group: "Advanced SQL"
+difficulty: "hard"
+estimatedMinutes: 25
+tags: [sql, indexing, b-tree, composite-index, covering-index, explain, postgres, mysql]
+format: "mdx"
+summary: "B+tree structure and why depth stays at three or four levels, InnoDB's clustered primary key versus Postgres heaps, the leftmost-prefix rule with the queries it does and does not serve, the five things that silently disable an index, and why the planner is right to ignore one."
+---
+
+## Layer 1 — The mental model
+
+An index is not a speed setting. It is a second, redundant copy of part of your
+data, stored in a different order, that the database maintains on every write so
+that some reads can avoid looking at the table.
+
+Every property of indexing follows from that sentence. Reads get faster because
+a sorted structure supports binary search. Writes get slower because the copy
+must be kept in step. Storage grows because the copy is real data. And the
+planner may decline to use it, because reading the index and jumping back to the
+table can cost more than reading the table straight through.
+
+> **An index is a sorted redundant copy that you pay for on every write and only
+> sometimes get to use on reads.** The senior question is never "should I add an
+> index" in isolation — it is "which query does this serve, how selective is it,
+> and what does it cost the write path".
+
+```
+                      [ 50 | 100 ]              <- root: routing keys only
+                     /      |      \
+          [20 | 35]     [65 | 80]     [120 | 160]   <- internal: routing only
+          /   |   \      /  |  \        /   |   \
+      [..][..][..]   [..][..][..]   [..][..][..]    <- LEAF: keys + row pointers
+        |    |    |    |    |    |    |    |    |
+        +----+----+----+----+----+----+----+----+   <- leaves are linked, so a
+             range scan walks sideways without re-descending the tree
+```
+
+Two structural facts to keep. Internal nodes hold only routing keys, so a page
+packs hundreds of them and the tree stays three or four levels deep even at
+hundreds of millions of rows, with the upper levels almost always cached. And
+the leaves are linked, which is why `BETWEEN`, `>`, `ORDER BY` and `LIMIT` are
+cheap on an indexed column: find the start, then walk.
+
+---
+
+## Layer 2 — The mechanism
+
+### Why B+tree and not a hash table
+
+A hash index gives O(1) equality lookup, which sounds strictly better than
+O(log n). Databases default to B+trees anyway, for three reasons. A hash index
+supports **only equality** — no ranges, no prefixes, no ordered scan — while one
+B+tree serves `=`, `>`, `BETWEEN`, `LIKE 'abc%'`, `ORDER BY` and `MIN`/`MAX`.
+The logarithm is **tiny**, three or four with a branching factor in the
+hundreds, and those top levels stay cached. And B+trees are **disk-friendly**:
+fixed-size pages, self-balancing, sequential leaves suited to read-ahead.
+
+Postgres also offers GIN for arrays and JSONB, GiST for geometric and range
+types, and BRIN for enormous naturally-ordered tables.
+
+### Clustered versus non-clustered, and why it differs by engine
+
+Here MySQL and Postgres genuinely diverge, and the difference is a frequent
+follow-up.
+
+**In InnoDB the primary key index *is* the table.** Its leaves hold the complete
+row, so the table has no separate existence and a primary-key lookup is one
+descent. But a **secondary index stores the primary key as its row pointer**,
+not a physical address, so a secondary-index query performs two descents — one
+for the primary key, one for the row. That second step is a **bookmark
+lookup**, and using the term earns credit.
+
+Two consequences follow. A **wide primary key inflates every secondary index**,
+since each entry carries a copy of it, which is the real argument for a compact
+`BIGINT` over a `UUID`. And a **random primary key hurts inserts**: a monotonic
+key appends to the rightmost leaf, while a random UUIDv4 inserts mid-tree,
+splitting pages and fragmenting the table. UUIDv7 and ULIDs restore monotonicity
+while staying globally unique.
+
+**In Postgres everything is a heap.** Rows live in an unordered file addressed
+by a `ctid` (page number plus offset), and every index including the primary key
+is a separate structure whose leaves hold that `ctid`. Every lookup is a
+two-step, and there is no clustered index — `CLUSTER` reorders a table once and
+does not maintain the order. The visible difference is in primary-key range
+scans: InnoDB reads consecutive table pages, while Postgres may find the tuples
+scattered anywhere, which is why it switches to a bitmap scan once enough rows
+match.
+
+### Composite indexes and the leftmost-prefix rule
+
+An index on `(a, b, c)` sorts by `a`, then by `b` within equal `a`, then by `c`
+within equal `a` and `b` — like a phone book sorted by last name, first name,
+middle name. That sentence generates the whole rule: the index helps only as far
+as it can narrow the search to a **contiguous stretch of leaves**, which
+requires supplying columns left to right.
+
+```sql
+CREATE INDEX idx ON orders (customer_id, order_date, status);
+
+-- FULLY SERVED
+WHERE customer_id = 7
+WHERE customer_id = 7 AND order_date = '2024-01-01'
+WHERE customer_id = 7 AND order_date = '2024-01-01' AND status = 'SHIPPED'
+WHERE customer_id = 7 ORDER BY order_date            -- order comes free
+
+-- PARTIALLY SERVED
+WHERE customer_id = 7 AND order_date > '2024-01-01' AND status = 'SHIPPED'
+  -- seeks on the first two columns, then filters status while scanning
+WHERE customer_id = 7 AND status = 'SHIPPED'
+  -- seeks on customer_id only, filters status per row
+
+-- NOT SERVED (no leading column, so no contiguous range exists)
+WHERE order_date = '2024-01-01'
+WHERE status = 'SHIPPED'
+```
+
+The phone book makes the failures obvious. You can find everyone named Patel
+quickly; you cannot find everyone whose first name is Priya without reading the
+whole book, because the Priyas are scattered across every last name.
+
+**Why a range column stops the narrowing.** Once you ask for
+`order_date > '2024-01-01'`, the matching entries span many dates, and within
+that span `status` is sorted only inside each date. No contiguous run of
+`status = 'SHIPPED'` exists to seek to, so the third column filters rather than
+narrows.
+
+That gives the ordering rule with its reason attached. **Equality predicates
+first**, because they pin a value and keep everything to their right usefully
+sorted. **Then the one range predicate** that gets to narrow. **Then the
+`ORDER BY` columns**, so the sort comes free. **Then any columns you want
+covered.** Among the equality columns, putting the most selective first matters
+far less than people claim; what matters is that the leading column is one your
+queries filter on. And an index on `(a, b)` makes one on `(a)` redundant — drop
+it. An index on `(b)` is not redundant.
+
+### Covering indexes and index-only scans
+
+If every column a query touches lives in the index, the engine answers from the
+index and never reads the table. Postgres calls this an **index-only scan** and
+MySQL reports "Using index"; it often runs five to ten times faster by
+eliminating the random I/O of row fetches.
+
+```sql
+-- Query: SELECT name, email FROM users WHERE department = 'Engineering'
+CREATE INDEX idx_cover ON users (department, name, email);
+
+-- Postgres: INCLUDE adds payload to the leaves without making it part of the
+-- sort key, keeping the tree smaller
+CREATE INDEX idx_cover ON users (department) INCLUDE (name, email);
+```
+
+<Callout type="note" title="Why an index-only scan in Postgres is not always index-only">
+Postgres MVCC keeps several versions of a row and the index does not record
+which your snapshot can see, so in principle the engine must visit the heap to
+check visibility — which would defeat the point entirely.
+
+The escape hatch is the **visibility map**: one bit per heap page meaning "every
+tuple here is visible to all current transactions". If the bit is set the heap
+visit is skipped, and `VACUUM` is what sets those bits.
+
+So **a table that is not being vacuumed loses its index-only scans**: the map
+goes stale and every row falls back to a heap fetch. `EXPLAIN ANALYZE` reports
+an Index Only Scan with a non-zero "Heap Fetches" count, and connecting that
+number to vacuum is a strong senior signal. InnoDB has no equivalent problem,
+because the clustered index holds the row itself.
+</Callout>
+
+### Selectivity, and why the planner ignores your index
+
+Selectivity is the fraction of the table a predicate keeps. An index scan reads
+index pages and then jumps to scattered table pages, which is **random I/O**,
+while a sequential scan reads the table in physical order, which the OS
+prefetches and the disk delivers far faster per byte. So there is a crossover:
+**past roughly 5 to 10 percent of the table, a sequential scan beats an index
+scan**, and the planner is right to refuse your index.
+
+This is why an index on a boolean, or a status column with three values, is
+usually dead weight: each value matches a third of the table, so no plan uses it
+and you pay on every write.
+
+Three nuances, because they are the natural follow-ups. **Skew changes the
+answer** — if `status` is 99 percent `'COMPLETE'`, an index is useless for that
+value and excellent for the 1 percent `'FAILED'`, which the planner gets right
+from its most-common-value statistics; the correct structure is a **partial
+index**, `CREATE INDEX ... WHERE status = 'FAILED'`, tiny because it indexes
+only the rare rows. **A low-cardinality column can still lead a composite
+index** when paired with a selective second column. And **between the extremes
+sits the bitmap scan**, which collects matching heap pages into a bitmap and
+reads them in physical order, converting random I/O into something closer to
+sequential.
+
+### The five things that silently disable an index
+
+Each is valid SQL producing correct results, slowly, and the mechanism is always
+the same: the index is sorted by the raw column value and the predicate is not
+about the raw column value.
+
+```sql
+-- 1. A function or expression on the column
+WHERE YEAR(created_at) = 2024                                          -- BROKEN
+WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01'         -- FIXED
+CREATE INDEX idx_year ON events ((EXTRACT(YEAR FROM created_at)));     -- or index it
+
+-- 2. Implicit type coercion: account_no is VARCHAR, so the COLUMN gets cast
+WHERE account_no = 12345                                               -- BROKEN
+WHERE account_no = '12345'                                             -- FIXED
+
+-- 3. Leading wildcard: no contiguous range starts with an unknown prefix
+WHERE name LIKE '%smith'                                               -- BROKEN
+WHERE name LIKE 'smith%'                                               -- FIXED
+
+-- 4. OR across columns: one B+tree cannot be sorted by two columns at once
+WHERE col_a = 1 OR col_b = 2                                           -- BROKEN
+SELECT * FROM t WHERE col_a = 1                                        -- FIXED
+UNION
+SELECT * FROM t WHERE col_b = 2   -- Postgres may do this itself with a BitmapOr
+
+-- 5. Negation, which usually matches most of the table anyway
+WHERE status <> 'COMPLETE'
+```
+
+Case 2 is the subtlest. Comparing a string column to a number makes SQL's
+coercion rules convert the *string* side — the column — so the engine evaluates
+a cast per row, which is case 1 in disguise. An ORM binding a parameter with the
+wrong declared type does the same, which is how identical SQL can be fast in
+`psql` and slow from the application.
+
+### What indexes cost on the write path
+
+Every `INSERT` writes an entry into every index, every `DELETE` removes one from
+each, and every `UPDATE` touches each index whose columns changed. In Postgres
+an update writes a whole new row version, which historically touched *every*
+index — that is what **HOT (heap-only tuple)** updates optimise away: if no
+indexed column changed and the new version fits on the same page, Postgres links
+it from the old and updates no index. A concrete argument for not indexing
+columns you update constantly.
+
+Then there is page splitting. Inserting into a full leaf page splits it in two,
+costing extra I/O and leaving both halves half empty — constant under random
+inserts, almost never under append-order ones.
+
+So the honest trade: each extra index taxes every write and inflates WAL volume,
+and ten indexes on a hot table is a design smell. Index for the queries you
+actually run, check the per-index scan counts in `pg_stat_user_indexes`, and
+delete what nothing uses.
+
+### Reading EXPLAIN well enough to act
+
+`EXPLAIN` shows the plan and its estimates; `EXPLAIN ANALYZE` executes and adds
+the truth. Use the second when diagnosing, with `BUFFERS` for I/O.
+
+```
+EXPLAIN (ANALYZE, BUFFERS) SELECT ...;
+
+Index Scan using idx_orders_customer on orders
+  (cost=0.43..8.45 rows=1 width=72)
+  (actual time=0.021..2.310 rows=48213 loops=1)
+  Buffers: shared hit=142 read=9807
+```
+
+**The single most useful diagnostic is the gap between estimated `rows` and
+actual `rows`.** Here the planner expected one row and got 48,213, so the plan
+is wrong higher up too: it chose a nested loop expecting one iteration and is
+running 48,213.
+
+The usual causes, in order of likelihood: stale statistics (run `ANALYZE`);
+correlated columns the planner assumes independent, such as city and postcode,
+where it multiplies two selectivities and underestimates badly (fix with
+`CREATE STATISTICS`); an expression it has no statistics for; and a cached plan
+built for an unrepresentative parameter. Mostly `read` in `Buffers` on a
+repeated query means the working set does not fit in memory.
+
+MySQL's equivalents are the `type` column (`const` and `eq_ref` excellent, `ALL`
+a full scan), `key`, and `rows`, with `EXPLAIN ANALYZE` from 8.0.18.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What is an index, mechanically?"** A sorted redundant copy of selected
+   columns, maintained on every write, letting some reads skip the table.
+2. **"Why a B+tree rather than a hash?"** A hash serves equality only. A B+tree
+   serves equality, ranges, prefixes and ordering, stays three or four levels
+   deep, and its fixed-size pages suit disk.
+3. **"Why are the leaves linked?"** So a range scan finds the start and walks
+   sideways instead of re-descending per key.
+4. **"What does an InnoDB secondary index store?"** The primary key, so a
+   secondary lookup costs two descents and a wide primary key bloats every
+   secondary index.
+5. **"Why is a random UUID a bad primary key in InnoDB?"** Inserts land mid-tree,
+   splitting pages and fragmenting the table, and the wide key is copied into
+   every secondary index. UUIDv7 fixes the ordering.
+6. **"Explain leftmost prefix."** An index on `(a, b, c)` is sorted by `a`, then
+   `b`, then `c`, so it serves any query supplying a leading run of them. A
+   predicate on `b` alone has no contiguous range to seek to.
+7. **"Why does a range predicate stop the next column being useful?"** Past the
+   range, rows are sorted only within each value, so the next column filters
+   rather than narrows.
+8. **"How do you order a composite index?"** Equalities, then the range column,
+   then the `ORDER BY` columns, then covered columns.
+9. **"What is a covering index?"** One holding every column the query needs, so
+   the table is never read.
+10. **"Why is my index-only scan still hitting the heap?"** The visibility map
+    is stale because the table has not been vacuumed. Watch "Heap Fetches".
+11. **"Why would the planner ignore my index?"** The predicate is unselective;
+    past roughly 5 to 10 percent of the table, sequential I/O wins.
+12. **"Is an index on a boolean useful?"** Rarely, unless the distribution is
+    very skewed — and then use a partial index on the rare value.
+13. **"What silently disables an index?"** A function on the column, implicit
+    type coercion, a leading wildcard, `OR` across columns, and negation.
+14. **"What do indexes cost?"** An entry per index on every insert and delete,
+    updates for changed columns, page splits on random inserts, plus storage and
+    WAL.
+15. **"What is a bitmap heap scan, and is it bad?"** Matching pages collected
+    into a bitmap and read in order — the correct middle ground.
+16. **"Most useful number in `EXPLAIN ANALYZE`?"** Estimated rows against actual
+    rows. A large gap means bad information, so the fix is usually statistics.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **An index per column** instead of one composite index matching the query.
+- **Keeping an index on `(a)` when `(a, b)` exists.** Write cost only.
+- **Wrapping the indexed column in a function** — `LOWER(email)`,
+  `DATE(created_at)`, a cast — instead of indexing the expression.
+- **A type mismatch introduced by the ORM**, so the query is fast in a console
+  and slow in production.
+- **`SELECT *` defeating a covering index.**
+- **Creating an index without `CONCURRENTLY` in Postgres**, locking out writes
+  for the whole build.
+- **Never checking which indexes are unused.** Most mature tables carry several
+  nothing has touched in months.
+- **Assuming an index fixes a bad row estimate.** Run `ANALYZE` first.
+</Callout>
+
+### Where this connects
+
+- [1. JOINs](/sql/1-joins-know-them-cold) — the index that makes a nested loop
+  viable and a merge join free.
+- [2. Window functions](/sql/2-window-functions-the-senior-differentiator) — how
+  an index removes the sort under a `WindowAgg`.
+- [4. Transactions and isolation levels](/sql/4-transactions-isolation-levels) —
+  why vacuum exists, and why InnoDB takes gap locks on index ranges.
+- [5. Query optimization checklist](/sql/5-query-optimization-checklist) —
+  turning a plan into a decision.
+- [System design: databases](/system-design/6-databases) — B-tree versus LSM.

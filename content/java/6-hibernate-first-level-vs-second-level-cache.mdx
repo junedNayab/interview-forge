@@ -1,0 +1,343 @@
+---
+title: "6. Hibernate First-Level vs Second-Level Cache"
+topic: "java"
+order: 606
+group: "Java + SQL"
+difficulty: "hard"
+estimatedMinutes: 24
+tags: [hibernate, caching, persistence-context, second-level-cache, query-cache, invalidation, redis]
+format: "mdx"
+summary: "Why the first-level cache is an identity map before it is a cache, what the second-level cache really stores and which concurrency strategy guarantees what, why the query cache is usually a mistake, and the honest case for using Redis instead."
+---
+
+## Layer 1 — The mental model
+
+"L1 is per session, L2 is shared" is correct, memorised, and gets you nowhere on
+the follow-up. The reframing that does:
+
+> The first-level cache is **not primarily a cache**. It is an identity map whose
+> job is correctness: guaranteeing that one database row maps to exactly one Java
+> object inside a transaction, so two code paths cannot hold divergent copies of
+> the same entity and write over each other. Skipping a query is a side effect,
+> not the purpose. The second-level cache is the opposite — a real cache, with
+> all of a real cache's problems, and **the hard one, invalidation, is only
+> solvable when your application is the sole writer to the database.**
+
+That distinction is why one cannot be turned off and the other is opt-in per
+entity. You cannot switch off the guarantee dirty checking depends on. You can,
+and usually should, switch off a shared cache you cannot keep coherent.
+
+| | First level | Second level | Query cache |
+|---|---|---|---|
+| Scope | One persistence context | One `SessionFactory`, all sessions | Same as L2 |
+| Lifetime | The transaction | Until evicted or invalidated | Until any involved table changes |
+| On by default | Yes, and cannot be disabled | No | No, and needs L2 as well |
+| Keyed by | Entity type plus identifier | Entity type plus identifier | The query string plus its parameters |
+| Stores | The live Java object | Dehydrated field values | A list of identifiers |
+| Helps a JPQL query | No | Only after the IDs are known | Yes, but see below |
+
+The row that changes how people think is the last one on the left. **The
+first-level cache does not make queries faster.** It short-circuits lookup by
+identifier. A `findByShortCode(...)` executes SQL every time you call it, in the
+same transaction, on the same row — the cache only intervenes afterwards, when
+Hibernate recognises the returned identifier and hands back the object it
+already has instead of building a second one.
+
+---
+
+## Layer 2 — The mechanism
+
+### The first level, precisely
+
+The persistence context described in
+[the JPA lesson](/java/2-spring-data-jpa-hibernate) holds a map from
+`(entity type, identifier)` to the managed instance. Two behaviours follow.
+
+`em.find(Employee.class, 1L)` twice in one transaction issues one `SELECT`,
+because the second call finds the key and returns immediately.
+
+A *query* — JPQL, criteria, a derived repository method, anything that is not a
+lookup by identifier — always goes to the database, because Hibernate cannot
+know whether cached entities satisfy an arbitrary `WHERE` clause without asking.
+But when the rows come back it checks each identifier against the map, and **for
+a row already present it returns the existing managed instance and discards the
+freshly read column values.**
+
+That has a consequence people find alarming and which is the correctness
+guarantee doing its job. If someone else modified the row after you loaded it,
+re-querying in the same transaction does *not* refresh your copy — you see the
+old values. Silently swapping field values underneath an object you are
+currently mutating would destroy dirty checking, because the snapshot and the
+instance would no longer correspond. `em.refresh(entity)` is the opt-in.
+
+<Callout type="note" title="Verified from your url-shortener, and it makes the point exactly">
+`src/main/java/com/urlshortener/service/UrlService.java`, method `resolve`, is
+annotated `@Transactional`. On a Redis miss it calls
+`urlRepository.findByShortCode(shortCode)`, then calls the private
+`recordClick(shortCode, ...)`, which begins with
+`urlRepository.findByShortCode(shortCode)` — **the same derived query, on the
+same row, inside the same transaction.**
+
+That is two `SELECT` statements, not one. The first-level cache does not
+deduplicate them, because `findByShortCode` is a query rather than a lookup by
+identifier. What it *does* give you is that both calls return the same `Url`
+instance — the identity guarantee, not the query saving.
+
+Two further things this code shows, both verified in that file. On a Redis
+**hit**, `recordClick` still runs and still issues that `findByShortCode`, so
+the cache hit saves the entity read but not the round trip. And the `expiresAt`
+check exists only on the miss path, so an expired URL stays resolvable until the
+24-hour Redis TTL set in `cacheUrl` runs out. That is not a Hibernate problem —
+it is the invalidation problem showing up in your own code, which is the best
+possible illustration of why the rest of this lesson is careful about it.
+</Callout>
+
+Because the first-level cache cannot be disabled, it has one operational
+consequence: **in a batch job it grows without bound.** A million rows means a
+million managed entities plus a million snapshots, and every flush walks all of
+them. Fix it by flushing and clearing every few hundred entities, using a
+stateless session, or reading through a projection so nothing becomes managed.
+
+### The second level: what it actually stores
+
+The second-level cache lives on the `SessionFactory`, so it outlives any
+transaction and is shared by every session in the JVM. It is off by default and
+enabled in two steps: a provider and a flag globally, then `@Cache` on the
+entities you choose.
+
+```java
+@Entity
+@Cacheable
+@Cache(usage = CacheConcurrencyStrategy.READ_WRITE, region = "country")
+public class Country { /* ... */ }
+```
+
+The detail that makes everything else make sense: **the second-level cache does
+not store your entity objects. It stores dehydrated state** — an array of the
+scalar column values, with associations represented as foreign-key identifiers
+rather than object references.
+
+Why? An entity instance belongs to exactly one persistence context. Handing the
+same object to two concurrent transactions would share mutable state and break
+across sessions the very identity guarantee the first level provides. Storing
+flat values means each session rehydrates its own instance, so both the
+guarantee and the caching hold.
+
+Two consequences fall out of that design:
+
+**Associations are not cached with the parent.** A cached `Order` holds the
+identifiers of its line items, not the items, so loading them either hits the
+second-level cache for each child entity or hits the database. Caching a
+collection needs its own `@Cache` annotation on the association, and forgetting
+that is the usual reason the cache appears not to help.
+
+**The cache is keyed by identifier, so like the first level it does nothing for
+a query.** A JPQL query still runs in the database to find out *which*
+identifiers match; the cache only helps afterwards, resolving them to state.
+This is the most common misunderstanding about the second-level cache, and why
+people enable it, measure no improvement, and conclude caching does not work.
+
+### Concurrency strategies, and what each actually guarantees
+
+```
+READ_ONLY            No updates permitted. Modifying a READ_ONLY entity throws.
+                     Nothing to invalidate, so nothing to get wrong.
+                     Fastest, and the only strategy with no correctness caveat.
+
+NONSTRICT_READ_WRITE On commit, the entry is INVALIDATED (not updated).
+                     There is a window around the commit where a reader can
+                     still see the old value. Eventually consistent, no locks.
+
+READ_WRITE           On update, a SOFT LOCK is placed on the entry: other
+                     sessions reading it bypass the cache and go to the
+                     database until the lock clears. Approximates read-
+                     committed. Costs extra coordination per write.
+
+TRANSACTIONAL        The cache participates in a JTA transaction alongside the
+                     database, so cache and database commit or roll back
+                     together. Full isolation, real overhead, requires a JTA
+                     provider. Rare outside application servers.
+```
+
+The framing to carry into an interview: **these are four points on a trade-off
+between staleness and coordination cost, and the right answer is the strictest
+one your data lets you get away with.** Reference data that changes with a
+deployment is `READ_ONLY`, the only one without a correctness footnote. If your
+data does not fit it, treat that as a signal rather than a reason to reach for
+`READ_WRITE`.
+
+Note what none of them do: they coordinate *your application's* writes with the
+cache, and know nothing about writes from anywhere else.
+
+### The query cache, and why it is usually a mistake
+
+The query cache is a third, separate cache, enabled with
+`hibernate.cache.use_query_cache=true` and requested per query with a hint. It
+depends on the second-level cache being on.
+
+It does not cache results. **It caches a list of identifiers**, keyed by the
+query string plus its exact parameter values. On a hit, Hibernate resolves each
+identifier from the second-level cache if the entity is cached there and from
+the database otherwise — so a query cache without entity caching turns one query
+into N lookups, which is N+1 arriving from a direction nobody expects.
+
+The reason it is usually a mistake is invalidation. Hibernate maintains an
+update-timestamps region recording the last modification time of every table,
+and a cached result is valid only if no table it touched has been written since.
+**Any insert, update or delete on any involved table invalidates every cached
+query over that table**, regardless of whether the changed row could have
+appeared in the result.
+
+On a table with real write traffic the hit rate collapses toward zero while you
+keep paying to maintain the entries. Add that the key includes exact parameter
+values, so a wide parameter distribution fills the region with single-use
+entries, and the honest summary is that the query cache pays off only for a few
+frequently-repeated queries with few distinct parameters over nearly read-only
+tables — narrow enough that an explicit cache is usually better.
+
+### The invalidation problem, stated plainly
+
+Everything above assumes Hibernate knows when data changed. The writers it does
+not know about: a migration. A DBA running an `UPDATE` to fix a support ticket.
+A scheduled job in another service. A trigger. A replication stream. A second
+instance of your own application, unless the cache is distributed. A bulk
+`@Modifying` update, which as covered in [the repository
+lesson](/java/4-spring-data-repository) bypasses the persistence context and the
+second-level cache with it.
+
+For every one of those, **the second-level cache is stale from the instant the
+write commits, with no expiry and no error.** It serves the old value until
+something evicts it, and nothing will.
+
+That produces the most useful rule in the topic, worth saying verbatim: **the
+second-level cache is only safe when your application is the only writer to that
+data.** Everything else is a bet that nobody touches the database, and that bet
+loses eventually.
+
+### Distributed second-level cache is harder than it looks
+
+Two instances means two `SessionFactory` objects and two independent caches.
+Instance A updates a row; instance B's copy is stale. So you make the cache
+distributed with Hazelcast or Infinispan, and you have moved from a caching
+problem to a distributed consistency problem.
+
+Invalidation messages take time to propagate, so there is a window in which the
+instances disagree and your code cannot detect it. A replicated cache ships
+values instead, so writes cost network traffic proportional to cluster size.
+Partition the cluster and you get split-brain. And the cache now needs its own
+operational attention — heap, eviction, serialisation format, cluster
+membership, version compatibility across a rolling deploy.
+
+The honest summary: you have added a distributed system to avoid a `SELECT` on
+an indexed primary key, one of the cheapest things a database does. Sometimes
+that is the right trade, much less often than the feature's prominence suggests.
+The vocabulary for reasoning about it is in
+[CAP and consistency models](/system-design/7-cap-theorem-consistency-models).
+
+### Second-level cache versus just using Redis
+
+For most applications the better answer is an explicit application-level cache,
+and the reason is not performance but **control over invalidation**.
+
+The second-level cache invalidates on rules Hibernate infers from the statements
+it issued. An explicit cache invalidates when *you* say so, so you can tie
+eviction to a domain event ("the price changed") rather than a table write,
+publish invalidations over a channel other services also listen to, set a TTL
+per key as a bound on how wrong you can be, and — crucially — cache the thing
+the caller wanted, which is usually an assembled response rather than one row.
+
+That last point is the biggest. A second-level cache can only cache entity rows
+keyed by identifier. A Redis cache can hold the finished DTO for an endpoint,
+skipping query, hydration, mapping and serialisation in one hop — an order of
+magnitude more cost avoided per request.
+
+The remaining honest case for the second-level cache: a monolith that is the
+sole writer, with genuinely static reference data — countries, currencies, tax
+tables — where `READ_ONLY` applies and invalidation does not arise. Real and
+useful, and much smaller than the feature's prominence implies.
+
+Your own project shows the explicit approach and its sharp edge.
+`UrlService.deleteUrl` calls `redisTemplate.delete(CACHE_PREFIX + shortCode)`
+immediately before `urlRepository.delete(url)` — deliberate, readable
+invalidation a second-level cache could not express as clearly. And the expiry
+check that `resolve` skips on the cache path is the kind of correctness detail
+you now own yourself.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"First-level versus second-level cache?"** L1 is the persistence context —
+   per transaction, always on, cannot be disabled. L2 is shared across sessions
+   on the `SessionFactory`, opt-in per entity, and needs a provider.
+2. **"Why can't the first level be disabled?"** It is the identity map that dirty
+   checking depends on. Without it, two references to the same row could diverge
+   and overwrite each other.
+3. **"Does the first-level cache make queries faster?"** No. It short-circuits
+   lookup by identifier only. A query always executes; the cache just returns the
+   existing instance for rows it already knows.
+4. **"So two identical `findByEmail` calls in one transaction?"** Two `SELECT`
+   statements, one object. Two `findById` calls are one `SELECT`.
+5. **"Why does re-querying not refresh my entity?"** Hibernate discards the fresh
+   column values for a managed row, because replacing state under an object being
+   mutated would break the snapshot. Use `refresh()` if you want it.
+6. **"What does the second level store?"** Dehydrated state — scalar values with
+   associations as identifiers — not entity instances, because an instance
+   belongs to exactly one persistence context.
+7. **"Why didn't enabling L2 help my query?"** It is keyed by identifier. The
+   query still runs to find the IDs; only hydration is served from cache.
+8. **"Are associations cached automatically?"** No. Collections need their own
+   `@Cache` annotation, which is the usual reason L2 looks ineffective.
+9. **"Walk me through the concurrency strategies."** `READ_ONLY` forbids updates
+   and has no caveats. `NONSTRICT_READ_WRITE` invalidates on commit with a
+   staleness window. `READ_WRITE` soft-locks entries to approximate read
+   committed. `TRANSACTIONAL` joins a JTA transaction for full isolation.
+10. **"Which would you pick?"** The strictest the data allows — and if it does
+    not fit `READ_ONLY`, question caching it at all.
+11. **"What is the query cache and why avoid it?"** It caches identifier lists
+    keyed by query text and parameters, and any write to any involved table
+    invalidates all of them.
+12. **"What breaks L2 completely?"** Any writer you do not control — a migration,
+    a DBA, another service, a trigger. The cache goes stale silently and never
+    recovers.
+13. **"Is a distributed L2 the answer?"** It trades a caching problem for a
+    distributed consistency problem: propagation windows, split-brain, and
+    serialisation compatibility across rolling deploys.
+14. **"When would you use L2 in production?"** A single-writer application with
+    genuinely static reference data, under `READ_ONLY`.
+15. **"Why prefer Redis?"** Control over invalidation, a TTL bounding how wrong
+    you can be, eviction tied to domain events, and the ability to cache the
+    assembled response rather than one entity row.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Expecting L1 to deduplicate queries.** It only deduplicates lookups by
+  identifier.
+- **Reading a million rows in one transaction**, where the persistence context
+  and its snapshots become the memory problem.
+- **Enabling L2 and measuring nothing**, because the workload is queries and the
+  cache is keyed by identifier.
+- **Caching an entity but not its collections**, so every parent hit still
+  triggers child loads.
+- **`READ_WRITE` on data another system also writes** — the strategy protects
+  against your own concurrency, not anyone else's.
+- **Bulk `@Modifying` updates** that bypass the cache and leave stale entries.
+- **The query cache on a write-heavy table**, paying maintenance for a hit rate
+  near zero.
+- **A distributed cache added late**, discovered the day a second instance ships.
+- **Caching before measuring.** A warm primary-key lookup is already fast.
+</Callout>
+
+### Where this connects
+
+- [Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — cache-aside, write-through, and eviction policies.
+- [Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate) — the
+  persistence context this lesson calls the first-level cache.
+- [The N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) —
+  why caching is not a fix for it, since the queries still run.
+- [Spring Data repositories](/java/4-spring-data-repository) — bulk `@Modifying`
+  updates and what they bypass.
+- [CAP and consistency models](/system-design/7-cap-theorem-consistency-models)
+  — the vocabulary for arguing about a distributed second-level cache.

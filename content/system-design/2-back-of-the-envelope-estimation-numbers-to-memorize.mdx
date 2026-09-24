@@ -1,0 +1,270 @@
+---
+title: "2. Back-of-the-envelope estimation (numbers to memorize)"
+topic: "system-design"
+order: 202
+group: "Fundamentals"
+difficulty: "easy"
+estimatedMinutes: 19
+tags: [estimation, capacity-planning, latency-numbers, qps]
+format: "mdx"
+summary: "Estimation is not arithmetic, it's a filter that eliminates designs — the six numbers to memorize, the four calculations that matter, and how to turn each result into a design decision instead of a figure nobody uses."
+---
+
+## Layer 1 — The mental model
+
+Most candidates treat estimation as a tax: do the multiplication, announce
+"4,000 QPS," and move on to the diagram they were going to draw anyway. That
+wastes the most useful five minutes of the interview.
+
+> **Estimation exists to eliminate designs.** Every number you compute should
+> either rule an option out or force one in. If a figure doesn't change what you
+> build, you didn't need it.
+
+Worked properly, the numbers make the decisions for you:
+
+| What you compute | The design decision it forces |
+|---|---|
+| Storage per year | Fits on one machine, or must be sharded |
+| Peak QPS | One server, ten, or a thousand |
+| Read:write ratio | Whether a cache is the centrepiece or an afterthought |
+| Bandwidth | Whether a CDN is optional or mandatory |
+| Working-set size | Whether the hot data fits in RAM — often the whole design |
+
+The second thing to internalise: **precision is worthless here.** The answer is
+an order of magnitude. Whether it's 4,000 or 6,000 QPS changes nothing; whether
+it's 4,000 or 400,000 changes everything. So round aggressively, use powers of
+ten, and say so out loud — *"I'll round to keep the arithmetic in my head; I
+care about the order of magnitude"* — because a candidate doing long division on
+a whiteboard is a candidate making a mistake.
+
+---
+
+## Layer 2 — The mechanism
+
+### The numbers worth memorizing
+
+Six, and no more. These are all you need.
+
+```
+Seconds in a day        ≈ 86,400  ≈ 10^5      ← the most useful of all
+1 million/day           ≈ 12 per second
+Peak                    ≈ 2–3× average
+Read:write ratio        ≈ 100:1 for consumer reads
+1 KB per "row"          for a typical record with a few fields
+1 million seconds       ≈ 12 days   (useful sanity check)
+```
+
+The first line does most of the work. **Because a day is roughly `10^5`
+seconds, dividing a daily count by `10^5` gives you QPS.** 100 million a day is
+1,000 per second. A billion a day is 10,000 per second. No calculator.
+
+The latency table, in orders of magnitude:
+
+| Operation | Time | Relative |
+|---|---|---|
+| L1 cache reference | 1 ns | 1 |
+| Main memory reference | 100 ns | 100 |
+| Read 1 MB sequentially from RAM | 10 µs | 10,000 |
+| SSD random read | 100 µs | 100,000 |
+| Round trip in the same datacenter | 500 µs | 500,000 |
+| Read 1 MB from SSD | 1 ms | 1,000,000 |
+| Disk seek (spinning) | 10 ms | 10,000,000 |
+| Round trip across a continent | 150 ms | 150,000,000 |
+
+Don't memorise the table — memorise the **shape**: each tier is roughly 100×
+the one above, and the network dominates everything. Two derived facts do most
+of the work in an interview:
+
+- **A cross-region round trip is about 150 ms.** So five sequential cross-region
+  calls have a 750 ms floor before your code runs. That's an argument for
+  parallelism, or for not crossing the region.
+- **A datacenter round trip is about 0.5 ms**, so a request making 50 internal
+  calls spends 25 ms purely on network. That's an argument against chatty
+  microservices.
+
+The storage units, since people fumble these under pressure:
+
+```
+1 KB = 10^3     a small record
+1 MB = 10^6     a photo
+1 GB = 10^9     a short video
+1 TB = 10^12    fits comfortably on one disk
+1 PB = 10^15    now it's a cluster
+```
+
+### The four calculations, and what each one decides
+
+**1. QPS.**
+
+```
+daily actions ÷ 10^5  =  average QPS
+average QPS × 3       =  peak QPS       ← always design for peak
+```
+
+Then convert it to a decision. A single modern server handles on the order of
+1,000–10,000 simple requests per second. So a few hundred QPS is one box and a
+replica for safety; tens of thousands is a real fleet plus caching; hundreds of
+thousands means the design has to be about the data layer, not the app layer.
+
+**2. Storage.**
+
+```
+records/day × bytes/record × 365 × years × replication factor
+```
+
+Two multipliers candidates forget, and mentioning either scores: **replication**
+(3× is standard, so a 100 TB dataset needs 300 TB of disk) and **indexes and
+overhead** (often another 20–50%). Then the decision: under a terabyte fits on
+one machine comfortably, so don't shard. Hundreds of terabytes and growing means
+sharding is structural, not optional — and it means you should talk about a
+retention policy, because "we keep everything forever" is a choice with a cost.
+
+**3. Bandwidth.**
+
+```
+QPS × average response size
+```
+
+At 10,000 QPS and 100 KB responses that's 1 GB/s, which is 8 Gbps — more than a
+standard network interface, so a CDN isn't an optimisation, it's required.
+Bandwidth is the calculation that most often produces a surprise, especially for
+anything with images or video.
+
+**4. Memory / working set.** The most decision-relevant and the most often
+skipped.
+
+```
+hot data (often ~20% of records) × bytes/record
+```
+
+Compare that to what RAM costs. **If the working set fits in memory, the entire
+design changes** — you're a cache with a database behind it for durability,
+rather than a database with a cache in front. For the url-shortener: 500 million
+URLs at 500 bytes is 250 GB total, but the hot 20% is 50 GB, which fits in a
+modest Redis cluster. That single calculation is what justifies the whole
+caching strategy, and it's a far better answer than "I'd add Redis because reads
+are heavy."
+
+### Worked example: the url-shortener
+
+Doing it end to end, the way you would out loud:
+
+```
+Assume 100M new URLs/month, read:write = 100:1
+
+WRITES   100M / month / (30 × 10^5 s)  ≈ 33/sec     → peak ~100/sec
+READS    33 × 100                       ≈ 3,300/sec  → peak ~10,000/sec
+STORAGE  100M × 500 bytes               = 50 GB/month
+                                        ≈ 600 GB/year
+                                        ≈ 1.8 TB/year with 3× replication
+BANDWIDTH  10,000/sec × 500 bytes       = 5 MB/s — negligible
+MEMORY   hot 20% of one year            = 120 GB → a small Redis cluster
+```
+
+Now the part that matters — **saying what each number decided**:
+
+> "Writes are trivial at 33 a second, so the write path isn't interesting and I
+> won't spend time on it. Reads are 100× that, so the design is a read-optimised
+> one and caching is the centrepiece, not a detail. 600 GB a year fits on a
+> single machine for the first couple of years, so I would **not** shard
+> initially — I'd note where the sharding seam goes and defer it. Bandwidth is
+> nothing because responses are tiny. And the hot working set fits in RAM, which
+> is the fact that makes a cache-first design correct."
+
+That paragraph is the whole point of the exercise. Four numbers, four design
+decisions, one of them ("don't shard yet") actively resisting complexity.
+
+<Callout type="tip" title="How to do this without looking like you're guessing">
+State your assumptions before you compute, and make them round. *"I'll assume
+100 million daily active users, each doing 10 actions a day."* The interviewer
+will correct you if it matters, and now the numbers are a shared premise rather
+than something you produced from nowhere.
+
+Then do the arithmetic in powers of ten out loud. `10^8 × 10 = 10^9 per day`,
+divided by `10^5` seconds, is `10^4` QPS. Nobody minds that you rounded 86,400
+to 100,000 — they mind if you stall on the multiplication.
+
+And say the conclusion, not just the number. "10,000 QPS" is an output.
+"10,000 QPS, so this is a handful of application servers and the database is the
+real problem" is an answer.
+</Callout>
+
+### Reference figures for sanity checks
+
+Useful for noticing when a result is absurd:
+
+| Thing | Rough capacity |
+|---|---|
+| One modern server | 1,000–10,000 simple requests/sec |
+| One Postgres instance | ~10,000 simple reads/sec; a few hundred connections |
+| One Redis instance | ~100,000 ops/sec |
+| One Kafka broker | Hundreds of MB/s |
+| One disk | 1–20 TB |
+| One machine | Up to ~128 cores, a few TB of RAM |
+| A 1 Gbps link | ~125 MB/s |
+
+If your estimate says you need 40,000 Postgres instances, you made an arithmetic
+error or the design is wrong. Noticing that yourself is worth more than getting
+it right first time.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Estimate the QPS."** Daily actions divided by `10^5`, then times three for
+   peak — and then say what that implies about the fleet.
+2. **"Why 10^5?"** A day is 86,400 seconds. Rounding to `10^5` keeps the
+   arithmetic mental and the error under 15%, which is irrelevant at this
+   precision.
+3. **"How much storage in five years?"** Records per day times bytes times 365
+   times five — then times the replication factor, and add overhead for
+   indexes.
+4. **"Do you need to shard?"** Under a terabyte, no. Say where the seam is and
+   defer it.
+5. **"Do you need a CDN?"** Compute QPS times response size. If it's gigabits,
+   yes.
+6. **"Does the working set fit in memory?"** The calculation that decides
+   whether this is a cache-first design. Usually the most useful number you'll
+   produce.
+7. **"What's a cross-region round trip?"** About 150 ms, which is why five
+   sequential ones is most of a second before any work happens.
+8. **"How many QPS can one server take?"** 1,000–10,000 for simple requests.
+   Useful mostly as a sanity check.
+9. **"What read:write ratio would you assume?"** Around 100:1 for a
+   consumer read product; say it's an assumption and invite correction.
+10. **"Why design for peak and not average?"** Because you fall over at peak.
+    Two to three times average is the usual multiplier; a flash sale is far
+    more, and that's a pre-scaling problem.
+11. **"Your number seems off."** Recheck the order of magnitude against the
+    reference capacities. Catching your own absurd result is a positive.
+12. **"What did that number tell you?"** The question you should be answering
+    unprompted. A figure that changes no decision was wasted time.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Computing numbers and then ignoring them**, designing whatever you were
+  going to design anyway.
+- **Precision theatre** — long division on a whiteboard for a figure where only
+  the exponent matters.
+- **Forgetting replication and index overhead** in the storage estimate.
+- **Designing for average load** and falling over at peak.
+- **Skipping the working-set calculation**, which is the one most likely to
+  change the architecture.
+- **Not stating assumptions**, so the interviewer can't correct a premise before
+  you build on it.
+- **Confusing bits and bytes** in the bandwidth number — an easy factor of
+  eight.
+</Callout>
+
+### Where this connects
+
+- [1. The framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — where estimation sits in the flow of the interview.
+- [3. Scaling](/system-design/3-scaling-vertical-vs-horizontal) — turning a QPS
+  figure into a number of machines.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — what the working-set calculation justifies.
+- [6. Databases](/system-design/6-databases) — what the storage figure decides.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the worked example in its full context.

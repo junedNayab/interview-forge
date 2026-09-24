@@ -1,0 +1,177 @@
+---
+title: "How to self-grade your practice"
+topic: "system-design"
+order: 306
+group: "Case Studies"
+difficulty: "medium"
+estimatedMinutes: 13
+tags: [rubric, self-assessment, practice, scoring, interview-technique]
+format: "mdx"
+summary: "A seven-dimension scoring rubric with weak, adequate and strong descriptors for each, so you can grade a recording of your own 45-minute attempt and know exactly what to fix next."
+---
+
+## What this page is for
+
+This is the rubric. After every timed attempt you score yourself against it, from the
+recording rather than from memory, because memory is generous: you will remember
+intending to state the trade-off, and the recording tells you whether you said it.
+
+The companion page,
+[how to practice](/system-design/12-how-to-practice-do-this-dont-just-read), covers
+how to run the session — timer, paper, out loud, interruption cards. This page covers
+what to do with the recording afterwards.
+
+The seven dimensions are close to what interviewers actually have on their
+scorecards. Each scores 1, 2 or 3, for a total out of 21. The scale is deliberately
+coarse, because the useful output is not a number but the identification of your
+single weakest dimension.
+
+**Grade harshly.** A generous 17 teaches you nothing. When unsure between two
+scores take the lower one, and require evidence in the recording for every point.
+
+## 1. Requirements and scoping
+
+The highest-weighted dimension, and the one most attempts lose points on, because it
+lands in the first five minutes when you are least settled.
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | You started designing without asking anything, or you asked questions and then designed something that did not reflect the answers. Nothing was declared out of scope, so the design sprawled. |
+| 2 — adequate | You asked two or three clarifying questions and distinguished functional from non-functional requirements, but you did not bound the scope explicitly and you did not confirm your understanding before moving on. |
+| 3 — strong | You asked at least three questions that changed the design, separated functional from non-functional requirements, named two or three core features and explicitly excluded the rest out loud, and then restated the whole thing and asked for agreement before drawing anything. |
+
+Listen for one specific sentence in the recording: a summary of the form "so: this
+many users, read-heavy, timelines can be a few seconds stale, and I am treating
+ranking as out of scope — does that sound right?" **Its absence is the single most
+reliable predictor of a bad attempt**, because everything downstream inherits the
+ambiguity.
+
+## 2. Estimation
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | No numbers, or numbers stated with no working, or you deferred estimation and never came back to it. |
+| 2 — adequate | You calculated queries per second and storage, with visible arithmetic, but the numbers then sat unused and did not influence any later decision. |
+| 3 — strong | You did the arithmetic out loud with aggressive rounding, and then drew an explicit conclusion from each figure — something of the form "600 GB a year, so a single node holds years of data and sharding would be premature". |
+
+The gap between 2 and 3 is the whole point here: an unused estimate is decoration.
+Check the recording for at least two places where a number is followed by a decision,
+and that you did not later contradict your own numbers by adding machinery the scale
+did not justify.
+
+## 3. API design
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | Skipped entirely, or you listed endpoint names with no parameters, no return shapes and no idea what the client actually calls. |
+| 2 — adequate | Three to five endpoints with plausible methods, paths and parameters, covering the functional requirements you named. |
+| 3 — strong | The same, plus the details that show you have shipped an API: how pagination works, what the client does on a retry, where idempotency lives on the write path, and which endpoint is the hot one. |
+
+Cheap to score well on and frequently skipped under time pressure, which makes it a
+good place to recover points — five minutes is enough. No API segment at all is a
+clock-management failure as much as a design one.
+
+## 4. High-level design
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | You opened with a complex architecture — gateway, queue, several datastores, a cache — with no justification for any of it. Or the diagram exists but you never traced a request through it. |
+| 2 — adequate | A clean, reasonable diagram from client through load balancer and service to database and cache, and you walked one request path through it end to end. |
+| 3 — strong | You started deliberately simple and added each component only after naming the bottleneck it solved, tracing both a read and a write path, and saying what happens on a cache miss and on a failure. |
+
+The tell for a 1 is the opening minute of the design segment. If the first thing you
+drew was five boxes, you pattern-matched rather than designed, and the follow-up will
+expose it. **Unjustified complexity reads as someone who knows component names, not
+someone who understands them.**
+
+## 5. Data model and storage
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | No schema. Or a datastore chosen by reflex — "we'll use Cassandra" — with no requirement cited. |
+| 2 — adequate | The main entities with their key fields, a stated choice of relational or non-relational with a reason, and the primary access pattern identified. |
+| 3 — strong | The same, plus the partition key and why, what the hot-key risk is, which queries are served by which index, and what the consistency requirement is for each part of the data rather than for the system as a whole. |
+
+The partition key is where this dimension is decided, and where your SQL background
+transfers directly: a hot shard is a skewed key distribution, and choosing a partition
+key is choosing which queries stay cheap. Check whether you named one and justified
+it, or said "we'll shard it" and moved on.
+
+## 6. Bottlenecks and failure
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | Never reached this segment, or you asserted the design scales without examining anything. |
+| 2 — adequate | You identified a single point of failure and a scaling limit when prompted, and proposed something reasonable for each. |
+| 3 — strong | You critiqued your own design unprompted: named the component that breaks first, the hot-spot risk, what happens when each dependency is unavailable, and what you would monitor to know. You also named something you would do differently with more time. |
+
+This separates senior from mid-level more sharply than any other dimension, and it is
+almost entirely about initiative. Answering "what is the single point of failure?" is
+expected; **volunteering it unasked is the signal.** So check not just whether the
+weakness was discussed but who raised it.
+
+## 7. Communication and clock management
+
+| Score | What it sounds like |
+|---|---|
+| 1 — weak | Long silences while thinking. You ran out of time with major sections untouched, or spent fifteen minutes on something peripheral like authentication. Jargon used without definition. |
+| 2 — adequate | Mostly continuous narration, all six phases covered, roughly on time, with the reasoning behind each decision audible. |
+| 3 — strong | You drove the interview rather than being led. You signposted transitions, said out loud when you were deferring something, absorbed interruptions and returned to your place, and finished the whole framework with time to spare. |
+
+Measure two things objectively, since this dimension is the easiest to be generous
+about. Your longest silence: over about fifteen seconds is a problem, and the fix is
+to narrate the search out loud. And the timestamp at which each phase started,
+compared against five, ten, fifteen, twenty-five and forty minutes — where you
+overran tells you more than how you felt about it.
+
+## Scoring and what to do with it
+
+Add the seven scores for a total out of 21.
+
+| Total | Reading | What to do next |
+|---|---|---|
+| 7 to 11 | The framework is not yet a habit — you are still assembling an approach during the interview. | Re-read [the framework lesson](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview) and do two more attempts on problems you have already seen. Repetition on a familiar problem is fine at this stage; the goal is the structure, not novelty. |
+| 12 to 16 | The structure is there and individual dimensions are thin. This is where most people sit after three or four attempts. | Ignore the total and work on your single lowest dimension. One dimension at a time, one attempt each. |
+| 17 to 19 | Interview-ready for most loops. | Move to unseen problems and add the interruption cards, since what is left is robustness rather than knowledge. |
+| 20 to 21 | Either genuinely strong or graded generously. | Check the second possibility first: re-listen to the recording and look for a point you awarded without evidence. If it holds up, attempt a problem well outside your comfort zone. |
+
+Look at the profile rather than the total. A 17 made of 3s with a single 1 in
+bottlenecks is a different and more urgent problem than a 17 of straight 2s, because a
+single weak dimension is exactly where an interviewer will land.
+
+**Track the seven scores across attempts in a simple table.** The trend is the only
+thing that reliably says whether your practice method is working, and a dimension that
+has not moved in four attempts is one you are avoiding rather than failing.
+
+## The external bar
+
+If you can drive Cases 1 through 3 end to end on a whiteboard unaided and score 17 or
+above on a recording you graded harshly, you are at the design level expected of a
+senior backend engineer at most product companies.
+
+Case 1 should be better than that. It is your own project, so the standard is higher —
+"tell me about a system you built" opens a large fraction of loops, and a weak answer
+about your own work is far more damaging than a weak answer about Twitter's timeline.
+
+<Callout type="interview" title="The seven questions, as a checklist">
+Print this and run it against every recording.
+
+1. Did I restate the requirements and get agreement before drawing anything?
+2. Did every number I calculated lead to a stated decision?
+3. Did my API include pagination, retries and idempotency?
+4. Did I start simple and name the bottleneck before adding each component?
+5. Did I name a partition key and the hot-key risk?
+6. Did I criticise my own design before being asked to?
+7. Was my longest silence under fifteen seconds, and did I cover all six phases?
+</Callout>
+
+### Where this connects
+
+- [12. How to practice (do this, don't just read)](/system-design/12-how-to-practice-do-this-dont-just-read) — how to run the session that this page grades, including the interruption cards.
+- [1. The framework — how to drive a 45-minute design interview](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview) — the six phases the rubric is organised around.
+- [2. Back-of-the-envelope estimation](/system-design/2-back-of-the-envelope-estimation-numbers-to-memorize) — what to fix when dimension 2 scores low.
+- [6. Databases](/system-design/6-databases) — partitioning and replication, for dimension 5.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns) — the vocabulary for dimension 6.
+- [Overview](/system-design/overview) — the full track order and the reading-to-practice ratio.
+- [CS Fundamentals](/cs-fundamentals) — the breadth that design-round follow-ups draw on, and the natural next track once these scores are consistent.
+- [Low-level design](/lld) — object-level design, which is graded on a different rubric entirely.

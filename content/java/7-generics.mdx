@@ -1,0 +1,502 @@
+---
+title: "7. Generics"
+topic: "java"
+order: 507
+group: "Core Java"
+difficulty: "hard"
+estimatedMinutes: 26
+tags: [generics, type-erasure, pecs, wildcards, variance, bridge-methods, type-tokens]
+format: "mdx"
+summary: "Type erasure as the single fact every generics rule follows from, why Java chose it over reified generics, why arrays are covariant and collections are not, PECS derived rather than memorised, heap pollution, bridge methods, and the type-token trick that makes Jackson's TypeReference work."
+---
+
+## Layer 1 — The mental model
+
+There is one fact in this topic. Everything else is a consequence of it, and if
+you can derive the consequences in front of an interviewer instead of reciting
+them, this becomes one of the easiest topics to score on.
+
+> **Generics are a compile-time fiction.** The compiler type-checks your code
+> as though generic types were real, then deletes them and inserts casts. The
+> bytecode that runs has no idea generics exist — at runtime there is only
+> `List`, holding `Object` references, exactly as in Java 1.4.
+
+That deletion has a name: **type erasure**. Here is the whole mechanism in one
+picture.
+
+```
+  what you write                what javac checks          what the JVM runs
+  --------------                -----------------          -----------------
+  List<String> xs               is every add() a String?   List xs
+  xs.add("a")                   is every get() used        xs.add("a")
+  String s = xs.get(0)            as a String?             String s = (String) xs.get(0)
+                                                                        ^^^^^^^^
+                                        the compiler inserted this cast for you
+```
+
+Two words for the two halves of that picture, because interviewers use them. A
+type parameter is erased to its **bound** — `Object` for an unbounded `T`, or
+the bound itself for something like `T extends Comparable<T>`. And because the
+caller loses its type information too, the compiler inserts a **checkcast**
+wherever a generic value is read.
+
+| Question | Answer, from erasure alone |
+|---|---|
+| Can I write `new T[10]`? | No — `T` does not exist at runtime |
+| Is `x instanceof List<String>` legal? | No — there is only `List` to test |
+| Can I overload on a list of strings and a list of integers? | No — same erasure, same signature |
+| Are those two list types the same class? | Yes — `getClass()` returns the same object |
+| Can a generic class have a `static` field of type `T`? | No — one class, one static, no per-instantiation `T` |
+
+**Nothing in that table needs memorising. It is one fact, applied five times.**
+
+---
+
+## Layer 2 — The mechanism
+
+### What erasure actually does to your code
+
+Take a generic class and a generic method:
+
+```java
+class Box<T extends Number> {
+    private T value;
+    T get()            { return value; }
+    void set(T value)  { this.value = value; }
+}
+
+static <T> void swap(List<T> list, int i, int j) { /* … */ }
+```
+
+After erasure, the class file contains this — and you can confirm it yourself
+with `javap -c`:
+
+```java
+class Box {                                   // T erased to its bound, Number
+    private Number value;
+    Number get()             { return value; }
+    void set(Number value)   { this.value = value; }
+}
+
+static void swap(List list, int i, int j) { /* … */ }   // unbounded T erased to Object
+```
+
+At every call site, the compiler adds the cast the caller would otherwise have
+written by hand:
+
+```java
+Box<Integer> b = new Box<>();
+Integer i = b.get();        // bytecode: invokevirtual get()  then  checkcast java/lang/Integer
+```
+
+So the promise generics make is narrow and exact: **the compiler guarantees that
+the casts it inserts can never fail**, provided you never ignored an unchecked
+warning. A `ClassCastException` from generic code is always evidence that some
+cast was made unsafely somewhere, usually by a raw type.
+
+One thing erasure does *not* remove: generic information in **class and method
+signatures** is retained in a `Signature` attribute in the class file, which is
+how `javac` can compile against a precompiled library and how reflection can
+report `getGenericSuperclass()`. That loophole is what super type tokens exploit
+later in this lesson. **Erasure removes types from instances, not from
+declarations.**
+
+### Why erasure at all?
+
+Java added generics in version 5, nine years after the language shipped, and the
+design constraint was **migration compatibility**: existing binaries had to keep
+working, and new generic code had to interoperate with old non-generic code in
+both directions. A `List` compiled in 1999 had to be passable to a method
+expecting a list of strings, and vice versa.
+
+Erasure delivers that almost for free, because the erased form of a generic
+class *is* the old class. `java.util.List` was genericised without breaking a
+single existing class file. It also means no code duplication: one `ArrayList`
+class exists in the JVM, not one per instantiation.
+
+C# took the other path two years later and **reified** generics: the CLR knows
+about type arguments at runtime, so a list of integers is genuinely a distinct
+type, `typeof(T)` works, `new T[]` works, and a list of value types stores them
+unboxed without any boxing overhead. The cost was that .NET had to change the
+runtime itself and break binary compatibility with 1.x collections. **Microsoft
+was willing to break the runtime and Sun was not** — that is the entire
+difference, and it is the answer to "which is better?" The honest reply is that
+reification is better for the programmer and erasure was cheaper for the
+ecosystem. Project Valhalla is Java's very long-running attempt to claw back the
+performance half of it.
+
+### Invariance, and the array mistake that explains it
+
+Generics are **invariant**: a list of strings is not a list of objects, even
+though a `String` is an `Object`. People find this surprising until they see
+what the alternative costs:
+
+```java
+// BROKEN — and correctly rejected by the compiler
+List<String> strings = new ArrayList<>();
+List<Object> objects = strings;       // compile error: incompatible types
+objects.add(42);                      // would have put an Integer into a List<String>
+String s = strings.get(0);            // ClassCastException, far from the real mistake
+```
+
+**Invariance is not a limitation, it is the feature.** If assignment were
+allowed, the write on line three would corrupt the list and the failure would
+surface somewhere else entirely.
+
+Now the counterexample, which is the best part of this topic: **arrays are
+covariant**, and Java gets exactly the outcome it avoided for generics.
+
+```java
+// compiles fine — arrays ARE covariant
+Object[] objects = new String[3];
+objects[0] = 42;      // ArrayStoreException at RUNTIME
+```
+
+Array covariance was a deliberate choice in Java 1.0, made so that methods like
+`Arrays.sort(Object[])` could be written at all before generics existed. To keep
+it sound, the JVM must perform a **store check on every single array write**,
+comparing the runtime element type against the value. That is why the failure is
+an `ArrayStoreException` rather than a compile error, and why every write to a
+reference array pays a small runtime cost.
+
+It is now widely regarded as a design mistake, and it is the crispest way to
+make the case for invariance: **the covariant design gets you a runtime
+exception, the invariant one gets you a compile error, and they are catching the
+same bug.** Say that in an interview and you have answered the question and the
+follow-up at once.
+
+There is a practical consequence too, and it is why the two features mix badly:
+arrays are covariant and reified, generics are invariant and erased, so
+`new T[10]` is illegal and generic array creation is unsafe. The standard
+workaround inside library code is an `Object[]` with a suppressed unchecked
+cast — which is exactly what `ArrayList` does internally with its
+`transient Object[] elementData`.
+
+### PECS, derived rather than memorised
+
+Wildcards exist to recover the flexibility invariance took away, without the
+unsoundness. The rule is "Producer Extends, Consumer Super," and you should be
+able to derive it on the spot.
+
+Start with `? extends T`, which means "some specific but unknown subtype of
+`T`." Because the compiler does not know *which* subtype, it cannot verify that
+any value you hand it is acceptable:
+
+```java
+List<? extends Number> nums = new ArrayList<Integer>();
+
+Number n = nums.get(0);   // SAFE to read: whatever it is, it IS a Number
+nums.add(3);              // compile error — the list might be a List<Double>
+nums.add(null);           // the sole exception: null is a member of every type
+```
+
+**So `? extends T` is read-only: you can take a `T` out, and the only thing you
+can put in is `null`.** It is a *producer* of values.
+
+Now `? super T`, "some specific but unknown supertype of `T`." The compiler
+cannot know what comes out, but it knows anything of type `T` is acceptable
+going in, since every supertype accepts a `T`:
+
+```java
+List<? super Integer> sink = new ArrayList<Number>();
+
+sink.add(42);             // SAFE to write: a List of any Integer supertype accepts an Integer
+Object o = sink.get(0);   // reading only gives you Object — it might be a List<Object>
+```
+
+**So `? super T` is write-oriented: you can put a `T` in, and what you take out
+is only usable as an `Object`.** It is a *consumer*.
+
+The worked example the JDK itself gives is `Collections.copy`:
+
+```java
+public static <T> void copy(List<? super T> dest, List<? extends T> src) {
+    for (int i = 0; i < src.size(); i++) {
+        dest.set(i, src.get(i));       // read T out of src, write T into dest
+    }
+}
+```
+
+`src` produces, so it gets `extends`. `dest` consumes, so it gets `super`. With
+that signature you can copy a list of integers into a list of numbers, which the
+invariant signature `copy(List<T>, List<T>)` would have rejected. The same
+reasoning explains `Collections.max(Collection<? extends T>)` and why
+`Comparator` appears as `Comparator<? super T>` all over the JDK — a comparator
+of `Object` can perfectly well compare strings, and the wildcard lets you pass
+it.
+
+Two closing rules. **Never use a wildcard in a return type**, because it forces
+wildcards on your callers and spreads. And use a type parameter when two
+positions must be the *same* type, a wildcard when they need not be.
+
+### Unbounded wildcards, and when a list of anything is correct
+
+`List<?>` means "a list of some unknown type," which is not the same as
+`List<Object>` — a list that specifically holds objects and accepts any write.
+You can read `Object` from a `List<?>` and write nothing but `null`.
+
+Use it when your method genuinely does not care about the element type, as
+`size()` and `clear()` do not. Prefer it over the raw type `List`, because a raw
+type disables *all* generic checking in that expression while the wildcard keeps
+type safety and still expresses indifference. Raw types exist only for
+pre-generics compatibility and should never appear in new code.
+
+### Bounds, generic methods, and inference
+
+A bound constrains what `T` can be and, just as usefully, tells the compiler
+what methods `T` has:
+
+```java
+static <T extends Comparable<T>> T max(List<T> list) {
+    T best = list.get(0);
+    for (T item : list) if (item.compareTo(best) > 0) best = item;   // compareTo is available
+    return best;
+}
+```
+
+Multiple bounds use `&`, and if one is a class it must come first:
+`<T extends Number & Comparable<T> & Serializable>`. The erasure is the
+*leftmost* bound, which is an occasionally useful detail when reading bytecode.
+
+Type inference does the rest. The diamond operator (Java 7) infers the type
+arguments of a constructor from the target type; Java 8 extended inference
+through lambda bodies and nested calls; and Java 10's `var` infers the variable
+type from the initialiser. One trap is worth naming: `var list = new ArrayList<>();`
+infers `ArrayList<Object>`, because there is no target type on the left for the
+diamond to read. `var` and the diamond together have nothing to infer from.
+
+### Heap pollution and `@SafeVarargs`
+
+**Heap pollution** is the state where a variable of a parameterised type refers
+to an object that is not of that type. Erasure makes it possible and the
+compiler can only warn about it.
+
+The commonest source is generic varargs, because `T... args` compiles to
+`T[] args`, and a generic array is exactly the thing that cannot exist safely:
+
+```java
+// BROKEN: leaks a generic array and corrupts it
+static <T> T[] toArray(T... args) { return args; }
+
+static <T> T[] pick(T a, T b) { return toArray(a, b); }
+
+String[] s = pick("x", "y");   // ClassCastException — the array is really Object[]
+```
+
+The compiler created an `Object[]` for the varargs parameter, and the implicit
+cast to `String[]` at the call site fails. The rule: **a generic varargs array
+is safe as long as you only read from it and never let it escape the method.**
+
+When that holds, `@SafeVarargs` suppresses the warning at the declaration
+instead of forcing every caller to suppress it:
+
+```java
+@SafeVarargs                                   // I read from the array and never store or return it
+static <T> List<T> listOf(T... items) {
+    return new ArrayList<>(Arrays.asList(items));
+}
+```
+
+It can only be applied to methods that cannot be overridden — `static`, `final`,
+or `private` — because a subclass override could break the promise.
+
+### Bridge methods
+
+This is the answer to "why is there a method in my stack trace that I never
+wrote?"
+
+```java
+class StringBox implements Comparable<StringBox> {
+    public int compareTo(StringBox other) { /* … */ }
+}
+```
+
+`Comparable` erases to a raw interface with the method
+`int compareTo(Object)`. Your class only declares `compareTo(StringBox)`, so
+strictly it does not implement the erased interface at all, and polymorphic
+dispatch through a `Comparable` reference would not find it. The compiler
+therefore synthesises a **bridge method**:
+
+```java
+// generated by javac, marked ACC_BRIDGE and ACC_SYNTHETIC
+public int compareTo(Object other) {
+    return compareTo((StringBox) other);   // cast, then delegate
+}
+```
+
+The same happens for covariant return types. Bridges are why you sometimes see
+a frame for the same method twice in a stack trace, why
+`getDeclaredMethods()` returns methods you never wrote (filter with
+`Method.isBridge()`), and why a `ClassCastException` can appear inside a method
+whose body contains no cast. **The cast that failed was in a bridge method the
+compiler wrote.**
+
+### Recursive bounds and the self-type idiom
+
+`<T extends Comparable<T>>` looks circular but reads plainly: "`T` is a type
+comparable to itself," which is how you say "orderable against others of its own
+kind." It is why `Enum` is declared as `Enum<E extends Enum<E>>`.
+
+The same trick gives you an inheritable fluent builder, which otherwise breaks
+because a superclass setter returns the superclass type and ends the chain:
+
+```java
+abstract class Builder<T extends Builder<T>> {
+    protected String name;
+
+    @SuppressWarnings("unchecked")
+    protected T self() { return (T) this; }
+
+    public T name(String name) { this.name = name; return self(); }   // returns the SUBTYPE
+}
+
+class UserBuilder extends Builder<UserBuilder> {
+    public UserBuilder email(String email) { /* … */ return this; }
+    public User build() { /* … */ }
+}
+
+new UserBuilder().name("mo").email("a@b.com").build();   // chain survives the superclass call
+```
+
+Without the recursive bound, `name("mo")` would return the abstract builder type
+and `email(...)` would not compile.
+
+### Getting around erasure: type tokens
+
+Sometimes you really do need the type at runtime — deserialising JSON, for
+instance. The basic tool is a **type token**: pass the `Class` object explicitly,
+since a `Class<T>` carries at runtime what `T` cannot.
+
+```java
+static <T> T parse(String json, Class<T> type) { /* … */ }
+
+User u = parse(body, User.class);     // the Class object supplies what erasure removed
+```
+
+This is how `Class.cast` and typesafe heterogeneous containers work, and it is
+why so many library methods take a class argument that looks redundant.
+
+It breaks down for *parameterised* types, because there is no
+`List<User>.class` — the class literal only exists for raw types. Which brings
+us to the trick every Jackson user has typed without knowing why:
+
+```java
+List<User> users = mapper.readValue(json, new TypeReference<List<User>>() {});
+//                                                                        ^^
+//                              those braces create an anonymous SUBCLASS — that is the point
+```
+
+The empty braces are not decoration. They declare an anonymous subclass of
+`TypeReference`, and **the generic superclass of a class declaration is exactly
+the information erasure keeps**, in the `Signature` attribute mentioned earlier.
+So the constructor can call `getClass().getGenericSuperclass()`, cast the result
+to `ParameterizedType`, and read out the actual type argument:
+
+```java
+// the essence of TypeReference / TypeToken / ParameterizedTypeReference
+abstract class TypeRef<T> {
+    private final Type type;
+    protected TypeRef() {
+        ParameterizedType superclass = (ParameterizedType) getClass().getGenericSuperclass();
+        this.type = superclass.getActualTypeArguments()[0];
+    }
+    public Type getType() { return type; }
+}
+```
+
+This is the **super type token** pattern, invented by Neal Gafter. Spring's
+`ParameterizedTypeReference` and Guava's `TypeToken` are the same idea. It is
+also why the braces are mandatory: without them there is no subclass, no
+generic superclass, and nothing to read.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What is type erasure?"** The compiler type-checks generics, then removes
+   the type arguments — replacing each parameter with its bound and inserting
+   casts at every read. The bytecode has no generic information.
+2. **"Why did Java choose erasure?"** Migration compatibility. Existing
+   binaries had to keep working in both directions, and erasure means the
+   generic class *is* the old class. No duplicate classes either.
+3. **"How is C# different?"** Reified generics: the runtime knows the type
+   argument, so `typeof(T)`, generic array creation and unboxed value-type
+   collections all work. It cost Microsoft a breaking runtime change.
+4. **"Why can't you write `new T[10]`?"** `T` does not exist at runtime, so the
+   JVM has no element type to give the array — and arrays need one for their
+   store check.
+5. **"Why can't you overload two methods on differently parameterised lists, or
+   give a generic class a `static` field of type `T`?"** Both come from there
+   being one class at runtime: identical erased descriptors in the first case,
+   one shared static field with no `T` to type it in the second.
+6. **"Why is a list of strings not a list of objects?"** Invariance. If it
+   were, you could add an integer through the wider reference and the failure
+   would surface later as a `ClassCastException`.
+7. **"But arrays are covariant — why?"** A Java 1.0 decision made so generic-ish
+   methods could exist before generics did. The JVM pays for it with a store
+   check on every write, and you get `ArrayStoreException` at runtime instead of
+   a compile error. It is regarded as a mistake.
+8. **"Explain PECS."** Read from `? extends T` (a producer — you can only write
+   `null`), write to `? super T` (a consumer — you can only read `Object`).
+   `Collections.copy` has one of each.
+9. **"Why is it `Comparator<? super T>` everywhere in the JDK?"** A comparator
+   of a supertype can compare subtype instances perfectly well, so the wildcard
+   accepts more callers with no loss of safety.
+10. **"When would you use an unbounded wildcard?"** When the element type is
+    genuinely irrelevant. It differs from a raw type because it keeps type
+    checking on.
+11. **"What is heap pollution?"** A variable of a parameterised type pointing at
+    an object of a different type — possible because erasure removes the
+    runtime check. Generic varargs is the usual source.
+12. **"What does `@SafeVarargs` assert?"** That the method only reads from the
+    varargs array and never stores or returns it. It is allowed only on methods
+    that cannot be overridden.
+13. **"What is a bridge method?"** A synthetic method the compiler generates so
+    an override with a more specific parameter or return type still matches the
+    erased signature. It explains surprising stack frames and casts you never
+    wrote.
+14. **"What does `<T extends Comparable<T>>` mean?"** A recursive bound: `T` is
+    comparable to itself. The same idiom gives an inheritable fluent builder a
+    working `self()`.
+15. **"Why does `new TypeReference<List<User>>() {}` need the braces?"** They
+    create an anonymous subclass, and a class declaration's generic superclass
+    survives erasure in the `Signature` attribute, so the constructor can
+    reflect on it. No subclass, no type information.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Ignoring unchecked warnings.** Each one is the compiler saying it can no
+  longer guarantee an inserted cast. Fix it or suppress it on the narrowest
+  possible declaration, with a comment explaining why it is safe.
+- **Raw types in new code.** One raw usage disables generic checking for that
+  whole expression, including parts that look unrelated.
+- **`var list = new ArrayList<>();`**, which silently infers a list of
+  `Object` because the diamond has no target type to read.
+- **Wildcards in return types**, which propagate to every caller.
+- **Returning the varargs array from a generic varargs method**, which is
+  precisely the escape `@SafeVarargs` promises does not happen.
+- **Expecting `instanceof` or reflection to tell you a collection's element
+  type.** It cannot; only an inspected element or a type token can.
+- **Assuming two differently parameterised instances are different classes.**
+  `getClass()` returns the same object for both, which surprises people writing
+  registries keyed by class.
+- **Over-parameterising an API.** A type parameter used once in a signature is
+  usually a wildcard in disguise.
+</Callout>
+
+### Where this connects
+
+- [Collections framework](/java/2-collections-framework-deep-dive) — every
+  collection interface is a worked example of the wildcard rules, and
+  `ArrayList`'s internal `Object[]` is the array-versus-generics workaround in
+  the wild.
+- [Java 8+ features](/java/4-java-8-features) — the functional interfaces are
+  generic, and lambda target typing is type inference.
+- [OOP and design principles](/java/5-oop-design-principles) — variance is the
+  type-system form of the Liskov substitution argument.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) —
+  `ParameterizedTypeReference` and generic bean resolution both depend on the
+  `Signature` attribute erasure leaves behind.
+- [JVM internals](/java/1-jvm-internals) — the class file format, descriptors
+  and the `checkcast` instruction that generics compile down to.

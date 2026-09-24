@@ -1,0 +1,319 @@
+---
+title: "7. CAP theorem & consistency models"
+topic: "system-design"
+order: 207
+group: "Fundamentals"
+difficulty: "hard"
+estimatedMinutes: 16
+tags: [consistency, replication, quorum, cap, pacelc]
+prerequisites: [6-databases]
+format: "mdx"
+summary: "Why a partition forces a choice, what quorums actually guarantee, the ladder of consistency models, and why 'strong consistency' is two different guarantees people confuse."
+---
+
+## Layer 1 — The mental model
+
+You have replicated your data across three machines so that losing one doesn't
+lose the data. The network between them breaks. A write arrives at machine A,
+which can no longer reach B or C.
+
+You have exactly two options, and no third:
+
+1. **Refuse the write** until you can reach a majority again. Data stays
+   correct; the system is *down* for that user.
+2. **Accept the write** on A alone. The system stays *up*; A and B now disagree,
+   and a read served by B returns stale data.
+
+That is the whole of CAP. Under a **P**artition, you choose **C**onsistency or
+**A**vailability. You never choose P — partitions are a property of networks,
+not a design option. "We'll pick CA" is the single most common way to fail this
+question: it means "we assume the network never fails," which is not a
+distributed system.
+
+```
+        Normal                        Partitioned
+   ┌───┐  ┌───┐  ┌───┐          ┌───┐ ╎ ┌───┐  ┌───┐
+   │ A │──│ B │──│ C │          │ A │ ╎ │ B │──│ C │
+   └───┘  └───┘  └───┘          └───┘ ╎ └───┘  └───┘
+      all agree                   ╎ write to A:
+                                  ╎  reject  → CP (correct, unavailable)
+                                  ╎  accept  → AP (available, divergent)
+```
+
+<Callout type="pitfall" title="CAP is narrower than people quote it">
+The 2002 Gilbert–Lynch proof is about one specific, very strong pairing:
+**linearizable** consistency plus **total** availability (every request to a
+non-failed node gets a response) plus partition tolerance. Real systems are
+neither perfectly available nor perfectly linearizable, so "is X CP or AP?" is
+usually a question about *defaults and tuning*, not a binary property. Say that
+out loud in an interview — it's the difference between reciting CAP and
+understanding it.
+</Callout>
+
+---
+
+## Layer 2 — The mechanism
+
+### What a partition actually is
+
+Not just a cut cable. In practice, the thing your code cannot distinguish:
+
+- a peer that crashed,
+- a peer that is alive but unreachable,
+- a peer that is alive and reachable but paused for 8 seconds in a stop-the-world
+  GC or a VM migration,
+- a peer whose replies are arriving, but slowly enough that you timed out.
+
+**All four look identical from the outside: no response before the timeout.**
+This is why partition tolerance isn't optional and why "just detect the failure
+and handle it" isn't an answer — a perfect failure detector is impossible in an
+asynchronous network. Everything below is a strategy for being correct *without*
+knowing which of those four happened.
+
+### Quorums: the actual machinery behind "CP"
+
+Replication with `N` replicas, `W` acknowledgements required for a write, `R`
+replicas consulted for a read. The rule that matters:
+
+```
+R + W > N
+```
+
+If the read set and the write set must overlap in at least one replica, then any
+read is guaranteed to touch at least one replica that saw the last completed
+write.
+
+Worked, with `N = 3`:
+
+| Config | R | W | Reads see latest write? | Survives |
+|---|---|---|---|---|
+| `W=3, R=1` | 1 | 3 | Yes (3+1 > 3) | 0 replica failures for writes, 2 for reads |
+| `W=2, R=2` | 2 | 2 | Yes (2+2 > 3) | 1 failure for both — **the usual choice** |
+| `W=1, R=1` | 1 | 1 | **No** (1+1 < 3) | 2 failures, but eventual only |
+| `W=1, R=3` | 3 | 1 | Yes (3+1 > 3) | fast writes, fragile reads |
+
+`W=2, R=2` on `N=3` is the default for a reason: it is the cheapest setting that
+both tolerates one machine dying and guarantees reads observe acknowledged
+writes. Note what a majority quorum buys you beyond overlap — **two majorities
+of the same set always intersect**, so only one side of a partition can ever
+assemble one. That's what stops split-brain.
+
+<Callout type="pitfall" title="R + W > N is not linearizability">
+It's necessary, not sufficient, and this is a great follow-up to be ready for.
+A quorum read overlapping a quorum write tells you the *value is present on some
+replica you contacted* — it does not order concurrent operations. Real gaps:
+
+- **Concurrent writes** to different replicas produce siblings. Something must
+  resolve them: last-write-wins (silently loses data), vector clocks, or CRDTs.
+- **Partial writes.** A write that reaches 2 of 3 and then the client crashes is
+  neither committed nor rolled back; it will be read by some quorums and not
+  others.
+- **Sloppy quorums** (Dynamo-style) accept writes on *any* `W` reachable nodes,
+  not the `W` nodes that own the key. `R + W > N` no longer holds across the
+  partition, by design — availability was the point.
+
+Linearizability needs a **consensus protocol** (Raft, Paxos, Zab), which elects a
+leader and totally orders operations. Quorums are an ingredient of consensus, not
+a substitute for it.
+</Callout>
+
+### PACELC: the half of the tradeoff CAP omits
+
+CAP only says anything during a partition — which is rare. PACELC (Abadi, 2012)
+asks the question that applies the other 99.9% of the time:
+
+> **P**artition → **A**vailability or **C**onsistency;
+> **E**lse → **L**atency or **C**onsistency.
+
+Because even with a healthy network, a linearizable read must coordinate — talk
+to the leader, or to a quorum — and coordination costs a round trip. Cross-region,
+that's 50–150 ms you cannot optimise away. Wanting strong consistency *is*
+wanting latency, permanently, not just during incidents.
+
+| System | Partition | Else | In plain terms |
+|---|---|---|---|
+| Cassandra, Dynamo, Riak | PA | EL | Always fast, always up, converges later |
+| MongoDB, HBase | PC | EC | Leader-based; pay coordination always |
+| Spanner | PC | EC | Linearizable globally, and pays for it in write latency |
+| DynamoDB (default) | PA | EL | Strong reads are opt-in, and cost 2× |
+
+Bringing PACELC up unprompted is one of the cheapest ways to signal you've read
+past the blog-post layer.
+
+### The ladder of consistency models
+
+"Strong" and "eventual" are the two ends of a spectrum with useful rungs in
+between. Strongest first:
+
+**Linearizable.** Every operation appears to happen instantaneously at a single
+point between its start and end, in real-time order. If a write completes and
+then a read begins, the read sees it. This is the model that makes a distributed
+store behave like one variable on one machine. Cost: consensus on every
+operation.
+
+**Sequential.** All nodes see operations in the *same* order, but that order need
+not match real time. A read may be arbitrarily stale, just never inconsistently
+ordered.
+
+**Causal.** Operations that are causally related (you read X, then write Y) are
+seen in that order everywhere; concurrent operations may be seen in different
+orders. Strong enough to stop the classic anomaly — a reply appearing before the
+comment it replies to — and cheap enough to stay available under partition. The
+sweet spot that under-appears in interviews.
+
+**Read-your-own-writes.** You see your own updates; others may lag. Implemented
+by routing a user's reads to the replica they wrote to, or by pinning reads to
+the leader for a few seconds after a write. This is the fix for the single most
+common user-visible replication bug: user edits their profile, page reloads from
+a replica, edit appears to have vanished.
+
+**Monotonic reads.** You never see time move backwards. Successive reads won't
+show a value, then an older value. Implemented by pinning a user to one replica.
+
+**Eventual.** Stop writing and replicas converge. Says nothing about when, or
+about what you observe meanwhile.
+
+<Callout type="interview" title="The distinction that separates levels">
+**Linearizability is not serializability.** Interviewers use "strong consistency"
+loosely and then check whether you do too.
+
+- **Linearizability** is a *recency* guarantee about a **single object**. "My
+  read returns the latest write."
+- **Serializability** is an *isolation* guarantee about **multiple objects in a
+  transaction**. "Concurrent transactions produce a result equal to running them
+  one at a time — in some order."
+
+Neither implies the other. Serializable execution may order your transaction
+before one that finished an hour ago (so, stale). A linearizable key-value store
+has no transactions at all. Both together is **strict serializability**, which is
+what Spanner sells as "external consistency."
+
+Tie it back: *"Snapshot isolation in Postgres is not serializable — it permits
+write skew. That's why `SERIALIZABLE` exists and why it aborts transactions."*
+That sentence connects this lesson to
+[transactions & isolation levels](/sql/4-transactions-isolation-levels) and
+tends to end the line of questioning favourably.
+</Callout>
+
+### What real systems actually do
+
+- **Spanner (CP / PC-EC).** Paxos groups per shard plus **TrueTime** — GPS and
+  atomic clocks giving a bounded-uncertainty interval rather than a timestamp. A
+  write waits out the uncertainty window (a few ms) before committing, which
+  makes timestamp order match real-time order globally. Buying linearizability
+  with hardware is the trick worth knowing.
+- **etcd / ZooKeeper (CP).** Raft and Zab. Used for the things that must be
+  correct: leader election, locks, config, service registry. Small data, strong
+  guarantees. Note the sharp edge: **ZooKeeper reads are not linearizable by
+  default** — any follower serves them and may lag. You need an explicit `sync`
+  first. etcd does give linearizable reads by default.
+- **Cassandra (AP, tunable).** No leader; every replica takes writes. Conflicts
+  resolved by last-write-wins on timestamps, so **concurrent writes silently lose
+  data**. `QUORUM` reads and writes get you `R + W > N` but still not
+  linearizability; for that you need lightweight transactions (`IF NOT EXISTS`),
+  which run Paxos per operation and are roughly 4× slower.
+- **DynamoDB.** Eventually consistent reads by default, `ConsistentRead=true`
+  available at double the read-capacity cost. Knowing the *pricing* consequence
+  is a good sign you've operated one.
+
+<Callout type="pitfall" title="Is Redis CP or AP? (a favourite trap)">
+Redis replication is **asynchronous**. The primary acknowledges your write
+immediately, then propagates. So:
+
+1. Client writes to the primary, gets `OK`.
+2. Primary dies before the replica receives it.
+3. Sentinel or Cluster promotes the replica.
+4. **The acknowledged write is gone.**
+
+Redis is therefore *not* CP — it can lose committed writes on failover — and it
+isn't cleanly AP either, because a minority partition stops serving. It is best
+described as "AP-leaning, and not a system of record." `WAIT numreplicas timeout`
+blocks until replicas ack, which narrows the window but is not consensus: it
+can't prevent a stale primary from having already acked.
+
+The practical conclusion, and the one to state: **do not use Redis as the only
+durable home for data you cannot lose, and be sceptical of Redis-based
+distributed locks.** Redlock's safety was publicly disputed by Kleppmann
+precisely because a GC pause can make a lock holder believe it still holds a lock
+it has lost. If you need a lock for correctness, you need a fencing token; if you
+need one for efficiency, Redis is fine.
+</Callout>
+
+### Choosing, per feature — not per system
+
+The real skill is that one product needs several points on the ladder at once.
+Take the URL shortener:
+
+| Feature | Model needed | Why |
+|---|---|---|
+| Allocating a new short code | Linearizable | Two users must never get the same code. Needs consensus or a single allocator. |
+| Resolving a code → URL | Eventual + cache | Immutable after creation, so staleness is impossible in practice. Serve from CDN/replica. |
+| Click analytics | Eventual | Counters, aggregated. Seconds of lag is invisible. |
+| "My links" dashboard | Read-your-own-writes | A link you just created *must* appear, or the product looks broken. |
+
+Answering "it depends on the feature" and then enumerating features is what a
+senior answer looks like. Answering "we'll use strong consistency" is what a
+mid-level answer looks like.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why can't you have CA?"** Because P is not a choice. A CA system is a
+   single-node system, or one that corrupts on partition.
+2. **"And when there's no partition?"** PACELC: latency vs consistency. Strong
+   consistency costs a round trip forever, not just during incidents.
+3. **"Does `R + W > N` give you strong consistency?"** No — no ordering of
+   concurrent writes, no handling of partial writes, and sloppy quorums break the
+   inequality deliberately. Consensus is what gives ordering.
+4. **"Linearizable or serializable?"** Recency of one object vs isolation of a
+   multi-object transaction. Neither implies the other; both is strict
+   serializability.
+5. **"Is Redis CP or AP?"** Async replication → acknowledged writes can be lost
+   on failover. Not a system of record.
+6. **"How does Spanner get global linearizability?"** TrueTime's bounded
+   uncertainty plus commit-wait, on top of Paxos.
+7. **"Cassandra with QUORUM — are you safe?"** From staleness, largely. From
+   concurrent-write data loss, no: last-write-wins discards a value silently.
+8. **"User updates their profile and it appears to revert. Diagnose."**
+   Read-your-own-writes violation from reading a lagging replica. Fix: pin reads
+   to leader briefly post-write, or route by session.
+9. **"Two successive reads show newer then older data."** Monotonic-reads
+   violation — the requests hit different replicas. Fix: sticky routing.
+10. **"Where would you accept eventual consistency in your own project?"** Have
+    the answer pre-built (analytics, counters, feeds) and the contrast ready
+    (money, inventory, identity, uniqueness).
+</Callout>
+
+### Failure modes to name unprompted
+
+- **Split-brain.** Both sides of a partition accept writes and diverge.
+  Prevented by majority quorums: two majorities always intersect, so only one
+  side can have one. This is also why cluster sizes are odd — a 4-node cluster
+  tolerates the same single failure as 3 while costing more.
+- **Last-write-wins data loss.** Clock skew between nodes decides which
+  concurrent write survives. Silent, unrecoverable.
+- **Stale reads after failover.** A demoted primary that hasn't learned it was
+  demoted keeps serving reads. Mitigated by leases and fencing tokens.
+- **Lost acknowledged writes.** Any system that acks before durable replication:
+  Redis, MySQL with async replicas, Kafka with `acks=1`.
+
+<Callout type="tip" title="The one-sentence version, if you're asked in passing">
+"Partitions aren't optional, so you're choosing whether to be wrong or to be
+down — and PACELC adds that even when the network is healthy you're choosing
+between latency and consistency. In practice I pick per feature: consensus for
+uniqueness and money, eventual for counters and feeds, read-your-own-writes
+wherever a user looks at their own data."
+</Callout>
+
+### Where this connects
+
+- [6. Databases](/system-design/6-databases) — replication and sharding are the
+  substrate all of this runs on.
+- [Distributed systems concepts](/cs-fundamentals/3-distributed-systems-concepts)
+  — consensus, leader election, failure detectors.
+- [Transactions & isolation levels](/sql/4-transactions-isolation-levels) — the
+  serializability half of the confusion above.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the per-feature table, applied.

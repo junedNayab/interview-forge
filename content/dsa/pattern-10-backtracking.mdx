@@ -1,0 +1,436 @@
+---
+title: "Pattern 10 — Backtracking"
+topic: "dsa"
+order: 112
+difficulty: "hard"
+estimatedMinutes: 26
+tags: [backtracking, recursion, subsets, permutations, combinations, pruning, n-queens]
+format: "mdx"
+summary: "Backtracking as DFS over a decision tree with an undo step, the three template families and how they differ, the duplicate-skip condition and why it is correct, and why pruning is the difference between accepted and timed out."
+---
+
+## Layer 1 — When you reach for this
+
+> Backtracking is **depth-first search over a decision tree, with an undo**.
+> You are not enumerating answers; you are enumerating *decisions*, and the undo
+> is what lets one mutable path object represent every branch of the tree
+> instead of allocating a fresh copy per node.
+
+The recognition is unusually reliable, because backtracking problems announce
+themselves in the output type. If the answer is a **collection of arrangements**
+rather than a single number, you are almost certainly backtracking.
+
+The phrases that signal it:
+
+- **"Find all"** — all subsets, all permutations, all combinations, all paths,
+  all valid parenthesisations, all ways to partition. The word *all* is the
+  strongest single signal in this entire catalogue of patterns.
+- **"Generate every"**, **"list the possible"**, **"enumerate"**.
+- **Constraint satisfaction**: place N queens so none attack, fill a Sudoku
+  grid, colour a map, assign workers to jobs subject to rules. You are searching
+  a space where most positions are invalid and you need one or all of the valid
+  ones.
+- **A small input bound.** `n` up to 20 with an exponential-looking question, or
+  a grid of at most a few hundred cells, is the constraints section telling you
+  the intended solution is exponential. See
+  [the complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) for
+  the full constraint-to-algorithm table.
+- **"Does a path exist"** through a grid or a board where you may not reuse
+  cells. The no-reuse condition is what forces the undo.
+
+The anti-signals, which are where people lose time:
+
+- **"How many ways"** with no requirement to produce them. Counting is usually
+  dynamic programming, and the difference is enormous: counting paths in a grid
+  is `O(mn)` with DP and exponential with backtracking. Only enumerate if you
+  must hand back the items.
+- **"The minimum / maximum cost"** over choices. Again DP, or greedy if the
+  choice is provably safe. Backtracking finds every arrangement; if you only
+  need the best one and the subproblems overlap, you are doing exponentially
+  redundant work. See [Pattern 12](/dsa/pattern-12-dynamic-programming).
+- **Large `n` with an "all" phrasing.** If `n` is `10^5` and the question says
+  "find all", it means all *indices* or all *pairs* satisfying a local
+  condition, not all subsets. Re-read it.
+- **Shortest path in a grid you may revisit.** That is BFS, and the visited set
+  is permanent rather than undone. **The single clearest distinction between
+  backtracking DFS and ordinary DFS is whether the visited mark is reverted on
+  the way out.**
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+At every node of the recursion, this holds:
+
+**`path` contains exactly the choices made along the current root-to-node route,
+and nothing else. When a call returns, the state is bit-for-bit what it was when
+the call was entered.**
+
+That second clause is the whole of backtracking. The recursion explores a tree,
+but there is only one `path` list, one `used` array, one board. They are shared
+by every branch. The undo is what makes sharing safe: **the state is a loan, and
+every recursive call must return it in the condition it borrowed it.** If you
+can say that sentence, you can debug any backtracking bug, because every
+backtracking bug is a violation of it — a mutation not undone, or an undo that
+does not match the mutation.
+
+This is also why the pattern is memory-efficient. The tree may have `2^n` nodes,
+but at any instant you hold one path of length at most `n`, plus the recursion
+stack of the same depth. **Time is exponential; space is linear.**
+
+### The universal template
+
+```java
+void backtrack(State state, List<Result> out) {
+    if (isComplete(state)) {          // a leaf — record a COPY, not the live object
+        out.add(new ArrayList<>(state.path));
+        return;
+    }
+    for (Choice c : choicesFrom(state)) {
+        if (!isValid(c, state)) continue;   // PRUNE — the whole skill lives here
+        apply(c, state);                    // choose
+        backtrack(state, out);              // explore
+        undo(c, state);                     // un-choose  <-- the backtracking
+    }
+}
+```
+
+Three lines matter. `apply` and `undo` must be exact mirrors; if `apply` touches
+two structures, `undo` touches both. The `new ArrayList<>(...)` is not
+defensive style, it is required — adding the live `path` would put the same
+mutable object into the result list many times, and by the end of the search it
+would be empty. And the `continue` on an invalid choice is where the difference
+between a passing and a timing-out solution lives.
+
+### The three families
+
+They are the same template with different loop bounds, and knowing which is
+which in the first thirty seconds is most of the battle.
+
+**Subsets — include or exclude each element, `2^n` results.** Every node of the
+tree is itself an answer, so the record happens at the top of the call rather
+than at a leaf. The loop starts at `start` and recurses with `i + 1`:
+
+```java
+void subsets(int start, int[] nums, List<Integer> path, List<List<Integer>> res) {
+    res.add(new ArrayList<>(path));                   // every node is an answer
+    for (int i = start; i < nums.length; i++) {
+        path.add(nums[i]);                            // choose
+        subsets(i + 1, nums, path, res);              // explore — i+1, never reuse
+        path.remove(path.size() - 1);                 // un-choose
+    }
+}
+```
+
+**Permutations — order matters, `n!` results.** Every element is available at
+every level, so there is no `start`; instead a `used[]` array records what is
+already on the path. The answer is recorded only at full depth:
+
+```java
+void permute(int[] nums, boolean[] used, List<Integer> path, List<List<Integer>> res) {
+    if (path.size() == nums.length) { res.add(new ArrayList<>(path)); return; }
+    for (int i = 0; i < nums.length; i++) {
+        if (used[i]) continue;
+        used[i] = true;  path.add(nums[i]);           // choose  (two mutations)
+        permute(nums, used, path, res);
+        path.remove(path.size() - 1);  used[i] = false;   // un-choose  (both)
+    }
+}
+```
+
+**Combinations — a set of size k, order irrelevant, `C(n, k)` results.** Same
+shape as subsets with a size check at the leaf. The `start` index is what makes
+it combinations rather than permutations: **by only ever looking forward, you
+generate each set in exactly one order, so `[1,2]` is produced and `[2,1]` never
+is.** That one index is the entire difference between `C(n,k)` and `P(n,k)`.
+
+A fourth shape worth naming: **unbounded reuse**, as in Combination Sum, where
+an element may be picked repeatedly. Recurse with `i` instead of `i + 1`. The
+`start` index still prevents reordering, so `[2,2,3]` appears once and `[3,2,2]`
+never does.
+
+### Duplicate handling
+
+When the input contains duplicates, the naive template produces duplicate
+answers. The fix is two lines:
+
+```java
+Arrays.sort(nums);                                  // equal values become adjacent
+// ... inside the loop:
+if (i > start && nums[i] == nums[i - 1]) continue;  // skip duplicate SIBLINGS
+```
+
+The condition is worth dissecting, because writing `i > 0` instead of
+`i > start` is a classic bug that produces too few answers.
+
+The tree has two kinds of relationship between positions holding equal values.
+Two equal values may be **siblings** — different choices at the same level,
+which would generate literally identical subtrees, so one of them is pure
+duplication. Or they may be **ancestor and descendant** — the same value chosen
+twice at different depths, which is legitimate whenever the problem allows a
+multiset, as `[2,2]` from the input `[2,2,3]` must be.
+
+`i == start` is exactly the first choice at this level. So `i > start` means
+"this is not the first sibling," and combined with `nums[i] == nums[i-1]` it
+means "an identical sibling was already explored at this level." That is the
+duplicate. Writing `i > 0` would also suppress the ancestor-descendant case and
+lose valid answers. **The condition skips duplicate branches, never duplicate
+values.**
+
+For permutations with duplicates the sibling logic is the same but expressed
+through `used`: skip when `i > 0 && nums[i] == nums[i-1] && !used[i-1]`. The
+`!used[i-1]` clause enforces that equal values are consumed left to right, which
+picks exactly one representative ordering out of each group of identical
+permutations.
+
+### Pruning is the whole skill
+
+Every backtracking problem that is rated hard is rated hard because of pruning.
+The template is three lines; the difference between a solution that finishes and
+one that runs for an hour is usually a single early return.
+
+Three kinds of pruning, in rough order of value:
+
+**Feasibility pruning** — stop when the partial solution already violates a
+constraint. In Combination Sum, `if (remaining < 0) return;` and, once the array
+is sorted, `if (nums[i] > remaining) break;` — `break` rather than `continue`,
+because everything after it in a sorted array is also too large. That single
+change turns an intractable search into an instant one.
+
+**Bound pruning** — stop when the partial solution cannot possibly beat the best
+found so far. This is branch and bound; it is what makes exhaustive search
+practical on real optimisation problems.
+
+**Symmetry pruning** — stop when this branch is a relabelling of one already
+explored. The duplicate-skip above is a symmetry prune. In N-Queens, restricting
+the first queen to the left half of the first row halves the work by mirror
+symmetry.
+
+The habit to build: after you have a correct brute force, ask "at which node did
+I already know this branch was hopeless?" and move the check there.
+
+### Worked example: N-Queens
+
+Place `n` queens on an `n` by `n` board with no two attacking. Rows are the
+decision levels — one queen per row, by construction — so the decision at level
+`r` is which column to use.
+
+The naive validity check scans the board and costs `O(n)` per candidate. The
+standard improvement is to notice that **conflicts are membership tests, so they
+belong in sets, and the diagonals have closed-form identifiers**: every cell on
+a given "down-right" diagonal shares the same value of `row - col`, and every
+cell on a "down-left" diagonal shares `row + col`. Since `row - col` ranges over
+negative values, offset it by `n - 1` to index an array.
+
+```java
+boolean[] col, diag1, diag2;        // sizes n, 2n-1, 2n-1
+
+void solve(int r, int n, List<List<String>> res, int[] queenCol) {
+    if (r == n) { res.add(render(queenCol, n)); return; }
+    for (int c = 0; c < n; c++) {
+        int d1 = r - c + n - 1, d2 = r + c;
+        if (col[c] || diag1[d1] || diag2[d2]) continue;       // O(1) conflict check
+        col[c] = diag1[d1] = diag2[d2] = true;  queenCol[r] = c;   // choose
+        solve(r + 1, n, res, queenCol);                            // explore
+        col[c] = diag1[d1] = diag2[d2] = false;                    // un-choose
+    }
+}
+```
+
+The adaptation made explicit: the generic template's `isValid` became three
+array reads because we chose a representation in which the constraint is a
+lookup. **When a backtracking solution is too slow, the first thing to change is
+usually not the search — it is the representation of the constraint.** The same
+move appears in Sudoku, where row, column and box occupancy become three
+`boolean[9][9]` arrays or three arrays of bitmasks.
+
+### Worked example: Word Search
+
+Find whether a word exists in a grid, moving between orthogonal neighbours
+without reusing a cell. This is the case that most clearly shows why the undo
+exists. You mark a cell as visited before recursing so the current path cannot
+double back on itself, and you unmark it afterwards **because a cell that is
+unusable on this path is perfectly usable on a different one**. Forget the
+unmark and you get false negatives that only appear on inputs where two candidate
+paths share a prefix.
+
+The idiomatic trick is to avoid a separate visited array by writing a sentinel
+into the grid itself:
+
+```java
+boolean dfs(char[][] b, int r, int c, String w, int k) {
+    if (k == w.length()) return true;
+    if (r < 0 || c < 0 || r >= b.length || c >= b[0].length || b[r][c] != w.charAt(k))
+        return false;
+    char saved = b[r][c];
+    b[r][c] = '#';                                  // choose: mark in-path
+    boolean found = dfs(b, r+1, c, w, k+1) || dfs(b, r-1, c, w, k+1)
+                 || dfs(b, r, c+1, w, k+1) || dfs(b, r, c-1, w, k+1);
+    b[r][c] = saved;                                // un-choose: restore
+    return found;
+}
+```
+
+Worst case `O(m * n * 4^L)` for a word of length `L`, though the character check
+at the top prunes almost everything in practice. If asked to search many words
+at once, the answer is to put the word list in a trie and walk the trie alongside
+the grid — see [Pattern 8 — Tries](/dsa/pattern-8-tries-prefix-trees).
+
+### Stating the complexity honestly
+
+Interviewers notice when you quote `O(2^n)` for subsets, because it is wrong.
+There are `2^n` subsets, but each one is copied into the result list, and the
+average subset has `n/2` elements. **Subsets is `O(n * 2^n)` time and, if you
+count the output, `O(n * 2^n)` space; the working space is `O(n)`.**
+Permutations is `O(n * n!)` for the same reason. Combination Sum has no clean
+closed form because the depth depends on the target and the smallest candidate;
+the honest answer is `O(n^(T/m))` where `T` is the target and `m` the minimum
+value, and saying "exponential in target over smallest coin, bounded in practice
+by the pruning" is better than a confident wrong number.
+
+The distinction that earns credit: **the output itself is exponential, so no
+algorithm can be polynomial. The question is only whether your search visits
+nodes that produce no output** — and that is what pruning measures.
+
+### Edge cases and traps
+
+- **Adding the live `path`** instead of a copy. Every entry in the result ends up
+  the same empty list.
+- **Asymmetric undo.** Two mutations in `apply`, one in `undo`. Write them as
+  adjacent mirrored lines so the eye catches it.
+- **`i > 0` instead of `i > start`** in the duplicate skip, which silently drops
+  valid answers containing repeated values.
+- **Forgetting to sort** before the duplicate skip. The condition assumes equal
+  values are adjacent.
+- **Recursing with `i` when you meant `i + 1`**, which turns combinations into
+  infinite recursion or unbounded reuse.
+- **Empty input and empty target.** The empty subset is a valid subset; an empty
+  string usually has one partitioning, not zero.
+- **Stack depth.** Recursion depth equals solution length. For grids of `10^4`
+  cells a DFS can overflow the default stack; mention converting to an explicit
+  stack if the interviewer pushes on it.
+- **Global mutable state across test cases.** Static arrays that are not reset
+  between runs are the most confusing bug in this pattern.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What makes this backtracking rather than plain DFS?"** The undo. Ordinary
+   DFS marks visited permanently; backtracking reverts the mark so the same node
+   can appear on a different path.
+2. **"Time complexity of subsets?"** `O(n * 2^n)` — `2^n` subsets and `O(n)` to
+   copy each. Working space `O(n)`; output space `O(n * 2^n)`.
+3. **"Permutations?"** `O(n * n!)`, same reasoning. The `used[]` check is `O(1)`.
+4. **"Why does the combinations template need a `start` index?"** It forces
+   every set to be built in one fixed order, so `[1,2]` is generated and `[2,1]`
+   is not. Remove it and you get permutations.
+5. **"How do you handle duplicates in the input?"** Sort, then skip when
+   `i > start && nums[i] == nums[i-1]`. That suppresses duplicate siblings at
+   the same level while still allowing a value to repeat down a path.
+6. **"Why `i > start` and not `i > 0`?"** `i == start` is the first choice at
+   this level, so `i > start` identifies a repeated *sibling*. `i > 0` would also
+   block the legitimate ancestor-descendant repeat.
+7. **"Your solution times out. What do you do?"** Add pruning, in this order:
+   reject when the partial state already violates a constraint, `break` instead
+   of `continue` once the input is sorted and the rest cannot fit, and cut
+   symmetric branches.
+8. **"Can this be memoised?"** Only if the problem asks for a count or an
+   optimum and the subproblem depends on a small state, not the full path. If
+   you must return every arrangement, there is nothing to reuse — the outputs
+   are all distinct.
+9. **"Space complexity?"** `O(n)` for the path plus `O(n)` for the recursion
+   stack, ignoring output. That is the selling point: exponential time, linear
+   memory.
+10. **"What if `n` is 30 instead of 15?"** `2^30` is a billion — too slow. Look
+    for a DP formulation, a meet-in-the-middle split into two halves of 15, or
+    accept that only a count is computable.
+11. **"Convert this to iterative."** Subsets has a clean bitmask loop: for each
+    mask from `0` to `2^n - 1`, include element `j` when bit `j` is set. General
+    backtracking needs an explicit stack holding the state and the next choice
+    index.
+12. **"N-Queens conflict check in `O(1)`?"** Three boolean arrays: column,
+    `row - col + n - 1`, and `row + col`. Cells on a diagonal share those sums.
+13. **"What if the input arrives as a stream?"** Backtracking needs the whole
+    candidate set up front, so you buffer. If the set is too large to buffer, the
+    question is not really enumerable and you should be sampling or counting.
+14. **"How would you parallelise it?"** Split at the top level — give each
+    first-choice subtree to a worker. The branches are independent because the
+    undo makes each subtree self-contained, provided each worker owns its own
+    path state.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Adding the mutable path object to the results** rather than a copy.
+- **An undo that does not mirror the choose** — most often forgetting
+  `used[i] = false` while remembering the list removal.
+- **Sorting inside the recursion** instead of once before it, which quietly adds
+  a `log n` factor to every node.
+- **Copying the path at every node** when only leaves are answers; allocation
+  dominates the runtime.
+- **Using `List.remove(Object)` instead of `remove(index)`** on a
+  `List<Integer>`, which removes by value and, for small integers, the wrong
+  occurrence.
+- **Checking validity after recursing** rather than before. It produces the
+  right answer and explores the entire useless subtree first.
+- **Believing the constraint bound is a hint about the output size.** `n` up to
+  20 suggests `2^n` nodes, but the number of *valid* results may be far smaller
+  — that gap is your pruning opportunity.
+- **String concatenation inside the recursion.** Use a `StringBuilder` with
+  `setLength` as the undo; building a new string per node is `O(n)` extra at
+  every one of exponentially many nodes.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Binary Tree Paths** — the smallest possible backtracking, and it makes the
+  undo visible on a structure you already understand.
+- **Letter Case Permutation** — a pure include/exclude tree with no pruning to
+  distract you.
+
+**Medium**
+
+- **Subsets** and **Subsets II** — the base template and the duplicate skip,
+  back to back. Do them in that order deliberately.
+- **Permutations** and **Permutations II** — the `used[]` family and the
+  `!used[i-1]` duplicate rule.
+- **Combination Sum**, **Combination Sum II**, **Combination Sum III** —
+  unbounded reuse, duplicates, and a fixed size. Three variants of one loop.
+- **Word Search** — grid backtracking and why the unmark is mandatory.
+- **Palindrome Partitioning** — the decision is where to cut, and the palindrome
+  check is the prune. Precomputing a palindrome table is the natural follow-up.
+- **Generate Parentheses** — pruning by counting open and close, which is far
+  better than generating all strings and filtering.
+- **Restore IP Addresses** — heavy constraint pruning on a tiny tree.
+
+**Hard**
+
+- **N-Queens** — the `O(1)` conflict representation.
+- **Sudoku Solver** — the same idea in three dimensions, plus the
+  most-constrained-cell ordering heuristic if you have time.
+- **Word Search II** — backtracking driven by a trie; the combination that makes
+  the multi-word case tractable.
+- **Partition to K Equal Sum Subsets** — where naive search explodes and
+  sorting descending plus skipping empty buckets rescues it.
+
+### Where this connects
+
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) — the
+  same decision tree, but when you need a count or an optimum and the
+  subproblems overlap, memoise instead of enumerate.
+- [Pattern 7 — Trees](/dsa/pattern-7-trees-dfs-bfs) — backtracking is DFS, and
+  the recursion habits transfer directly.
+- [Pattern 11 — Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) — the
+  distinction between a permanent visited set and a reverted one is exactly the
+  distinction between graph traversal and backtracking.
+- [Pattern 8 — Tries](/dsa/pattern-8-tries-prefix-trees) — the structure that
+  makes multi-word grid search feasible.
+- [Pattern 15 — Bit Manipulation](/dsa/pattern-15-bit-manipulation-math) — the
+  iterative bitmask enumeration of subsets, and bitmask state for pruning.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — reading
+  the input bound to conclude that an exponential search is intended.

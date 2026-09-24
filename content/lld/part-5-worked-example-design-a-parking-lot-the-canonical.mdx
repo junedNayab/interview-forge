@@ -1,0 +1,778 @@
+---
+title: "Part 5 — Worked example: Design a Parking Lot (the canonical LLD problem)"
+topic: "lld"
+order: 406
+difficulty: "hard"
+estimatedMinutes: 32
+tags: [lld, parking-lot, worked-example, strategy, concurrency, java]
+format: "mdx"
+summary: "The full design end to end — requirements, class diagram, real Java, where each SOLID principle lands, the two-cars-one-spot race and its fix, and the God-class version shown alongside so you can price the difference."
+---
+
+## Layer 1 — The mental model
+
+The parking lot is the "two sum" of LLD: it is asked constantly, it is simple
+enough to finish in an hour, and it contains every skill the round measures.
+Work this one problem properly and you will recognise the shape of most others.
+
+> **A parking lot design is not a modelling exercise. It is a test of whether
+> you can identify the two or three things that will change and localise them.**
+> Everything else — floors, spots, tickets — is bookkeeping that any candidate
+> can get right.
+
+The two axes of change, in almost every version of this problem:
+
+| What varies | What the interviewer will ask | Where it goes |
+|---|---|---|
+| **How a spot is chosen** | "Now allocate the nearest spot to the entrance" / "spread cars across floors" | `SpotAllocationStrategy` |
+| **How the fee is computed** | "Now add weekend surge pricing" / "first 30 minutes free" / "monthly passes" | `PricingStrategy` |
+| Spot and vehicle kinds | "Now add electric-vehicle charging spots" | An enum plus a fit rule |
+| Simultaneous entry | "Two cars arrive at the last spot" | A narrow lock on the spot |
+
+Everything below follows from that table. The design exists to make those four
+rows cheap.
+
+```
+                        ┌──────────────────────────┐
+     Gate ─── park() ──►│        ParkingLot        │  facade + coordinator
+                        │  floors, allocation,     │
+                        │  pricing, ticket store   │
+                        └───┬───────────┬──────────┘
+                            │           │
+         allocate(...)      │           │  fee(ticket, exitTime)
+                            ▼           ▼
+        ┌────────────────────────┐   ┌──────────────────────┐
+        │ SpotAllocationStrategy │   │   PricingStrategy    │   ◄── interfaces on
+        │  (interface)           │   │   (interface)        │       the axes of change
+        └───────────┬────────────┘   └──────────┬───────────┘
+                    │                            │
+     NearestFirst / SpreadAcrossFloors    Hourly / FlatDay / WeekendSurge
+                    │
+                    ▼
+        ┌────────────────────┐   1..*   ┌──────────────────┐
+        │   ParkingFloor     │◆────────►│   ParkingSpot    │  owns its own
+        │  spots, floorNo    │          │  id, type,       │  occupancy invariant
+        └────────────────────┘          │  occupant        │
+                                        └──────────────────┘
+                                                 ▲
+        ┌──────────┐      ┌────────┐             │ occupies
+        │ Vehicle  │◄─────│ Ticket │─────────────┘
+        │ (record) │      │(record)│  immutable record of one entry
+        └──────────┘      └────────┘
+```
+
+---
+
+## Layer 2 — The mechanism
+
+### Step 1 — Requirements clarification (5 minutes)
+
+The questions to ask, and why each one changes the design:
+
+- **"Multiple floors, or one flat lot?"** Decides whether `ParkingFloor` exists
+  at all. Ask rather than assume; a single-level lot is a simpler and perfectly
+  acceptable scope.
+- **"What spot types are there, and which vehicles fit in which?"** Decides
+  whether fit is a simple enum comparison or a rule table. This is where "a
+  motorcycle can use a compact spot but not vice versa" comes from.
+- **"How is a spot chosen — any free one, or nearest to the entrance?"** The
+  most important question in the round. If the answer is "any free one", you
+  still put it behind an interface, because "nearest" is the guaranteed
+  follow-up.
+- **"How is the fee calculated?"** Hourly? Per-vehicle-type rates? Free for the
+  first fifteen minutes? Daily caps? The answer's *shape* matters more than the
+  numbers.
+- **"How many entry and exit gates?"** This is the concurrency question in
+  disguise. More than one gate means more than one thread.
+- **"Should I handle payments?"** Almost always scope this out.
+- **"In-memory, or persisted?"** Almost always in-memory.
+
+Then state the scope back:
+
+> *"So: multiple floors, four spot types, three vehicle types with fit rules,
+> nearest-spot allocation with pricing that varies by vehicle type and duration,
+> and several gates operating concurrently. I'm scoping out payment processing,
+> reservations and user accounts, and keeping everything in memory. Good?"*
+
+### Step 2 — Entities and their responsibilities
+
+State each one's job in a sentence. If you need the word "and", split it.
+
+| Class | Its one job |
+|---|---|
+| `Vehicle` | Identify a vehicle and its type |
+| `ParkingSpot` | Own whether it is occupied, and by what — the central invariant |
+| `ParkingFloor` | Hold the spots on one level and expose queries over them |
+| `Ticket` | Be the immutable record of one entry |
+| `ParkingLot` | Coordinate allocation, ticketing and pricing; the entry point |
+| `SpotAllocationStrategy` | Decide *which* free spot a vehicle gets |
+| `PricingStrategy` | Turn a ticket plus an exit time into a fee |
+| `Gate` | Represent a physical entry or exit point and call the lot |
+
+Notice what is *not* a class. "Fee" is a `Money` value, not a type. "Duration"
+is a `Duration`. "Parking" is a verb, not a noun. Discarding candidate nouns
+out loud shows discrimination, which is part of what is being scored.
+
+### Step 3 — The value types and enums
+
+Start with the cheap, obvious things. In a timed round these take two minutes
+and buy you a lot of clarity.
+
+```java
+public enum VehicleType { MOTORCYCLE, CAR, TRUCK, ELECTRIC_CAR }
+
+public enum SpotType {
+    MOTORCYCLE, COMPACT, LARGE, ELECTRIC;
+
+    /**
+     * The fit rule lives with the spot type, not in the lot. Adding a spot type
+     * means editing this one method plus one enum constant — it is deliberately
+     * the single place that knows about compatibility.
+     */
+    public boolean fits(VehicleType vehicle) {
+        return switch (this) {
+            case MOTORCYCLE -> vehicle == VehicleType.MOTORCYCLE;
+            case COMPACT    -> vehicle == VehicleType.MOTORCYCLE || vehicle == VehicleType.CAR;
+            case LARGE      -> true;                       // anything fits in a large spot
+            case ELECTRIC   -> vehicle == VehicleType.ELECTRIC_CAR;
+        };
+    }
+}
+
+public record Vehicle(String licensePlate, VehicleType type) {
+    public Vehicle {
+        Objects.requireNonNull(licensePlate);
+        if (licensePlate.isBlank()) throw new IllegalArgumentException("blank plate");
+    }
+}
+```
+
+Two things worth saying out loud here. First, `record` gives you `equals`,
+`hashCode`, `toString` and immutability for free, which matters because
+`Vehicle` will end up as a map key. Second, putting `fits` on `SpotType` rather
+than in `ParkingLot` is a deliberate Single Responsibility call: **compatibility
+is a property of spot types, so it lives with them**, and the lot never learns
+the rules.
+
+### Step 4 — `ParkingSpot`: the class that owns the invariant
+
+This is the most important class in the design, because it is where the
+concurrency question will land.
+
+```java
+public final class ParkingSpot {
+    private final String id;
+    private final SpotType type;
+    private final int floorNumber;
+    private final int distanceFromEntrance;      // used by nearest-first allocation
+
+    private Vehicle occupant;                    // null means free — the invariant
+
+    public ParkingSpot(String id, SpotType type, int floorNumber, int distanceFromEntrance) {
+        this.id = Objects.requireNonNull(id);
+        this.type = Objects.requireNonNull(type);
+        this.floorNumber = floorNumber;
+        this.distanceFromEntrance = distanceFromEntrance;
+    }
+
+    public boolean canFit(VehicleType vehicleType) { return type.fits(vehicleType); }
+
+    /**
+     * Check and claim in one critical section. Returns false if another thread
+     * won the race — the caller must handle that, not assume success.
+     */
+    public synchronized boolean tryOccupy(Vehicle vehicle) {
+        if (occupant != null) return false;                  // already taken
+        if (!canFit(vehicle.type())) return false;           // wrong size
+        occupant = vehicle;
+        return true;
+    }
+
+    public synchronized void release() { occupant = null; }
+
+    public synchronized boolean isFree() { return occupant == null; }
+
+    public String id() { return id; }
+    public SpotType type() { return type; }
+    public int floorNumber() { return floorNumber; }
+    public int distanceFromEntrance() { return distanceFromEntrance; }
+}
+```
+
+The load-bearing decision: **`tryOccupy` returns a boolean rather than throwing
+or returning void.** It is honest about the fact that claiming a spot can fail
+for reasons outside the caller's control, and it forces every caller to handle
+that case. A `void occupy(Vehicle)` that silently overwrites is the bug this
+design exists to prevent.
+
+### Step 5 — `ParkingFloor`
+
+```java
+public final class ParkingFloor {
+    private final int floorNumber;
+    private final List<ParkingSpot> spots;
+
+    public ParkingFloor(int floorNumber, List<ParkingSpot> spots) {
+        this.floorNumber = floorNumber;
+        this.spots = List.copyOf(spots);          // defensive: no caller can mutate later
+    }
+
+    /**
+     * Returns candidates, not a claim. Note the plural — a strategy that gets
+     * only one candidate cannot recover when it loses a race.
+     */
+    public List<ParkingSpot> freeSpotsFor(VehicleType type) {
+        return spots.stream()
+                    .filter(s -> s.canFit(type) && s.isFree())
+                    .toList();
+    }
+
+    public int floorNumber() { return floorNumber; }
+    public long freeCount() { return spots.stream().filter(ParkingSpot::isFree).count(); }
+}
+```
+
+There is no `getSpots()`. The floor exposes the *questions* callers actually
+have, which is what lets you later replace the list with a per-type
+`Map<SpotType, Deque<ParkingSpot>>` for speed without touching a single caller.
+That is Part 1's encapsulation argument, cashed in.
+
+### Step 6 — The two strategies
+
+These are the axes of change, and they are the reason the design scores.
+
+```java
+public interface SpotAllocationStrategy {
+    /** Returns candidate spots in preference order. The caller claims them. */
+    List<ParkingSpot> candidates(List<ParkingFloor> floors, Vehicle vehicle);
+}
+
+/** Nearest to the entrance first — the common ask. */
+public final class NearestFirstAllocation implements SpotAllocationStrategy {
+    @Override public List<ParkingSpot> candidates(List<ParkingFloor> floors, Vehicle v) {
+        return floors.stream()
+                .flatMap(f -> f.freeSpotsFor(v.type()).stream())
+                .sorted(Comparator.comparingInt(ParkingSpot::floorNumber)
+                                  .thenComparingInt(ParkingSpot::distanceFromEntrance))
+                .toList();
+    }
+}
+
+/** Keep floors evenly loaded — a plausible alternative the interviewer may ask for. */
+public final class LeastOccupiedFloorAllocation implements SpotAllocationStrategy {
+    @Override public List<ParkingSpot> candidates(List<ParkingFloor> floors, Vehicle v) {
+        return floors.stream()
+                .sorted(Comparator.comparingLong(ParkingFloor::freeCount).reversed())
+                .flatMap(f -> f.freeSpotsFor(v.type()).stream())
+                .toList();
+    }
+}
+```
+
+```java
+public interface PricingStrategy {
+    Money fee(Ticket ticket, Instant exitTime);
+}
+
+/** Per-hour rate by vehicle type, rounded up, with a free grace period. */
+public final class HourlyPricing implements PricingStrategy {
+    private final Map<VehicleType, Money> ratePerHour;
+    private final Duration freeGrace;
+
+    public HourlyPricing(Map<VehicleType, Money> ratePerHour, Duration freeGrace) {
+        this.ratePerHour = Map.copyOf(ratePerHour);
+        this.freeGrace = freeGrace;
+    }
+
+    @Override public Money fee(Ticket ticket, Instant exitTime) {
+        Duration parked = Duration.between(ticket.entryTime(), exitTime);
+        if (parked.compareTo(freeGrace) <= 0) return Money.ZERO;
+        long hours = Math.max(1, (long) Math.ceil(parked.toMinutes() / 60.0));
+        Money rate = ratePerHour.getOrDefault(ticket.vehicle().type(), Money.rupees(50));
+        return rate.times(hours);
+    }
+}
+
+/**
+ * Composition, not a rewrite: surge pricing wraps another strategy and applies
+ * a multiplier. This is the Decorator pattern, and it means "weekend surge on
+ * top of whatever pricing we have" costs one class rather than a duplicate of
+ * every existing rule.
+ */
+public final class WeekendSurgePricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final double multiplier;
+
+    public WeekendSurgePricing(PricingStrategy base, double multiplier) {
+        this.base = base; this.multiplier = multiplier;
+    }
+
+    @Override public Money fee(Ticket ticket, Instant exitTime) {
+        Money baseFee = base.fee(ticket, exitTime);
+        DayOfWeek day = exitTime.atZone(ZoneId.systemDefault()).getDayOfWeek();
+        boolean weekend = day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY;
+        return weekend ? baseFee.times(multiplier) : baseFee;
+    }
+}
+```
+
+`WeekendSurgePricing` is worth pointing at deliberately in the interview. It
+shows you can compose strategies rather than multiplying them, which is the
+answer to the follow-up "and what if you want surge *and* the hourly rate *and*
+the free grace period?"
+
+### Step 7 — `Ticket`
+
+```java
+public record Ticket(String ticketId,
+                     Vehicle vehicle,
+                     String spotId,
+                     int floorNumber,
+                     Instant entryTime) {
+
+    public static Ticket issue(Vehicle vehicle, ParkingSpot spot, Instant now) {
+        return new Ticket(UUID.randomUUID().toString(),
+                          vehicle, spot.id(), spot.floorNumber(), now);
+    }
+}
+```
+
+A `record`, because a ticket is a fact about the past and facts do not change.
+Making it immutable means it can be shared across threads with no
+synchronisation at all, which is a point worth making when the concurrency
+discussion arrives. Note that it holds the spot *id* rather than the
+`ParkingSpot` object — a deliberate choice so that a ticket cannot be used to
+reach in and mutate a spot.
+
+### Step 8 — `ParkingLot`, the coordinator
+
+```java
+public final class ParkingLot {
+    private final List<ParkingFloor> floors;
+    private final SpotAllocationStrategy allocation;         // axis of change
+    private final PricingStrategy pricing;                   // axis of change
+    private final Map<String, ParkingSpot> spotsById;        // O(1) lookup on exit
+    private final Map<String, Ticket> activeTickets = new ConcurrentHashMap<>();
+
+    public ParkingLot(List<ParkingFloor> floors,
+                      SpotAllocationStrategy allocation,
+                      PricingStrategy pricing,
+                      Map<String, ParkingSpot> spotsById) {
+        this.floors = List.copyOf(floors);
+        this.allocation = Objects.requireNonNull(allocation);
+        this.pricing = Objects.requireNonNull(pricing);
+        this.spotsById = Map.copyOf(spotsById);
+    }
+
+    public Ticket park(Vehicle vehicle) {
+        for (ParkingSpot candidate : allocation.candidates(floors, vehicle)) {
+            if (candidate.tryOccupy(vehicle)) {              // exactly one thread wins
+                Ticket ticket = Ticket.issue(vehicle, candidate, Instant.now());
+                activeTickets.put(ticket.ticketId(), ticket);
+                return ticket;
+            }
+            // lost the race for this spot — fall through and try the next candidate
+        }
+        throw new NoSpotAvailableException(vehicle.type());
+    }
+
+    public Money unpark(String ticketId, Instant exitTime) {
+        Ticket ticket = activeTickets.remove(ticketId);      // atomic: one exit per ticket
+        if (ticket == null) throw new InvalidTicketException(ticketId);
+
+        Money fee = pricing.fee(ticket, exitTime);
+        spotsById.get(ticket.spotId()).release();
+        return fee;
+    }
+}
+```
+
+Two details to narrate:
+
+**The loop over candidates is the concurrency fix.** Because
+`allocation.candidates` returns a preference-ordered list rather than one spot,
+losing a race costs one iteration rather than an exception. The strategy
+proposes; the spot disposes.
+
+**`activeTickets.remove` is the double-exit guard.** `ConcurrentHashMap.remove`
+is atomic and returns the previous value, so if two exit gates scan the same
+ticket simultaneously exactly one gets a non-null result and the other gets an
+`InvalidTicketException`. Writing `if (containsKey) then remove` instead would
+reintroduce the check-then-act bug in a different place — worth pointing at,
+because it shows you understand the *class* of bug rather than one instance.
+
+### Step 9 — `Gate`, and wiring it all up in `main`
+
+```java
+public final class EntryGate {
+    private final String gateId;
+    private final ParkingLot lot;
+
+    public EntryGate(String gateId, ParkingLot lot) { this.gateId = gateId; this.lot = lot; }
+
+    public Ticket admit(Vehicle vehicle) { return lot.park(vehicle); }
+}
+
+// The driver. No framework, no container — constructor injection by hand,
+// which is exactly the dependency inversion argument with zero ceremony.
+public static void main(String[] args) {
+    List<ParkingSpot> floor1Spots = List.of(
+            new ParkingSpot("F1-S1", SpotType.COMPACT, 1, 1),
+            new ParkingSpot("F1-S2", SpotType.LARGE,   1, 2),
+            new ParkingSpot("F1-S3", SpotType.ELECTRIC,1, 3));
+
+    ParkingFloor floor1 = new ParkingFloor(1, floor1Spots);
+
+    PricingStrategy pricing = new WeekendSurgePricing(
+            new HourlyPricing(Map.of(VehicleType.CAR, Money.rupees(40)),
+                              Duration.ofMinutes(15)),
+            1.5);
+
+    Map<String, ParkingSpot> index = floor1Spots.stream()
+            .collect(Collectors.toMap(ParkingSpot::id, s -> s));
+
+    ParkingLot lot = new ParkingLot(List.of(floor1),
+                                    new NearestFirstAllocation(), pricing, index);
+
+    EntryGate gate1 = new EntryGate("G1", lot);
+    Ticket t = gate1.admit(new Vehicle("KA-01-HH-1234", VehicleType.CAR));
+    System.out.println("Parked at " + t.spotId());
+    System.out.println("Fee: " + lot.unpark(t.ticketId(), Instant.now().plus(Duration.ofHours(2))));
+}
+```
+
+A runnable `main` is not decoration. In a machine-coding round it is the
+demonstration, and it is also the clearest possible statement of your
+dependency graph — everything the lot needs is visible in one constructor call.
+
+### Where each principle and pattern landed, and why
+
+| Principle or pattern | Where | Why *there* specifically |
+|---|---|---|
+| **SRP** | `SpotType.fits`, `PricingStrategy`, `ParkingFloor` | Fit rules, pricing and spot storage change for different reasons and by different people |
+| **OCP** | The two strategy interfaces | A new pricing rule or allocation rule is a new file; `ParkingLot` is never reopened |
+| **LSP** | `Vehicle` as a record, not a mutable hierarchy | Nothing to override badly; every vehicle type is genuinely substitutable |
+| **ISP** | `SpotAllocationStrategy` has one method | An allocator has no business knowing about pricing or tickets |
+| **DIP** | `ParkingLot`'s constructor | The lot depends on two interfaces it owns, never on `HourlyPricing` |
+| **Strategy** | Allocation and pricing | The two axes of change the interviewer will push on |
+| **Decorator** | `WeekendSurgePricing` | Surge composes with any base rule instead of duplicating it |
+| **Factory** | Vehicle and spot creation from config | One place converts external strings and enums into objects |
+| **Facade** | `ParkingLot` | Gates call `park` and `unpark` and never touch floors or spots |
+
+The row worth defending out loud is the one that is *absent*: there is no
+Singleton. Explain why — *"there is one lot, but I get that by creating one in
+`main` and injecting it, rather than having `ParkingLot` enforce its own
+uniqueness. That keeps it testable and I can create two in a test without
+fighting static state."*
+
+### The concurrency follow-up: two cars, one spot
+
+This is the question that separates candidates, and it comes in this form:
+*"Two cars arrive at the last free spot at the same instant. What happens?"*
+
+The naive design has a window:
+
+```java
+// BAD — three separate operations with two windows in between.
+ParkingSpot spot = findFreeSpot(vehicle);     // thread A and B both see F1-S3 free
+if (spot.isFree()) {                          // both pass the check
+    spot.setOccupant(vehicle);                // B overwrites A; A's car has no spot
+}
+```
+
+The reason it fails is check-then-act: between the read that says "free" and the
+write that claims it, the scheduler may run the other thread. Nothing about
+`isFree()` being correct at the moment it ran prevents it from being stale one
+nanosecond later.
+
+The fix in this design is to make check and act one indivisible step, owned by
+the object holding the state:
+
+```java
+// GOOD — one critical section. The check and the write cannot be separated.
+public synchronized boolean tryOccupy(Vehicle vehicle) {
+    if (occupant != null) return false;
+    if (!canFit(vehicle.type())) return false;
+    occupant = vehicle;
+    return true;
+}
+```
+
+and to make the caller handle losing:
+
+```java
+for (ParkingSpot candidate : allocation.candidates(floors, vehicle)) {
+    if (candidate.tryOccupy(vehicle)) return issueTicket(candidate, vehicle);
+    // lost this one — try the next candidate rather than failing
+}
+throw new NoSpotAvailableException(vehicle.type());
+```
+
+**The alternatives, and the trade you are making by choosing one — have all
+three ready, because "what else could you do?" is the immediate follow-up:**
+
+1. **A lock per spot** (what is written above). Maximum concurrency: two gates
+   claiming different spots never block each other. Cost: allocation and
+   occupation are not atomic together, so a caller can lose a race and must
+   retry. That retry loop is visible in `park`, and it terminates because the
+   candidate list is finite.
+
+2. **One lock around the whole allocation.** Simpler to reason about and
+   trivially correct — no retry needed, because nobody else can be allocating.
+   Cost: every gate in the building serialises on one monitor. For a real
+   parking lot with ten gates this is completely fine, and **saying that is a
+   strength, not a weakness** — it shows you can size a solution to its load
+   rather than reaching for the most concurrent option available.
+
+3. **A concurrent queue of free spots per type.** Replace the scan with
+   `freeSpots.get(spotType).poll()`, which is atomic and lock-free; releasing a
+   spot offers it back. No retry, no lock, and `poll` returning null *is* the
+   "lot is full" signal. Cost: you lose the ability to express "nearest spot"
+   cheaply, because a queue has one order and allocation preference may want
+   another. This is the right answer when allocation order does not matter and
+   throughput does.
+
+The sentence that scores: *"I chose per-spot locks with a retry because it keeps
+the lock narrow and still supports arbitrary allocation ordering. If throughput
+mattered more than ordering I'd move to a concurrent queue of free spots per
+type, and if simplicity mattered most I'd take a single allocation lock — with
+ten gates that's genuinely fine."*
+
+Two more concurrency points to volunteer if there is time. First,
+`activeTickets` is a `ConcurrentHashMap` and exit uses `remove`, which is atomic
+and therefore prevents a ticket being settled twice. Second, `Ticket` and
+`Vehicle` are immutable records, so they can cross threads freely with no
+synchronisation — immutability is a concurrency strategy, not just a style
+choice. The mechanics behind all of this are in
+[Java concurrency](/java/3-concurrency-senior-must-have).
+
+### Extension scenarios
+
+These are the follow-ups, and a good design answers each in one or two files.
+
+**Add electric-vehicle charging spots.** Add `ELECTRIC` to `SpotType` and
+`ELECTRIC_CAR` to `VehicleType`, add one case to `SpotType.fits`, and add a
+`ChargingPricing` decorator that adds a per-kWh component. `ParkingLot`,
+`ParkingFloor` and both existing strategies are untouched. The enum edits are
+unavoidable and worth naming honestly: *"enums are a closed set, so adding a
+constant does edit an existing file — but it's one method and the compiler will
+point at every `switch` I need to update, which is why I used an exhaustive
+switch expression rather than if-else."*
+
+**Add monthly passes.** A `PassRegistry` interface consulted at entry, plus a
+`PassAwarePricing` decorator that returns `Money.ZERO` when the plate has a
+valid pass and delegates otherwise. Two new files, one new dependency on
+`ParkingLot`'s constructor. No existing logic changes.
+
+**Add reservations.** `ParkingSpot` gains a third state — free, reserved,
+occupied — and at that moment a boolean `occupant == null` check is no longer
+adequate. This is where you say *"three states with rules about which
+transitions are legal is a state machine, so I'd replace the null check with an
+explicit `SpotStatus` enum and put the transition rules in one place."*
+
+**Add multiple lots across a city.** This is the zoom-level change. Say so:
+*"That moves us from a single process to a distributed system. `tryOccupy`'s
+`synchronized` no longer means anything across machines, so allocation needs a
+shared source of truth — a database row lock or a compare-and-set in Redis.
+It also raises a real question about whether a gate should keep issuing tickets
+during a network partition, and I'd argue yes, because a car physically at the
+barrier is a worse problem than a slightly over-allocated lot."*
+
+### Testing
+
+Testability here is a direct consequence of the constructor injection, and
+saying that connects the two topics:
+
+```java
+@Test void chargesNothingWithinTheGracePeriod() {
+    var pricing = new HourlyPricing(Map.of(VehicleType.CAR, Money.rupees(40)),
+                                    Duration.ofMinutes(15));
+    var entry = Instant.parse("2026-01-01T10:00:00Z");
+    var ticket = new Ticket("t1", new Vehicle("KA-01", VehicleType.CAR), "S1", 1, entry);
+
+    assertEquals(Money.ZERO, pricing.fee(ticket, entry.plus(Duration.ofMinutes(10))));
+}
+
+@Test void exactlyOneOfTwoThreadsClaimsTheLastSpot() throws Exception {
+    var spot = new ParkingSpot("S1", SpotType.COMPACT, 1, 1);
+    var start = new CountDownLatch(1);
+    var claimed = new AtomicInteger();
+
+    Runnable attempt = () -> {
+        try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        if (spot.tryOccupy(new Vehicle("KA-0" + Thread.currentThread().getId(), VehicleType.CAR)))
+            claimed.incrementAndGet();
+    };
+
+    var t1 = new Thread(attempt); var t2 = new Thread(attempt);
+    t1.start(); t2.start();
+    start.countDown();                      // release both at once
+    t1.join(); t2.join();
+
+    assertEquals(1, claimed.get());         // the invariant this design exists to hold
+}
+```
+
+The three tests to name even if you only write one: a pricing test with no lot
+involved, an allocation test with a fake pricing strategy, and the concurrency
+test above. The point to make is that **each of those is possible only because
+nothing constructs its own dependencies** — which is the testing answer and the
+dependency inversion answer, and they are the same answer.
+
+### The bad design, and what it actually costs
+
+Show this contrast deliberately. Being able to articulate *why* a design is bad,
+in cost terms rather than aesthetic ones, is a stronger signal than producing
+the good one.
+
+```java
+// BAD — the God class. Everything in one file, all decisions in switches.
+class ParkingLotManager {
+    private String[] spotIds = new String[100];
+    private String[] spotTypes = new String[100];       // parallel arrays, no invariant
+    private String[] occupiedBy = new String[100];
+    private long[] entryTimes = new long[100];
+
+    public String park(String plate, String vehicleType) {
+        for (int i = 0; i < spotIds.length; i++) {
+            if (occupiedBy[i] == null) {
+                if (vehicleType.equals("CAR") && (spotTypes[i].equals("COMPACT")
+                        || spotTypes[i].equals("LARGE"))) {
+                    occupiedBy[i] = plate;              // check-then-act, not atomic
+                    entryTimes[i] = System.currentTimeMillis();
+                    return spotIds[i];
+                } else if (vehicleType.equals("BIKE") && spotTypes[i].equals("MOTORCYCLE")) {
+                    occupiedBy[i] = plate;
+                    entryTimes[i] = System.currentTimeMillis();
+                    return spotIds[i];
+                } // ...one branch per vehicle type, forever
+            }
+        }
+        return null;                                     // null means "full". Or an error.
+    }
+
+    public double unpark(String plate) {
+        for (int i = 0; i < spotIds.length; i++) {
+            if (plate.equals(occupiedBy[i])) {
+                long hours = (System.currentTimeMillis() - entryTimes[i]) / 3_600_000;
+                occupiedBy[i] = null;
+                if (spotTypes[i].equals("COMPACT")) return hours * 30;   // pricing, inline
+                if (spotTypes[i].equals("LARGE"))   return hours * 50;
+                return hours * 20;
+            }
+        }
+        return 0;                                        // ticket not found. Or free parking.
+    }
+}
+```
+
+Price it out loud, one cost at a time:
+
+- **Adding electric vehicles touches both methods**, both of which are already
+  in production and already tested. Every existing behaviour must be re-verified
+  because the change is inside the same method that handles it.
+- **Adding weekend pricing means editing `unpark`**, a method whose main job is
+  releasing a spot. A pricing bug can now break spot release.
+- **Nothing is independently testable.** To test the pricing arithmetic you must
+  construct a manager, park a car, manipulate time, and unpark — so a pricing
+  test can fail because allocation broke.
+- **The invariants are unenforceable.** Four parallel arrays must stay in sync
+  and nothing makes them. Any method can desynchronise them and no compiler will
+  notice.
+- **It is unfixably racy.** `occupiedBy[i] == null` followed by
+  `occupiedBy[i] = plate` is check-then-act across a shared array with no lock.
+  Adding `synchronized` to the whole method fixes correctness and serialises
+  everything, because the state has no smaller owner to lock.
+- **Stringly typed throughout.** `"CAR"` versus `"Car"` is a runtime bug the
+  compiler would have caught if it were an enum.
+- **Null as an error signal.** `park` returning null and `unpark` returning
+  zero means "full" and "no such ticket" are indistinguishable from legitimate
+  results.
+
+The summary sentence: **"the good design costs about six extra files and makes
+every anticipated change a new file; the bad design costs nothing today and
+makes every change an edit to a method that already works."** That is the trade,
+stated in the terms the interviewer is scoring.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Walk me through parking a car."** Gate calls `lot.park`; the lot asks the
+   allocation strategy for candidates in preference order; it calls `tryOccupy`
+   on each until one succeeds; it issues an immutable `Ticket`.
+2. **"Two cars arrive at the last spot simultaneously."** Check-then-act race.
+   `tryOccupy` is synchronized so check and claim are one step, and the loser
+   moves to the next candidate. Then offer the single-lock and
+   concurrent-queue alternatives with their trades.
+3. **"Why does `candidates` return a list rather than one spot?"** So losing a
+   race costs one iteration rather than an exception. The strategy proposes, the
+   spot disposes.
+4. **"Now add electric-vehicle charging."** One enum constant, one case in
+   `fits`, one pricing decorator. Name honestly that the enum edit is
+   unavoidable and that an exhaustive switch makes the compiler find every site.
+5. **"Now add monthly passes."** A `PassRegistry` plus a `PassAwarePricing`
+   decorator. Two files, no changes to existing logic.
+6. **"Why isn't `ParkingLot` a Singleton?"** Because one instance created in
+   `main` gives the same property without global state, and keeps it testable.
+7. **"Where would you put the fee calculation?"** Behind `PricingStrategy`,
+   because pricing is the fastest-changing rule in the system.
+8. **"How do you stop a ticket being used twice?"** `ConcurrentHashMap.remove`
+   is atomic and returns the previous value, so exactly one caller gets a
+   non-null ticket.
+9. **"How do you test this?"** Each dependency arrives through a constructor, so
+   pricing can be tested with no lot and allocation with a fake pricing
+   strategy. The race is tested with a `CountDownLatch` releasing two threads.
+10. **"What if there are fifty lots across the city?"** That is a zoom-level
+    change to a distributed design. `synchronized` stops meaning anything, so
+    allocation needs a shared source of truth, and you need a position on what a
+    gate does during a partition.
+11. **"What's wrong with putting everything in one class?"** Answer in costs:
+    every change edits working code, nothing is independently testable, the
+    invariants are unenforceable, and the only available lock is the whole
+    object.
+12. **"How would you handle a lost ticket?"** A policy question, not a design
+    one — charge a flat maximum, and note that it is a new `PricingStrategy`
+    rather than a change to an existing one.
+13. **"How would you display live availability at the entrance?"** An observer
+    on park and unpark updating a counter, and a note that the count may be
+    briefly stale, which is acceptable for a signboard but not for allocation.
+14. **"What would you do differently with more time?"** Have an answer: a
+    `SpotStatus` enum instead of a null check, a repository interface over the
+    ticket store, and property-based tests on the pricing arithmetic.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Putting pricing inside `ParkingLot`.** It is the single most common version
+  of this design and it fails the very first follow-up.
+- **`getSpots()` returning the internal list.** Any caller can now empty your
+  floor. Expose the question, not the collection.
+- **Allocating and occupying as two public steps.** If a caller can call
+  `findFreeSpot` and then `occupy` separately, you have published the race.
+- **A mutable `Ticket`.** If the ticket can be edited, entry time can be
+  rewritten and the fee becomes whatever the holder wants.
+- **Using the license plate as the ticket identity.** The same car parks twice,
+  or two lots share a plate, and your map collides. Issue a ticket id.
+- **`synchronized` on every method of `ParkingLot`.** It works and it serialises
+  every gate in the building. Lock the smallest thing that owns the state.
+- **Forgetting to release the spot on exit.** Easy to miss, and the lot silently
+  fills up. Worth a test.
+- **Floating-point money.** `double` for currency accumulates error and will be
+  challenged. A `Money` type over `long` minor units or `BigDecimal` is the
+  expected answer.
+</Callout>
+
+### Where this connects
+
+- [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — the principles this design is an application of, with the cost arguments.
+- [Part 3 — design patterns](/lld/part-3-design-patterns-the-lld-vocabulary) —
+  Strategy, Decorator, Factory and Facade, all visible above.
+- [Part 4 — how to drive the round](/lld/part-4-how-to-drive-an-lld-interview-the-method)
+  — the six phases this lesson walks through in order.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — check-then-act,
+  `synchronized`, `ConcurrentHashMap` atomics and why immutability is a
+  concurrency strategy.
+- [Part 6 — practice problems](/lld/part-6-practice-problems-beginner-advanced)
+  — thirteen more problems, most of which reuse this exact skeleton.

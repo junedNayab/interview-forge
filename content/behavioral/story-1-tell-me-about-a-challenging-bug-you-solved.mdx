@@ -1,0 +1,226 @@
+---
+title: "Story 1: \"Tell me about a challenging bug you solved\""
+topic: "behavioral"
+order: 901
+difficulty: "medium"
+estimatedMinutes: 17
+tags: [behavioral, star, debugging, caching, url-shortener, follow-ups]
+format: "mdx"
+summary: "The debugging-narrative structure for this question, worked from a real cache-expiry bug in the url-shortener project, plus fill-in prompts and the follow-ups that expose a borrowed story."
+---
+
+## What this question is really probing
+
+On the surface it asks about a bug. What the interviewer is collecting is your
+**debugging method** — whether you form hypotheses and eliminate them, or whether
+you change things until the symptom goes away.
+
+Three signals in particular:
+
+- **Did you reason, or did you guess?** The tell is whether your narrative
+  contains things you ruled out. Someone who only reports the answer usually
+  found it by luck or is retelling someone else's investigation.
+- **Did you find the cause or the symptom?** Restarting the service fixes many
+  things and explains none of them.
+- **Did you do anything about the class of bug?** A senior engineer adds the
+  monitoring, the test or the environment change that would have caught it. A
+  mid-level engineer fixes the line and moves on.
+
+There is a fourth, unstated one: **is this story real?** This is the question
+interviewers drill hardest on, because it is the easiest one to fabricate and the
+easiest to catch. Which is why the rest of this lesson is about building the
+story from something you actually did.
+
+## The structure that works for this question
+
+STAR applies, but the Action section has its own internal shape for debugging
+stories, and following it is most of what makes the answer sound credible:
+
+```
+1. The symptom          what was observed, by whom, how it was noticed
+2. Why it was hard      what made it non-obvious — intermittent, no error, etc.
+3. What you ruled out   two or three hypotheses eliminated, and how
+4. The breakthrough     the observation that cracked it, and how you got it
+5. The root cause       stated in one precise sentence
+6. The fix              what you changed, and why that and not something else
+7. The systemic change  the test, the metric, the environment fix
+```
+
+Step 3 is the one candidates skip and the one interviewers value most. Step 7 is
+the one that reads as seniority. **Spend most of your time in steps 3 through 7 —
+the symptom and the setup should take under a minute.**
+
+## A worked example from the url-shortener
+
+This is built from a bug that genuinely exists in the `url-shortener` project.
+Read it as a demonstration of specificity, and only tell it if you found it.
+
+In `UrlService.resolve()`, the redirect path is cache-aside: check Redis for the
+short code, return the long URL if present, otherwise read Postgres, populate
+Redis with a 24-hour TTL, and return. Standard, and correct as far as it goes.
+
+The expiry check — whether the link's `expiresAt` has passed — lives only in the
+database-fallback branch. On a cache hit, nothing checks it. So a link that
+expires while it is sitting in Redis keeps redirecting successfully for up to
+another twenty-four hours.
+
+<Callout type="note" title="Why this makes a good story">
+It has every property interviewers like. The symptom is intermittent and
+user-visible. It cannot be reproduced locally if your local setup has a cold
+cache or no Redis at all. The code that is wrong looks completely reasonable in
+review. And the root cause is a general principle — **a cache does not just store
+data, it stores the outcome of every check you performed before you wrote to it** —
+which gives you something to say when they ask what you learned.
+</Callout>
+
+Told as an answer, roughly four minutes:
+
+> **Situation and task.** "I built a URL shortener — Spring Boot, Postgres,
+> Redis as a read cache on the redirect path. Links can have an expiry date.
+> I was testing expiry behaviour before adding a cleanup job and found that
+> expired links were still resolving." *(Around thirty seconds. That is all the
+> context needed.)*
+>
+> **Why it was hard.** "It was intermittent in a way that made no sense at first.
+> The same short code would 404 correctly one minute and redirect the next. My
+> integration tests all passed, because each test starts with a clean Redis."
+>
+> **What I ruled out.** "My first hypothesis was a timezone problem — that
+> `expiresAt` was being compared against the wrong clock. I checked the column
+> type and the comparison and they were consistent in UTC, and an expired link
+> queried directly through the repository correctly returned nothing. Second
+> hypothesis was clock drift between the app and the database. I ruled that out
+> because the behaviour depended on *which* request I made rather than on when."
+>
+> **The breakthrough.** "The thing that cracked it was noticing the correlation
+> with cache state rather than with time. If I flushed Redis, the link 404'd
+> correctly every time. If I hit it once before it expired and then again after,
+> it kept redirecting. That pointed at the cache, not the clock."
+>
+> **Root cause.** "The expiry check was only in the database branch of the
+> cache-aside read. A cache hit returned the URL without ever evaluating expiry —
+> so the cache was effectively serving a stale authorization decision, not just
+> stale data."
+>
+> **The fix.** "The narrow fix would have been to also check expiry on the cache
+> hit path, which means caching `expiresAt` alongside the URL. I did that, but I
+> also set the Redis TTL to the minimum of the standard 24 hours and the time
+> remaining until the link expires, so the entry cannot outlive the link. Two
+> layers, because the TTL alone still leaves a window if expiry is changed after
+> the write."
+>
+> **Systemic change.** "The reason this got past me was that my tests ran against
+> a cold cache. I added a test that populates the cache, advances expiry, and
+> asserts the 404 — and more generally I stopped treating the cache as an
+> invisible optimisation in tests."
+>
+> **Learning.** "The lesson I actually took is that anything you check *before*
+> writing to a cache is something the cache will now serve you a stale answer
+> for. Expiry, permissions, feature flags. I look for that pattern specifically
+> now whenever I see cache-aside code."
+
+Notice what is doing the work there: two ruled-out hypotheses, a named
+breakthrough observation, a root cause stated in one sentence, a fix with a
+justification for choosing it over the simpler option, and a general principle at
+the end.
+
+## Other bugs in the same project you could use
+
+If the expiry bug is not one you found, these are also real and each supports a
+different emphasis. Again — only if you actually investigated it.
+
+- **`generateUniqueCode()` has a check-then-act race.** It generates a random
+  seven-character Base62 code and loops while `existsByShortCode` returns true.
+  Between the check and the insert, another request can take the same code, and
+  the unique constraint violation surfaces as a 500 rather than a retry. This is
+  a good story if you want to talk about concurrency, about why it is almost
+  impossible to reproduce by hand, and about the difference between "unlikely"
+  and "impossible" at scale.
+- **`RateLimitInterceptor` uses `request.getRemoteAddr()`.** Behind a load
+  balancer or reverse proxy that returns the proxy's address, so every user
+  shares one rate-limit bucket. Good for a bug that only appears after a
+  deployment topology change.
+- **`resolve()` is annotated `@Transactional`.** Even a pure cache hit that
+  touches no data borrows a pooled connection for the duration. Good for a story
+  about resource exhaustion, and about framework annotations having costs that
+  are invisible at the call site.
+
+## Draft your own
+
+Work through these in writing. The prompts are in the order you should say them.
+
+1. **The bug.** What was observed, and by whom? One or two sentences. If it was
+   user-visible, say what the user saw.
+2. **Why it was not obvious.** Pick the honest reason: intermittent, no error in
+   the logs, worked locally, the wrong component looked guilty, the error message
+   was misleading.
+3. **Your first hypothesis, and how you eliminated it.** If you cannot remember
+   one, this story may be too old or too easy — pick a different bug.
+4. **Your second hypothesis, and how you eliminated it.**
+5. **The observation that cracked it.** Be specific about *how* you got it: a log
+   line you added, a metric, a database query you ran, a profiler, bisecting the
+   change history, a colleague's offhand comment.
+6. **The root cause in one sentence.** If it takes three sentences, you have not
+   finished understanding it.
+7. **The fix, and one alternative you rejected.** Naming the rejected option is
+   what turns a fix into a decision.
+8. **What you changed so this class of bug cannot recur.** Test, metric, alert,
+   environment, review checklist.
+9. **Time and impact.** How long the investigation took, and what the bug was
+   costing while it existed.
+10. **The general principle.** One sentence you now apply elsewhere.
+
+<Callout type="tip" title="If your best bug is from a side project">
+That is fine, and you should say so plainly. "This is from a service I built
+myself rather than production work" costs you nothing if the reasoning is real,
+and interviewers ask about side projects specifically because the ownership is
+unambiguous. What costs you is presenting a side project as production work and
+then being unable to answer "how many users did this affect?"
+</Callout>
+
+## Follow-ups you will get, and what each one checks
+
+| Follow-up | What they are checking |
+|---|---|
+| "What was the actual error message?" | Whether you were there. The most common story-collapse point. |
+| "How did you first notice it?" | Whether you have monitoring instincts or wait for users to complain. |
+| "What else did you consider before you found it?" | Debugging method. If you have nothing, it reads as guessing. |
+| "How long did it take?" | Calibration, and honesty. Three days is a perfectly good answer. |
+| "How did you verify the fix?" | Rigour. "It stopped happening" is weaker than a test or a metric. |
+| "What would have caught this earlier?" | Seniority. This is the systemic-change question. |
+| "Did anything similar happen again?" | Whether the systemic change actually worked. |
+| "Who else was involved?" | Collaboration, and whether you are claiming a team's work. |
+
+Prepare an answer to every one of these before the interview. They are
+predictable, and a story that has survived all eight in your own kitchen will
+survive the interview.
+
+## Weak versus strong
+
+<Callout type="pitfall" title="What a weak answer sounds like">
+"We had a really tricky production bug where the API was slow. It took us a while
+to figure out, but eventually we found it was a database issue. We fixed the
+query and added an index, and after that performance was much better. It was a
+good learning experience about the importance of monitoring."
+
+Why it fails: no symptom detail, no timeline, no hypotheses, "we" throughout so
+the contribution is invisible, "a database issue" is not a root cause, no
+numbers, and the learning is a platitude. An interviewer cannot write anything on
+a scorecard from this. The next question will be "what was the query?" and the
+answer will decide the round.
+</Callout>
+
+<Callout type="interview" title="What a strong answer sounds like">
+Specific symptom with a time and an observer. One sentence on why it was hard.
+Two hypotheses named and eliminated with the evidence that eliminated them. A
+breakthrough observation and how it was obtained. A root cause in one precise
+sentence. A fix, plus the alternative you rejected and why. A systemic change so
+the class of bug cannot recur. A general principle in one line.
+
+Roughly four minutes, and every claim in it survives a follow-up because you were
+there.
+</Callout>
+
+Next: [Story 2 — describe a time you improved performance](/behavioral/story-2-describe-a-time-you-improved-performance),
+which uses a different bug in the same project and is scored on measurement
+rather than investigation.

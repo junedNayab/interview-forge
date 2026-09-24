@@ -1,0 +1,485 @@
+---
+title: "Case 1 — Design a URL Shortener (YOUR project — master this one)"
+topic: "system-design"
+order: 301
+group: "Case Studies"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [case-study, caching, sharding, id-generation, analytics]
+prerequisites: [1-the-framework-how-to-drive-a-45-minute-design-interview]
+format: "mdx"
+summary: "The canonical design interview, driven end to end — with the code-generation decision done properly, and an honest audit of what your own url-shortener actually does."
+---
+
+## Layer 1 — The mental model
+
+Strip away the framing and a URL shortener is **a key-value store with an HTTP
+redirect on top.** `abc1234` maps to `https://…`, the mapping never changes once
+created, and reads outnumber writes by about 100 to 1.
+
+That shape tells you where the interesting decisions are, and it is not "which
+database":
+
+1. **How do you generate the short code?** The one genuinely hard decision. It
+   has to be short, unique, and — depending on requirements — unguessable, and
+   those three pull against each other.
+2. **How fast is the read path?** Everything is a read. This is a caching and
+   edge-placement problem.
+3. **How do you count clicks without slowing the redirect?** The naive answer
+   puts a database write on your hottest path.
+
+Everything else — load balancers, replicas, app servers — is standard and should
+take you ninety seconds to draw.
+
+<Callout type="tip" title="Why this one is worth over-preparing">
+It's the most common entry-level system-design question *and* you have built it.
+An interviewer who learns that will stop asking hypotheticals and start asking
+"what did you actually do, and what broke?" — which is a much better
+conversation for you, provided your answers are accurate. The last section of
+this lesson exists to make sure they are.
+</Callout>
+
+---
+
+## Layer 2 — Driving it with R-E-A-H-D-B
+
+### R — Requirements (5 min)
+
+**Functional:**
+
+- Shorten a long URL, returning a short one.
+- Redirect a short code to the original URL.
+- Custom aliases, expiry, click analytics, user accounts.
+
+**Non-functional:**
+
+- **Read-heavy**, roughly 100:1 reads to writes.
+- Redirect latency under about 100 ms at p99 — this is in the user's critical
+  path to the page they wanted.
+- **High availability.** A dead shortener breaks every link ever published with
+  it, including in print. Availability matters more than for most CRUD services.
+- Short codes must be **unique** (a collision hands a user someone else's
+  destination).
+- Links are **immutable** after creation. Say this out loud — it's what licenses
+  aggressive caching later, and it's the single most useful property of the
+  system.
+
+**Explicitly out of scope:** link previews, QR codes, team workspaces,
+A/B-testing redirects. Naming exclusions is part of the score.
+
+### E — Estimates (5 min)
+
+Do the arithmetic visibly; the numbers drive later decisions.
+
+```
+Writes:   100M new URLs/month
+          100e6 / (30 × 86,400 s) ≈ 39 writes/sec        → peak ~120/sec
+Reads:    100:1  →  ≈ 3,900 reads/sec                    → peak ~12,000/sec
+Storage:  ~500 bytes/row × 100M      = 50 GB/month       → ~600 GB/year
+Bandwidth: redirect response is headers only, ~500 bytes
+          3,900 × 500 B ≈ 2 MB/s                         → negligible
+Cache:    Zipfian traffic — ~20% of links serve ~80% of clicks.
+          10M hot entries × ~200 bytes ≈ 2 GB            → fits one Redis node
+```
+
+**The conclusions worth stating** — this is the part candidates skip:
+
+- Writes are trivial. 120/sec is one unremarkable Postgres instance.
+- 600 GB/year means you do **not** need to shard on day one, and saying so is a
+  point in your favour. A single instance with replicas carries you for years.
+- The hot set fits comfortably in memory, so a high cache hit ratio is
+  achievable, not aspirational.
+- **Therefore: optimise the read path, and leave everything else simple.**
+
+### A — API design (5 min)
+
+```
+POST /api/urls
+  { "longUrl": "https://…", "customAlias": "sale", "expiresInDays": 30 }
+  → 201 { "shortUrl": "https://sho.rt/abc1234", "shortCode": "abc1234" }
+
+GET  /{shortCode}          → 302 + Location: <longUrl>
+GET  /api/urls/{code}/stats → 200 { clicks, topReferrers, … }   (auth required)
+DELETE /api/urls/{code}                                          (auth required)
+```
+
+Two things to raise unprompted:
+
+**Creation should be idempotent.** A user double-clicking "Shorten" must not get
+two codes for one intent. Accept an `Idempotency-Key` header and replay the
+stored response — the pattern from
+[microservice reliability patterns](/system-design/15-microservice-reliability-patterns).
+
+**301 vs 302 is a real tradeoff, not trivia.**
+
+| Status | Browser behaviour | Consequence |
+|---|---|---|
+| `301` Moved Permanently | Cached aggressively, often until cache is cleared | Fastest, cheapest — but **analytics go dark after the first click**, and you can never change or revoke the target |
+| `302` Found | Not cached by default | Every click reaches you: analytics work, links stay mutable and revocable |
+
+The senior framing: **the status code is a hint; `Cache-Control` is the actual
+control.** You can serve `301` with `Cache-Control: no-store`, or `302` with
+`max-age=300` to get most of the caching benefit while keeping approximate
+analytics and the ability to revoke within five minutes. Decide from
+requirements: if links must be revocable (abuse, expiry, phishing takedowns),
+you cannot use a cacheable permanent redirect. Also worth naming: `307`/`308`
+are the method-preserving variants, irrelevant for GET redirects but good to
+know exist.
+
+### Short-code generation — the core decision
+
+This is where the interview is won or lost. Base62 is the alphabet
+(`0-9a-zA-Z`), and the length follows from the keyspace:
+
+```
+62^6 = 56.8 billion
+62^7 = 3.52 trillion
+```
+
+At 1.2 billion URLs/year, **six characters is already ~47 years of capacity.**
+So if length were only about capacity, six would do. The reason to pick seven is
+different, and it depends entirely on which of the following you choose.
+
+**Option 1 — Base62 of a counter.** Encode an auto-increment ID. Zero
+collisions by construction, shortest possible codes, no read-before-write.
+
+The problems: a single global counter is a scaling chokepoint and a SPOF, and the
+codes are **sequentially enumerable**. An enumerable code space means a
+competitor can scrape every link you have ever created, and any "private" link
+is discoverable by counting. That's usually disqualifying on its own.
+
+Distributing the counter has known answers, each with a catch:
+
+- **Per-instance ranges from ZooKeeper/etcd.** Each app server claims a block of
+  a million IDs and hands them out locally. Coordination happens once per
+  million, not per request. Clean and genuinely used.
+- **Redis `INCR`.** Fast, but Redis replication is asynchronous — a failover can
+  roll the counter backwards and **reissue IDs you already used**. Only safe with
+  range pre-allocation, which brings you back to the previous bullet. This is the
+  [CAP lesson's](/system-design/7-cap-theorem-consistency-models) lost-write
+  problem in a concrete form.
+- **Snowflake IDs.** 41-bit timestamp plus machine ID plus sequence. Works
+  beautifully for IDs and **fails the requirement here**: a 64-bit number is 11
+  Base62 characters. Knowing why it doesn't fit is a better answer than
+  proposing it.
+
+**Option 2 — Random code, retry on collision.** Draw 7 random Base62 characters,
+check uniqueness, insert.
+
+Unguessable, trivially distributed, no coordination at all. The cost is that
+uniqueness is now probabilistic, so let's actually do the math instead of
+hand-waving it. With `N = 62^7 ≈ 3.52e12` and `n` codes already stored, the
+chance a fresh random code collides is `n/N`:
+
+| Stored codes | Collision chance per insert | Retries expected |
+|---|---|---|
+| 1 million | 0.00000003% | never |
+| 100 million | 0.003% | 1 in 35,000 inserts |
+| 1 billion | 0.028% | 1 in 3,500 inserts |
+
+So at a billion links you pay one extra round trip on roughly one insert in
+3,500. Negligible — **and this is why the answer is seven characters, not six.**
+At six characters the same billion links collide on 1.8% of inserts, 600× more
+often. Length is buying you collision headroom, not capacity.
+
+**Option 3 — Hash the URL** (MD5/SHA, truncated). Stateless and naturally
+deduplicates identical URLs. But truncation collides *far* sooner than random
+generation implies (birthday bound on the truncated width), and it leaks that two
+users shortened the same URL. Also, dedup is often wrong: two users shortening
+the same link usually want separate analytics.
+
+**Option 4 — Key Generation Service.** A separate service pre-generates unused
+codes into a table offline. App servers lease a block of 1,000 at a time and mark
+them used. This removes the uniqueness check from the write path entirely — no
+read-before-write, no retry loop, no race. Cost is another service, plus you
+leak a block of codes when a server dies (harmless). This is the textbook answer
+and worth naming even if you wouldn't build it at this scale.
+
+<Callout type="interview" title="The answer that gets you the level">
+You can have uniqueness *and* unguessability with no collision checks at all:
+**apply a bijection to a counter before encoding it.**
+
+Multiply the counter by an integer coprime with `62^7` and take it modulo
+`62^7`, or run it through a small Feistel network. The mapping is reversible, so
+it is perfectly collision-free like a counter, but consecutive IDs land far apart
+in the output space, so codes are not enumerable.
+
+```java
+// A bijection on [0, 62^7): reversible, so collision-free by construction.
+private static final long SPACE = 3_521_614_606_208L;   // 62^7
+private static final long MULT  = 1_500_450_271L;       // coprime with SPACE
+
+static String encode(long id) {
+    return base62(Math.floorMod(id * MULT, SPACE), 7);
+}
+```
+
+This is the kind of answer that distinguishes "I read a blog post" from "I
+thought about the problem." Be ready for the follow-up: it is *obfuscation, not
+encryption* — the multiplier is recoverable from a handful of samples, so it
+stops casual enumeration and is not a security control. If codes must be
+genuinely unpredictable, use random generation.
+</Callout>
+
+### D — Data model
+
+```sql
+CREATE TABLE urls (
+  id          BIGSERIAL PRIMARY KEY,
+  short_code  VARCHAR(10)  NOT NULL UNIQUE,   -- unique index serves the lookup
+  long_url    TEXT         NOT NULL,
+  user_id     BIGINT       REFERENCES users(id),
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  expires_at  TIMESTAMPTZ
+);
+CREATE INDEX idx_urls_user_created ON urls (user_id, created_at DESC);  -- "my links"
+```
+
+The unique constraint on `short_code` is doing double duty: it enforces
+correctness *and* is the index every redirect uses. It is also your last line of
+defence against the race in options 2 and 3 — two concurrent inserts of the same
+code, where the check-then-insert both passed. **The database must arbitrate;
+an application-level existence check cannot.** Catch the constraint violation
+and retry rather than returning a 500.
+
+Click events belong in a separate table (or, better, out of the OLTP database
+entirely — see below), and **`click_events.url_id` needs an explicit index**:
+Postgres does not index foreign-key columns automatically, and this table grows
+by one row per redirect.
+
+Relational is the right default here: the dataset is small, you want a unique
+constraint, and the access pattern is a primary-key lookup. Mention that a
+key-value store (DynamoDB, Cassandra) is a fine alternative at much larger scale
+where you'd shard anyway — but do not reach for it to look sophisticated.
+
+### H — High-level design and the read path
+
+```
+Create:
+  Client → LB → App → generate code → INSERT (unique constraint) → 201
+
+Redirect:
+  Client → CDN/edge ──hit──► 302 (never touches your origin)
+              │miss
+              ▼
+             LB → App → Redis ──hit──► 302
+                          │miss
+                          ▼
+                     Postgres → populate Redis → 302
+                          │
+                          └─► click event ──► Kafka ──► async aggregation
+```
+
+**Cache-aside, not write-through, for redirects.** You cache on first read and
+the database stays the source of truth. Write-through would populate the cache
+on creation, but most created links are never clicked — you'd fill Redis with
+cold entries. (Write-through *is* reasonable if you expect immediate clicks,
+which is a fine thing to note as a tradeoff.)
+
+Because links are immutable, cache entries can have long TTLs and never need
+invalidating on update. Only deletion and expiry require eviction.
+
+Three refinements that show operational experience:
+
+- **Negative caching.** Bots hammer invalid codes constantly. Without caching
+  "not found", every bogus request becomes a database query — a cheap accidental
+  DoS. Cache misses with a short TTL (say 60 s), ideally behind a Bloom filter
+  for known-valid codes.
+- **Hot keys.** One viral link is one Redis key on one node, which
+  [consistent hashing cannot fix](/system-design/13-consistent-hashing). Serve it
+  from the CDN and from an in-process local cache in each app instance; a
+  few-second local TTL absorbs enormous spikes.
+- **Edge redirects.** The real latency win. A redirect needs one key lookup and
+  no business logic, so it can run entirely at the edge (Cloudflare Workers plus
+  KV, or CloudFront Functions). That converts a cross-region round trip into a
+  sub-10 ms response near the user, and your origin sees only misses.
+
+### Analytics without slowing the redirect
+
+The naive implementation inserts a click row synchronously inside the redirect
+request. Three problems: it adds database write latency to your hottest path, it
+makes redirect availability depend on the analytics table, and that table grows
+by one row per redirect forever.
+
+The standard design:
+
+1. Emit a click event **fire-and-forget** to Kafka (or Kinesis) — see
+   [Kafka & event streaming](/system-design/14-kafka-and-event-streaming).
+2. A consumer aggregates into counters and a columnar store (ClickHouse, Druid,
+   BigQuery) for the "top referrers over time" queries.
+3. Serve the stats endpoint from pre-aggregated counters, never a
+   `COUNT(*)` over raw events.
+
+If you want to avoid Kafka at this scale, a Redis `INCR` per code flushed to the
+database every few seconds is a legitimate simpler answer — and the tradeoff is
+explicit: you lose a few seconds of counts if Redis dies. Analytics is exactly
+the place where eventual consistency and slight under- or over-counting are
+acceptable, and saying so demonstrates you're choosing consistency per feature
+rather than globally.
+
+### B — Bottlenecks, failure modes, and security
+
+- **SPOFs:** the code generator and the cache. Mitigate with pre-allocated ID
+  ranges (no runtime coordination) and Redis Cluster with replicas. Crucially,
+  a Redis outage must **degrade to database reads**, not fail the redirect.
+- **Sharding, when you eventually need it:** shard by `hash(short_code)`, not by
+  a range of codes. Range-sharding a counter-derived code puts every new write on
+  one shard. A hash spreads writes and reads evenly, and since every query is an
+  exact-match lookup you never need cross-shard range scans.
+- **The analytics table is the real growth problem,** not `urls`. One row per
+  redirect at 3,900/sec is 340 million rows/day. It must be partitioned by time
+  with a retention policy, or kept out of the OLTP database entirely.
+- **Expiry:** deleting expired rows needs a batch job, and the cache TTL must be
+  `min(cacheTtl, timeUntilExpiry)` or an expired link keeps redirecting until its
+  cache entry ages out.
+
+<Callout type="pitfall" title="A URL shortener is an open redirect — expect this question">
+You are operating a service that will take arbitrary user input and redirect
+users to it. That is an abuse vector, and at a product company it *will* come up:
+
+- **Phishing and malware.** Your domain lends credibility to a hostile link.
+  Check destinations against a reputation feed (Google Safe Browsing), and show
+  an interstitial warning for unvetted domains.
+- **Scheme validation.** Allow-list `http` and `https` only. Without it,
+  `javascript:` and `data:` URLs become stored XSS, delivered by your domain.
+- **SSRF, if you ever fetch previews.** Server-side fetching of a user-supplied
+  URL must block private ranges, loopback, and cloud metadata endpoints
+  (`169.254.169.254`), and must not follow redirects into them.
+- **Enumeration.** Sequential codes let anyone walk your entire dataset. This is
+  the strongest practical argument for random or obfuscated codes.
+- **Abuse rate limiting** on creation, per account and per IP.
+
+Raising security before being asked is one of the cheapest ways to look senior,
+and it's especially credible here because you've already written the redirect.
+</Callout>
+
+---
+
+## Layer 3 — Your actual project
+
+This is your advantage, and it only works if what you say matches the code. Here
+is an honest audit of `url-shortener/`, including the parts that need owning.
+
+**Stack:** Spring Boot 3.2.5, Java 17, PostgreSQL 16, Redis 7.2, JWT auth via
+jjwt, Dockerised with Compose.
+
+<Callout type="pitfall" title="Correction: your codes are random, not Base62-of-an-ID">
+This lesson previously told you to claim "Base62 of an auto-increment ID — your
+project's idea." **That is not what the code does**, and repeating it in an
+interview would collapse the moment anyone opened the repo.
+
+`UrlService.generateUniqueCode()` calls
+`Base62Encoder.generateRandom(7)` in a `do/while` loop, retrying while
+`urlRepository.existsByShortCode(code)` returns true. That is **option 2**:
+random 7-character codes with a uniqueness check, using `SecureRandom`.
+
+A `Base62Encoder.encode(long)` method does exist — but nothing in production
+calls it; its only callers are in `Base62EncoderTest`. So the ID-encoding
+implementation is dead code.
+
+The good news is that random generation is the **more defensible** choice: codes
+are unguessable, and generation needs no coordination, so the service scales out
+horizontally. The collision math above is your justification, and 7 characters is
+the right length for it.
+</Callout>
+
+**What you got right, and should say confidently:**
+
+- **302, deliberately.** `UrlController.redirect` returns
+  `HttpStatus.FOUND`. That is the correct choice *because* the app counts clicks
+  — a 301 would be cached by browsers and analytics would go dark. You made the
+  tradeoff the lesson describes.
+- **Redis-backed rate limiting**, not per-instance. `RateLimitInterceptor`
+  uses `INCR` plus `EXPIRE` on `rate_limit:{ip}`, 100 requests per 60 seconds,
+  and **fails open** if Redis is down. Availability over enforcement is a real
+  decision you can defend.
+- **Cache degrades rather than fails.** `cacheUrl` catches and logs, so a Redis
+  outage doesn't break redirects.
+- **Stateless and horizontally scalable.** JWT with `STATELESS` sessions and no
+  per-instance state, so adding instances just works.
+
+**The weaknesses to volunteer before you're asked.** "How would you improve it?"
+is the most likely follow-up, and having specific answers is worth more than
+having none of these problems:
+
+1. **The cache doesn't actually save a database read.** In `UrlService.resolve`,
+   a cache hit still calls `recordClick`, which does its own
+   `findByShortCode` to get the entity for the foreign key — so every redirect
+   is a Redis `GET` **plus** a Postgres `SELECT` plus an `INSERT`. On a miss,
+   `findByShortCode` runs twice. **Fix:** cache the numeric `id` alongside the
+   URL, or use `getReferenceById` to build the FK without loading the row. This
+   is the single best thing to fix, and describing it well is a strong answer.
+2. **Click writes are synchronous on the hottest path.** One `INSERT` per
+   redirect inside the request transaction. **Fix:** the Kafka or Redis-counter
+   design above. This is the textbook improvement and you can point at the exact
+   line.
+3. **Expired links keep redirecting for up to 24 hours.** The `expiresAt` check
+   only exists in the DB-fallback branch of `resolve`, and the cache TTL is a
+   hardcoded 24 h regardless of the link's own expiry. **Fix:**
+   `min(24h, timeUntilExpiry)`.
+4. **Missing index on `click_events.url_id`.** No `@Index` anywhere and
+   `ddl-auto: update` as the schema authority, so `countByUrlId` sequentially
+   scans a table that grows on every redirect.
+5. **`countByUrlId` is a live `COUNT(*)`** on every analytics request. Wants a
+   denormalised counter.
+6. **A TOCTOU race in code generation.** Between `existsByShortCode` returning
+   false and `save`, a concurrent request can take the same code. The unique
+   constraint prevents corruption — correctly — but the loser gets an unhandled
+   `DataIntegrityViolationException`, i.e. a 500 instead of a transparent retry.
+   Same race on the custom-alias path. The retry loop also has no maximum.
+7. **`ddl-auto: update` in production.** No Flyway or Liquibase, no reviewed
+   DDL, no rollback path.
+8. **The rate limiter has three fixable flaws:** `INCR` and `EXPIRE` are two
+   non-atomic calls, so a crash between them leaves a key with no TTL that blocks
+   that IP forever (fix with a Lua script or `SET NX EX`); it's a fixed window,
+   so 200 requests can pass across a boundary (fix with a sliding window); and
+   the key is `request.getRemoteAddr()`, which behind a load balancer is the
+   *proxy's* IP, collapsing every user into one bucket (fix by parsing
+   `X-Forwarded-For`).
+9. **Hardcoded JWT signing secret** in `application.yml`, which anyone with repo
+   access can use to forge a token for any user. Move it to an environment
+   variable with no default. Raising this yourself, with the fix, reads as
+   security awareness; having it found for you does not.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How do you generate the code?"** Random 7-char Base62 with a uniqueness
+   check — unguessable and needs no coordination. Then the collision math, then
+   why not a counter (enumerable, chokepoint).
+2. **"Why 7 characters?"** Six is already ~47 years of capacity; the extra
+   character buys collision headroom for random generation — 0.028% per insert at
+   a billion links versus 1.8%.
+3. **"301 or 302, and why?"** 302, because clicks must be counted and links must
+   stay revocable. Then: the status is a hint, `Cache-Control` is the real knob.
+4. **"How do you guarantee uniqueness under concurrency?"** The database's unique
+   constraint, with the violation caught and retried. An application-level check
+   cannot win that race.
+5. **"Your cache hit ratio is 95% — how much database load did you remove?"**
+   In my implementation, none, because click recording re-reads the row. Here's
+   the fix. *(Answering this honestly is far stronger than claiming 95%.)*
+6. **"How do you count clicks without slowing the redirect?"** Fire-and-forget to
+   a stream, aggregate asynchronously, serve stats from pre-aggregated counters.
+7. **"Do you need to shard?"** Not at 600 GB/year — a single instance with
+   replicas is years away from trouble. When it comes, shard by
+   `hash(short_code)`, never by code range.
+8. **"What's your biggest table?"** `click_events`, growing one row per redirect.
+   Partition by time with retention, or move it out of the OLTP database.
+9. **"Redis dies. What happens?"** Redirects degrade to database reads and the
+   rate limiter fails open — both deliberate. Latency rises, correctness holds.
+10. **"How do you stop abuse?"** Scheme allow-list, reputation checks,
+    interstitials, creation rate limits, and non-enumerable codes.
+11. **"Make the redirect 10 ms globally."** Move it to the edge — a worker plus a
+    KV store, with the origin seeing only misses.
+</Callout>
+
+### Where this connects
+
+- [1. The framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — the R-E-A-H-D-B spine this lesson follows.
+- [7. CAP theorem](/system-design/7-cap-theorem-consistency-models) — the
+  per-feature consistency table (uniqueness strong, analytics eventual) is this
+  design.
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — for when
+  sharding finally arrives, and why it won't save a hot key.
+- [14. Kafka](/system-design/14-kafka-and-event-streaming) — the click pipeline.
+- [Case 2: distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+  — a deep dive on the limiter you already wrote.

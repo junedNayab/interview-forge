@@ -1,0 +1,306 @@
+---
+title: "HLD vs LLD — get this clear first"
+topic: "lld"
+order: 401
+difficulty: "easy"
+estimatedMinutes: 19
+tags: [lld, hld, system-design, scoping, interview-technique]
+format: "mdx"
+summary: "The same problem at two zoom levels — parking lot and payments designed as boxes-and-network, then as classes-and-method-calls — and the four things an LLD round checks that an HLD round never does."
+---
+
+## Layer 1 — The mental model
+
+Candidates lose LLD rounds in the first three minutes by answering the wrong
+question. Asked to design a parking lot, they start talking about sharding the
+ticket table and putting Redis in front of the spot-availability service. That
+is a good answer to a question nobody asked.
+
+The distinction that prevents it:
+
+> **HLD is about boxes and the network between them. LLD is about classes and
+> the method calls between them.** Both are "design". They differ in what a
+> single arrow on your diagram means — a network hop, or a method invocation.
+
+That one substitution explains every downstream difference. A network hop can
+fail, be slow, be retried, arrive twice, or arrive out of order, so HLD is
+dominated by failure, latency, consistency and scale. A method call inside one
+JVM cannot half-happen, so LLD is dominated by *responsibility*: who owns which
+data, who is allowed to change it, and what breaks when the requirements change
+next quarter.
+
+```
+   HLD zoom level                          LLD zoom level
+   ─────────────────                       ─────────────────
+
+   ┌────────┐   ┌────────┐                  ┌──────────────┐
+   │ Gateway│──►│ Ticket │                  │  ParkingLot  │
+   └────────┘   │ Service│                  └──────┬───────┘
+                └───┬────┘                         │ park(vehicle)
+                    │                              ▼
+              ┌─────▼─────┐               ┌──────────────────┐
+              │ Postgres  │               │ SpotAllocation   │◄── strategy
+              └───────────┘               │    Strategy      │
+                                          └────────┬─────────┘
+   arrows = network calls                          │ allocate(...)
+   concerns = latency, failure,                    ▼
+     replication, scale              ┌──────────────────────────┐
+                                     │ ParkingFloor → ParkingSpot│
+                                     └──────────────────────────┘
+
+                                     arrows = method calls
+                                     concerns = responsibility,
+                                       extensibility, invariants
+```
+
+The rounds also differ in their artefact, and that is the practical thing to
+internalise: an HLD round ends with a diagram and a set of justified tradeoffs.
+An LLD round ends with **code that compiles**. If you leave an LLD round having
+only drawn boxes, you have not produced the deliverable.
+
+---
+
+## Layer 2 — The mechanism
+
+### The same problem at both zoom levels
+
+Abstract comparisons do not stick. Here are two problems designed twice.
+
+**"Design a parking lot" as HLD.** The interviewer wants a multi-site
+commercial parking business. You would ask about the number of sites, the entry
+rate at peak, whether gates must keep working when the network is down, and
+where payments are settled. You would end up with an edge service per site so
+gates keep issuing tickets during a partition, a central ticketing service, a
+payments integration, an events pipeline feeding an analytics store, and a
+discussion of whether spot-availability counts are strongly consistent (they
+need not be — a stale count on a signboard is tolerable, a double-issued ticket
+is not).
+
+**"Design a parking lot" as LLD.** The interviewer wants one lot, in one
+process. You would ask what varies: do spot sizes differ, does pricing differ by
+vehicle type or by time of day, are there multiple gates. You would end up with
+`ParkingLot`, `ParkingFloor`, `ParkingSpot`, a `Vehicle` hierarchy, `Ticket`,
+and two interfaces — `SpotAllocationStrategy` and `PricingStrategy` — because
+those are the two things the interviewer will ask you to change. Then you would
+write them. Scale never comes up. What comes up is: *two cars arrive at the last
+free spot at the same instant — what happens?*
+
+**"Design a payment system" as HLD.** Idempotency keys so a retried charge does
+not double-charge, an outbox table so the database write and the event
+publication cannot diverge, a ledger that is append-only, reconciliation jobs
+against the provider, timeouts and circuit breakers around the provider call,
+and the uncomfortable truth that a payment provider call can time out after
+succeeding, which is why you need a status-check endpoint rather than a retry.
+
+**"Design a payment system" as LLD.** A `PaymentMethod` abstraction with
+`CardPayment`, `UpiPayment` and `WalletPayment` implementations; a
+`PaymentProcessor` that depends on the interface rather than any implementation;
+a `Payment` entity whose status transitions are enforced by a state machine
+rather than by scattered `if` statements; a `PaymentGateway` interface with a
+`StripeGateway` adapter behind it so the third-party SDK never leaks into your
+domain classes. The follow-up is *"now add EMI, which needs an extra
+authorisation step — what changes?"*, and the whole point of the design is that
+the answer is "one new class".
+
+### What each round rewards
+
+| | HLD round | LLD round |
+|---|---|---|
+| Opening move | Clarify scale and non-functional requirements | Clarify what *varies*, and cut scope explicitly |
+| Core artefact | Component diagram plus data flow | Class diagram plus compiling code |
+| Killer skill | Drawing a conclusion from a number ("40 writes/sec, so no sharding") | Naming the axis of change before choosing an abstraction |
+| Depth probe | "What happens on a cache miss stampede?" | "Now add requirement X — how many files do you touch?" |
+| Fatal mistake | Naming technologies with no justification | One God class with a growing `switch` |
+| Concurrency means | Replication lag, quorums, distributed locks | Two threads, one mutable field, a lost update |
+
+The rows are worth reading as a pair. In HLD, *numbers* justify decisions. In
+LLD, *change* justifies decisions. When you say "I'll put pricing behind an
+interface", the justification is not performance and not elegance — it is that
+pricing is the requirement most likely to change, and this design localises that
+change to one new file.
+
+### The four things an LLD round checks that HLD never does
+
+This is the part worth memorising, because it tells you where to spend your
+preparation.
+
+**1. Does your code compile?** In an HLD round nobody types. In a machine-coding
+round the evaluator runs your program. A design that is conceptually beautiful
+and does not build scores below a plain design that runs. This is why
+[Part 8](/lld/part-8-machine-coding-round-survival-tips) insists on getting an
+end-to-end skeleton working before making anything elegant.
+
+**2. Does adding a requirement mean changing one class or five?** This is the
+single most common follow-up in the entire round, and it is asked because it is
+the cheapest way to measure design quality. Consider the difference concretely:
+
+```java
+// BAD — pricing lives inside the lot. A new pricing rule edits this method,
+// which is already tested, already reviewed and already working.
+class ParkingLot {
+    double fee(Ticket t) {
+        long hours = t.hoursParked();
+        if (t.vehicleType() == VehicleType.CAR)        return 30 * hours;
+        else if (t.vehicleType() == VehicleType.BIKE)  return 10 * hours;
+        else if (t.vehicleType() == VehicleType.TRUCK) return 50 * hours;
+        throw new IllegalStateException("unknown type");   // and this grows
+    }
+}
+
+// GOOD — pricing is an abstraction the lot depends on. A new pricing rule is a
+// new file; ParkingLot is never reopened.
+interface PricingStrategy {
+    double fee(Ticket ticket);
+}
+
+final class HourlyPricing implements PricingStrategy {
+    private final Map<VehicleType, Double> ratePerHour;
+    HourlyPricing(Map<VehicleType, Double> ratePerHour) {
+        this.ratePerHour = Map.copyOf(ratePerHour);     // defensive copy
+    }
+    @Override public double fee(Ticket t) {
+        return ratePerHour.getOrDefault(t.vehicleType(), 0.0) * t.hoursParked();
+    }
+}
+
+final class ParkingLot {
+    private final PricingStrategy pricing;              // depends on the interface
+    ParkingLot(PricingStrategy pricing) { this.pricing = pricing; }
+    double fee(Ticket t) { return pricing.fee(t); }
+}
+```
+
+Both compile. Both work today. The second one costs you an extra file and an
+extra indirection, and buys you the answer to the follow-up. Knowing *when* that
+trade is worth making is the skill; applying it everywhere is a different
+failure, and [Part 2](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+is honest about it.
+
+**3. Is it thread-safe where it needs to be?** HLD concurrency is about machines
+disagreeing. LLD concurrency is about two threads in one process racing on one
+field. The canonical probe is the last parking spot:
+
+```java
+// BAD — check-then-act across two statements. Two threads can both pass the
+// isFree() check before either writes, and both get the same spot.
+ParkingSpot spot = findFreeSpot(vehicle);
+spot.assign(vehicle);                       // second caller silently overwrites
+
+// GOOD — the check and the write are one atomic step, owned by the spot itself.
+final class ParkingSpot {
+    private Vehicle occupant;                                  // null == free
+
+    synchronized boolean tryAssign(Vehicle v) {
+        if (occupant != null || !fits(v)) return false;         // check
+        occupant = v;                                           // and act
+        return true;                                            // one critical section
+    }
+
+    synchronized void release() { occupant = null; }
+}
+```
+
+An interviewer who asks "what if two cars arrive at once?" is not asking a
+distributed systems question. They are asking whether you know that
+`if (spot.isFree()) spot.assign(v)` is two operations with a window in between.
+If that sentence is not yet obvious, read
+[Java concurrency](/java/3-concurrency-senior-must-have) before your round; it
+is the highest-yield follow-up in LLD.
+
+**4. Can it be tested?** HLD rarely gets asked "how do you test this". LLD does,
+constantly, and testability is a proxy for coupling. If `ParkingLot` calls
+`new HourlyPricing()` internally, you cannot test the lot's allocation logic
+without also exercising the pricing arithmetic. If pricing arrives through the
+constructor, you pass a two-line fake and test one thing at a time. **When an
+interviewer asks "how would you test this?", the honest answer is a report on
+how well you did dependency inversion**, which is why the two questions are
+really one question.
+
+### When the two rounds blur
+
+Some interviews deliberately mix them, and the transition is a moment where
+candidates flounder. A system design round ends with "we've agreed on a rate
+limiter service — write me the `RateLimiter` interface and a token bucket
+implementation." The zoom level just changed, and so should your vocabulary:
+stop saying "we'd shard by user ID" and start saying "the interface is
+`boolean allow(String key)`, the token bucket holds a capacity and a refill
+rate, and refill is computed lazily on access so I don't need a background
+thread."
+
+The reverse also happens: an LLD round where you have designed an in-memory
+parking lot and the interviewer asks "now there are fifty lots across the
+city". That is an invitation to zoom out, and the correct move is to name the
+transition out loud — "that changes this from a single-process design to a
+distributed one, so the spot allocation now needs a shared source of truth
+rather than a `synchronized` block. Should I go there?"
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the difference between HLD and LLD?"** HLD designs the boxes and
+   the network between them; LLD designs the classes and the method calls
+   between them. Same problem, different zoom level, different failure modes.
+2. **"Which one is this round?"** Ask, in the first minute, if it is ambiguous:
+   *"Should I design this as a single-process system with classes, or as a
+   distributed architecture?"* Nobody has ever been penalised for that question.
+3. **"Design a parking lot."** If it is LLD, the first thing out of your mouth
+   is a scoping question about what varies — spot types, pricing, number of
+   gates — not a mention of a database.
+4. **"Why is concurrency an LLD concern at all?"** Because one process serves
+   many threads. Two gates are two threads competing for one mutable spot.
+5. **"What do you mean by the axis of change?"** The requirement most likely to
+   be modified. Pricing changes often; the concept of a parking floor does not.
+   You put interfaces on the axes of change and plain classes everywhere else.
+6. **"How do I know your design is good?"** Give the interviewer the test
+   themselves: *"Name a requirement you'd add, and I'll tell you which files I
+   touch."* It is a strong, confident move.
+7. **"Does LLD care about the database?"** Usually not. Machine-coding rounds
+   are nearly always in-memory unless persistence is explicitly requested; a
+   `Map` behind a `Repository` interface is the expected answer.
+8. **"Where does SOLID fit?"** SOLID is the LLD vocabulary for cost of change.
+   It has essentially no HLD equivalent, which is why it dominates this round.
+9. **"Is a class diagram enough?"** Not in a machine-coding round. The diagram
+   is ten minutes of a ninety-minute round; the rest is typing.
+10. **"You designed this for one lot. Now there are fifty."** Name the zoom
+    change explicitly, then move the allocation decision to a shared store and
+    discuss whether the gate should fail closed or fail open during a partition.
+11. **"How would you test this design?"** Answer in terms of seams: which
+    dependencies arrive through constructors, and therefore which can be
+    replaced by fakes. If nothing can be replaced, the design is the problem.
+12. **"Do you need to know CAP for an LLD round?"** No. Bringing it up
+    unprompted in a single-process design signals you have not noticed which
+    round you are in.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Answering the HLD question in an LLD round.** Load balancers and sharding in
+  a parking lot round read as evasion of the actual task, which is writing
+  classes.
+- **Drawing for forty minutes in a machine-coding round.** The deliverable is a
+  program. Ten minutes of design, then type.
+- **Treating "in-memory" as an excuse to skip structure.** A `HashMap` field is
+  fine; a `HashMap` field that six classes reach into directly is not. Put it
+  behind a repository interface so the design survives being asked to persist.
+- **Ignoring concurrency because "it's just one process".** One process is
+  exactly where data races live. Even saying *"a single lock on the allocation
+  path is enough here, and here's why I don't need finer granularity"* scores.
+- **Escalating to distributed concerns without being invited.** If you want to
+  discuss the fifty-lot version, ask first. Unprompted scope expansion costs you
+  the minutes you need for code.
+</Callout>
+
+### Where this connects
+
+- [How to drive an LLD interview](/lld/part-4-how-to-drive-an-lld-interview-the-method)
+  — the minute-by-minute method for the round you have now correctly identified.
+- [The 45-minute design framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — the equivalent method for the other zoom level, including the scoping
+  phrases that transfer directly.
+- [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — the language for the cost-of-change argument this lesson keeps making.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — the check-then-act
+  race in `tryAssign`, explained properly.
+- [Part 5 — the parking lot worked end to end](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — the LLD version of the first example, in full.

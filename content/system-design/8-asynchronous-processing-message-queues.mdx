@@ -1,0 +1,299 @@
+---
+title: "8. Asynchronous processing & message queues"
+topic: "system-design"
+order: 208
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 21
+tags: [queues, async, kafka, rabbitmq, backpressure, idempotency]
+format: "mdx"
+summary: "A queue is a buffer with a failure mode — queue vs log, what backpressure means when the queue is full, why at-least-once is the only honest delivery guarantee, and consumer lag as the metric that catches the failures error rates miss."
+---
+
+## Layer 1 — The mental model
+
+The standard answer is "queues decouple producers from consumers." True, and
+incomplete in a way that matters. The sharper framing:
+
+> **A queue converts a latency problem into a capacity problem.** Instead of
+> making the caller wait for slow work, you store the work. And storage is
+> finite, so you haven't removed the problem — you've bought time and taken on a
+> new failure mode: the queue filling up.
+
+That reframe is what lets you answer the follow-ups, because every hard question
+about queues is about what happens to that buffer:
+
+| The question | What it's really asking |
+|---|---|
+| What if the consumer is slower than the producer? | The buffer grows without limit |
+| What if a message fails? | It re-enters the buffer, possibly forever |
+| What if the consumer crashes mid-work? | Did the message leave the buffer or not? |
+| How do you know the system is sick? | The buffer's depth, not your error rate |
+
+The three things a queue actually buys you, stated precisely:
+
+1. **Latency** — return to the caller now, do the work later. A 202 instead of
+   a 2-second wait.
+2. **Burst absorption** — a 10× spike fills the queue instead of dropping
+   requests. The queue is a shock absorber.
+3. **Decoupling** — the producer doesn't need the consumer to be up, or to know
+   how many there are.
+
+And the cost, which you should volunteer: **everything becomes eventually
+consistent, and every consumer must be idempotent.** You've traded a simple
+synchronous call for a system where the work might happen twice, out of order,
+or much later.
+
+---
+
+## Layer 2 — The mechanism
+
+### Queue vs log — the distinction that matters
+
+These get lumped together as "message queues" and they are architecturally
+different.
+
+**A queue (RabbitMQ, SQS, ActiveMQ)** distributes work. A message is delivered
+to one consumer, acked, and **deleted**. The queue is a to-do list that gets
+shorter.
+
+```
+Producer ──► [ m5 m4 m3 m2 m1 ] ──► Consumer A   (takes m1, acks, m1 is GONE)
+                                └──► Consumer B   (takes m2)
+```
+
+**A log (Kafka, Kinesis, Pulsar)** is an append-only sequence. Consumers track
+an **offset** into it; reading doesn't remove anything, and messages are
+retained by time or size policy.
+
+```
+Log:  [ m1 m2 m3 m4 m5 ...            ]   ← immutable, retained
+                ▲              ▲
+       group A offset   group B offset     ← independent, replayable
+```
+
+The consequences you'd actually cite:
+
+| | Queue | Log |
+|---|---|---|
+| After consumption | Deleted | Retained — **replayable** |
+| Multiple independent consumers | Needs fan-out/exchanges | Native, via consumer groups |
+| Ordering | Hard once you have parallel consumers | Per-partition, guaranteed |
+| Parallelism limit | Number of consumers | Number of partitions |
+| Per-message operations | Easy — ack, nack, delay, priority, TTL | Awkward — the offset is a position, not a set |
+| Natural fit | Task distribution | Event streaming, audit, reprocessing |
+
+**Replay is the real differentiator.** With a log you can deploy a fixed
+consumer and reprocess the last week; with a queue the messages are gone. That's
+why event-sourcing and analytics pipelines use logs, and why "send this email"
+is fine on a queue. See [Kafka](/system-design/14-kafka-and-event-streaming)
+for the mechanics.
+
+The trap to avoid: don't say "I'll use Kafka" for a task queue. Kafka's
+parallelism is bounded by partition count, it has no per-message ack or retry,
+and delaying or dead-lettering an individual message is genuinely awkward. A
+work queue is the better tool for work.
+
+### Delivery semantics, honestly
+
+```
+At-most-once   ack BEFORE processing  → crash loses the message
+At-least-once  ack AFTER processing   → crash reprocesses it. THE DEFAULT.
+Exactly-once   … see below
+```
+
+**At-least-once is what you get, and the conclusion is that consumers must be
+idempotent.** Not "should be" — must, because a redelivery after a crash is
+normal operation, not an edge case.
+
+Idempotency in practice means one of:
+
+- A **natural idempotency key** — the message carries an ID, and the consumer
+  records it (`SET NX` in Redis, or a unique constraint in the database) before
+  or as part of the work.
+- A **naturally idempotent operation** — `SET status = 'shipped'` is safe to
+  repeat; `balance = balance + 10` is not.
+- **An upsert** rather than an insert.
+
+<Callout type="note" title="What 'exactly-once' actually means">
+Exactly-once *delivery* over a network is impossible — a well-known result, and
+the reason is simple: the sender cannot distinguish "the message was lost" from
+"the ack was lost," so it must either retry (risking a duplicate) or not
+(risking a loss).
+
+What Kafka calls exactly-once is exactly-once **processing**, and it works only
+within Kafka: an atomic transaction spanning the consumer's offset commit and
+the producer's output. The moment your side effect leaves that system — an
+email, a payment, a row in Postgres — the guarantee ends.
+
+**The practical answer is always the same: at-least-once delivery plus an
+idempotent consumer.** Saying that, rather than claiming exactly-once, is the
+answer that scores.
+</Callout>
+
+### Backpressure — what happens when the buffer fills
+
+The question candidates miss. A queue is finite; a consumer slower than the
+producer will fill it. Your options, and each is a real design decision:
+
+- **Block the producer.** Correct when the producer can wait (an internal
+  pipeline). Dangerous at the edge — you've just reconnected the coupling the
+  queue was meant to remove, and now a slow consumer stalls your API.
+- **Drop messages.** Load shedding. Correct for metrics and telemetry, where a
+  fresh sample beats a complete history.
+- **Drop the oldest.** Right when recency matters more than completeness.
+- **Spill to disk.** Buys time, costs latency.
+- **Scale the consumers.** The real fix — if the work is parallelisable and the
+  downstream can take it.
+
+The pitfall worth stating: **an unbounded in-memory queue is not a solution, it
+is an `OutOfMemoryError` with a delay.** `new LinkedBlockingQueue<>()` with no
+capacity argument is unbounded, and `Executors.newFixedThreadPool` uses exactly
+that — so the pool never rejects work, it just accumulates it until the heap is
+gone. Always bound the queue and choose an explicit rejection policy.
+
+### Retries, poison messages and the DLQ
+
+A failing message re-enters the queue, and without care it does so forever,
+consuming capacity and blocking a partition.
+
+- **Retry only retryable failures.** A timeout or a 503, yes. A malformed
+  payload will fail identically every time, so retrying is pure waste.
+- **Exponential backoff with jitter.** Without jitter, everything that failed
+  during an outage retries in lockstep the moment it recovers and knocks the
+  dependency over again.
+- **Cap the attempts, then dead-letter.** A **DLQ** holds messages that
+  exhausted their retries, so the main queue keeps flowing.
+- **A DLQ needs an owner, an alert and a replay tool.** Otherwise it's a slower
+  way to drop messages.
+
+### Ordering, and why it fights parallelism
+
+A single consumer preserves order and caps your throughput. Add consumers and
+messages are processed concurrently — order is gone.
+
+The standard resolution is **partition by key**: route all messages for one
+entity to one partition or one consumer, so ordering holds *where it matters*
+while unrelated entities process in parallel. Order per customer, not order
+globally. The cost is a hot partition when one key is disproportionately
+active.
+
+The better question, which is worth asking out loud: **do you actually need
+ordering?** Often the answer is no if messages are idempotent and carry a
+version or timestamp, letting the consumer ignore anything stale. Designing for
+commutativity beats enforcing order.
+
+### The dual-write problem and the outbox
+
+The most common correctness bug in queue-based systems, and a great thing to
+raise unprompted:
+
+```java
+// BROKEN — two systems, no shared transaction.
+orderRepository.save(order);        // committed
+queue.publish(new OrderCreated());  // crashes here → order exists, nobody knows
+```
+
+You cannot atomically write to a database and a message broker. The **transactional
+outbox** fixes it: write the event to an `outbox` table *in the same database
+transaction* as the business data, then a separate relay polls that table (or
+reads the replication log via CDC) and publishes. The database transaction makes
+it atomic; the relay makes it at-least-once. Covered in full in
+[microservice reliability patterns](/system-design/15-microservice-reliability-patterns).
+
+### Monitoring: lag, not errors
+
+The single most important operational point. When a consumer slows down or
+stalls, **nothing errors**. Producers succeed, the broker is healthy, error
+dashboards stay green — and the system is broken, because work is arriving and
+not being done.
+
+Alert on:
+
+- **Consumer lag / queue depth**, and its *derivative*. Depth of 10,000 may be
+  normal; depth growing steadily for ten minutes never is.
+- **Message age** — the oldest unprocessed message is what a user experiences.
+- **DLQ rate**, which should be near zero.
+- **Processing time per message.**
+
+"I'd alert on consumer lag rather than error rate" is one of the highest-signal
+sentences available in a queue discussion.
+
+### Where to apply this
+
+Work belongs off the request path when it is **slow**, **failure-prone**, or
+**not needed for the response**: sending email and push, generating PDFs and
+reports, image and video processing, third-party API calls, analytics and audit
+writes, and search-index updates.
+
+Your url-shortener has a textbook instance. `UrlService.resolve()` calls
+`recordClick()` synchronously on the redirect path, and `recordClick` performs
+its own `findByShortCode` lookup plus an insert into `click_events` — **so the
+hottest, most latency-sensitive endpoint in the system does a database write
+before it can redirect.** Publishing a click event and aggregating it in a
+consumer would take that work off the hot path entirely, and it's a strong
+"what would you improve?" answer because the analytics don't need to be
+synchronous with the redirect. The trade to name: click counts become eventually
+consistent, which for analytics is obviously fine.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why use a queue?"** Latency off the request path, burst absorption, and
+   decoupling. And it converts a latency problem into a capacity problem.
+2. **"Queue or log?"** A queue deletes on ack and distributes work; a log
+   retains and lets independent consumers replay. Replay is the differentiator.
+3. **"Why not Kafka for a task queue?"** Parallelism is capped by partitions,
+   and per-message ack, retry, delay and dead-lettering are awkward.
+4. **"What delivery guarantee do you have?"** At-least-once. Therefore consumers
+   must be idempotent.
+5. **"Isn't Kafka exactly-once?"** Exactly-once *processing* within Kafka, via
+   transactional offset commits. The guarantee ends at any external side
+   effect.
+6. **"How do you make a consumer idempotent?"** An idempotency key recorded with
+   `SET NX` or a unique constraint, a naturally idempotent operation, or an
+   upsert.
+7. **"What if the consumer is slower than the producer?"** Backpressure: block,
+   shed, drop oldest, spill, or scale consumers. Never an unbounded in-memory
+   queue.
+8. **"What's wrong with `newFixedThreadPool`?"** Its queue is unbounded, so it
+   never rejects work — it accumulates it until you get an
+   `OutOfMemoryError`.
+9. **"A message keeps failing."** Cap retries with jittered backoff and
+   dead-letter it. Don't retry non-retryable errors.
+10. **"How do you keep ordering with multiple consumers?"** Partition by key so
+    order holds per entity. Then ask whether you need ordering at all.
+11. **"How do you atomically save to the DB and publish an event?"** You can't
+    — use the transactional outbox, or CDC off the replication log.
+12. **"How do you know the queue is unhealthy?"** Consumer lag and its trend,
+    plus the age of the oldest message. Error rate won't tell you.
+13. **"What does async cost you?"** Eventual consistency, idempotency
+    requirements, harder debugging, and one more system to operate.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **An unbounded queue**, which is a delayed out-of-memory error.
+- **Assuming exactly-once** and writing a non-idempotent consumer.
+- **Retrying non-retryable errors** forever.
+- **No jitter**, so every retry lands simultaneously after an outage.
+- **A DLQ with no owner or alert.**
+- **Dual writes** to the database and the broker with no outbox.
+- **Alerting on error rate only**, and missing the stalled consumer entirely.
+- **Reaching for a queue when a synchronous call is fine.** Async is a real
+  complexity cost; spend it deliberately.
+</Callout>
+
+### Where this connects
+
+- [14. Kafka and event streaming](/system-design/14-kafka-and-event-streaming) —
+  partitions, consumer groups and offsets in depth.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — outbox, saga, idempotency keys, circuit breakers.
+- [Case 5: notification system](/system-design/case-5-design-a-notification-system-email-sms-push)
+  — this lesson applied end to end.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the synchronous click write and how to move it off the hot path.
+- [OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency) —
+  bounded queues and thread pools at the process level.

@@ -1,0 +1,331 @@
+---
+title: "4. Java 8+ Features"
+topic: "java"
+order: 504
+group: "Core Java"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [streams, lambdas, optional, records, pattern-matching, modern-java]
+format: "mdx"
+summary: "How streams actually execute (laziness, one pass, short-circuiting), the rules that make Optional useful instead of decorative, why parallel streams usually lose, and what Java 9–21 changed that you should be using."
+---
+
+## Layer 1 — The mental model
+
+The shallow version of this topic is a list of syntax. The version that scores:
+
+> **Java 8 changed what you describe.** Before it, you wrote *how* to compute
+> something — a loop, an index, an accumulator. After it, you describe *what*
+> you want, and the library decides how.
+
+That shift is why `Stream` isn't just "a nicer for loop." Once you've described
+the *what*, the runtime is free to fuse operations together, stop early, or
+split the work across cores — none of which it can do with your hand-written
+loop, because your loop's mechanics are part of its meaning.
+
+Two consequences that explain most stream behaviour and most stream bugs:
+
+1. **A stream is a pipeline description, not a collection.** Nothing happens
+   until a terminal operation runs, and everything then happens in **one pass**.
+   `filter().map().findFirst()` does not build two intermediate lists — each
+   element flows through the whole chain before the next one starts.
+2. **A stream is single-use, and must not have side effects.** It has no
+   storage, so it can't be replayed. And because the library reserves the right
+   to reorder or parallelise, a lambda that mutates shared state has undefined
+   behaviour.
+
+The Java 9–21 additions (records, sealed types, pattern matching) continue in
+the same direction: **let the language express intent so the compiler can check
+it**, instead of expressing mechanics the compiler must take on faith.
+
+---
+
+## Layer 2 — The mechanism
+
+### How a stream actually executes
+
+```java
+List<String> result = employees.stream()
+    .filter(e -> e.getSalary() > 50_000)   // intermediate — lazy
+    .map(Employee::getName)                // intermediate — lazy
+    .sorted()                              // intermediate — STATEFUL
+    .collect(Collectors.toList());         // terminal — runs everything
+```
+
+**Intermediate operations return a stream and do nothing.** They build a chain
+of stages. Only the **terminal** operation drives it.
+
+The execution model is the part worth being able to state: elements are pulled
+one at a time through the entire chain — element 1 is filtered, mapped and
+collected before element 2 is touched. That's **loop fusion**, and it's why a
+long chain doesn't cost a temporary list per stage.
+
+**Short-circuiting** falls out of that for free:
+
+```java
+Optional<String> first = hugeList.stream()
+    .filter(expensiveCheck)
+    .findFirst();       // stops at the FIRST match — doesn't filter the rest
+```
+
+`findFirst`, `anyMatch`, `limit` and `takeWhile` all stop early, and because of
+fusion they stop the whole pipeline, not just their own stage.
+
+**Stateful operations break the flow.** `sorted()` and `distinct()` must see
+everything before they can emit anything, so they buffer the entire stream.
+Putting `sorted()` before `filter()` sorts elements you're about to discard;
+`filter().sorted()` is the correct order and often a large difference. That's a
+good, concrete answer to "how would you optimise this pipeline?"
+
+**Laziness in one demonstration** — the classic interview snippet:
+
+```java
+Stream.of("a", "b", "c")
+      .peek(System.out::println)   // no terminal operation
+      .map(String::toUpperCase);   // → prints NOTHING
+```
+
+### Collectors worth knowing cold
+
+```java
+// group
+Map<String, List<Employee>> byDept = emps.stream()
+    .collect(groupingBy(Employee::getDepartment));
+
+// group + downstream: the pattern interviewers ask for
+Map<String, Double> avgByDept = emps.stream()
+    .collect(groupingBy(Employee::getDepartment,
+                        averagingDouble(Employee::getSalary)));
+
+Map<String, Long> countByDept = emps.stream()
+    .collect(groupingBy(Employee::getDepartment, counting()));
+
+// boolean split — two keys, always both present
+Map<Boolean, List<Employee>> split = emps.stream()
+    .collect(partitioningBy(e -> e.getSalary() > 50_000));
+
+// to a map — watch the duplicate-key trap
+Map<String, Employee> byEmail = emps.stream()
+    .collect(toMap(Employee::getEmail, e -> e,
+                   (existing, replacement) -> existing));   // merge function
+
+// flatten
+List<String> skills = emps.stream()
+    .flatMap(e -> e.getSkills().stream())
+    .distinct().toList();          // Java 16+: .toList() beats collect(toList())
+```
+
+Two traps in that block. **`toMap` throws `IllegalStateException` on a duplicate
+key** unless you supply a merge function — a real production surprise, because
+it only fires on the data that happens to contain a duplicate. And `toMap` also
+**throws on a null value**, unlike `HashMap`.
+
+Note `.toList()` (Java 16+) returns an *unmodifiable* list, whereas
+`collect(Collectors.toList())` returns a mutable `ArrayList` — an easy source of
+`UnsupportedOperationException` during a migration.
+
+<Callout type="pitfall" title="Why parallel streams usually lose">
+`.parallel()` looks like free speed. It rarely is, and knowing why is the
+interview point.
+
+**All parallel streams share one thread pool** — `ForkJoinPool.commonPool`,
+sized to CPU cores − 1 for the whole JVM. So one slow parallel stream in a
+library blocks every other parallel stream in your application. Worse, **a
+blocking I/O call inside a parallel stream parks a common-pool thread**, and a
+handful of those starves the pool process-wide.
+
+It's worth it only when all of these hold: a large dataset (rough rule of thumb:
+10,000+ elements), genuinely CPU-bound work per element, a cheaply splittable
+source (`ArrayList` or an array — `LinkedList` splits terribly), and no ordering
+requirement or shared mutable state.
+
+For I/O-bound concurrency, a dedicated executor or virtual threads is the right
+tool. And whatever you do, **measure** — the honest answer to "should I
+parallelise?" is "I'd benchmark it," and parallel streams lose that benchmark
+more often than they win.
+</Callout>
+
+### Optional, used properly
+
+`Optional` exists for one job: **to make "this might be absent" visible in the
+type signature**, so a caller cannot silently forget. It was designed as a
+return type, and most of its misuse comes from using it elsewhere.
+
+```java
+// GOOD — chain and supply a default; never unwrap manually
+String city = findUser(id)
+    .flatMap(User::getAddress)     // Optional<Address>
+    .map(Address::getCity)         // Optional<String>
+    .orElse("unknown");
+
+findUser(id).ifPresentOrElse(this::send, this::logMissing);   // Java 9+
+User u = findUser(id).orElseThrow(() -> new NotFoundException(id));
+
+// BAD
+if (opt.isPresent()) { use(opt.get()); }   // you reinvented a null check
+```
+
+The rules, with the reason attached to each:
+
+- **Never `Optional` as a field.** It isn't `Serializable`, and it adds an
+  allocation and an indirection per instance.
+- **Never `Optional` as a parameter.** The caller now has three cases — absent,
+  present, and `null` itself — which is worse than two.
+- **Never return `null` from a method returning `Optional`.** That's the joke
+  version of the bug it was meant to fix.
+- **Prefer `orElseGet` over `orElse`** when the default is expensive:
+  `orElse(buildDefault())` evaluates the argument **even when a value is
+  present**, because it's an ordinary argument. `orElseGet(this::buildDefault)`
+  is lazy. This is a favourite follow-up.
+- **`Optional.of` throws on null; `Optional.ofNullable` doesn't.** Use `of` when
+  null would be a bug you want surfaced.
+
+### Lambdas and functional interfaces
+
+A lambda is not an anonymous class. The compiler emits an `invokedynamic`
+instruction, and the JVM builds the implementation at first use via
+`LambdaMetafactory` — so there's no extra `.class` file per lambda, and a
+non-capturing lambda can be cached as a singleton.
+
+The practical difference you can be asked about: **`this` inside a lambda refers
+to the enclosing instance**, whereas in an anonymous inner class it refers to the
+anonymous object.
+
+```java
+Function<String, Integer>  f = String::length;         // T → R
+Predicate<String>          p = s -> s.length() > 3;    // T → boolean
+Consumer<String>           c = System.out::println;    // T → void
+Supplier<String>           s = () -> "hello";          // () → T
+BiFunction<Integer,Integer,Integer> add = Integer::sum;
+UnaryOperator<String>      u = String::trim;           // T → T
+```
+
+Also worth knowing: primitive specialisations (`IntPredicate`,
+`ToIntFunction`, `IntStream`) exist purely to avoid boxing, which matters in hot
+loops; and captured variables must be **effectively final**, because the lambda
+captures a copy rather than a reference to the variable slot.
+
+### Modern Java: 9 through 21
+
+Which matters because interviewers increasingly ask "what have you used beyond
+Java 8?"
+
+**Records (16)** — immutable data carriers. The compiler generates the
+constructor, accessors, `equals`, `hashCode` and `toString`, which quietly
+removes the most common source of the [equals/hashCode
+bug](/java/2-collections-framework-deep-dive). Perfect for DTOs and map keys.
+
+```java
+public record Point(int x, int y) {
+    public Point {                                  // compact constructor
+        if (x < 0 || y < 0) throw new IllegalArgumentException();
+    }
+}
+```
+
+**Sealed types (17)** — restrict who may implement, which makes a hierarchy
+*closed*. Combined with pattern-matching `switch`, the compiler can then verify
+**exhaustiveness**: add a new subtype and every switch that doesn't handle it
+fails to compile. That's the real payoff, and it's the reason to mention sealed
+types at all.
+
+```java
+sealed interface Shape permits Circle, Rectangle {}
+record Circle(double r) implements Shape {}
+record Rectangle(double w, double h) implements Shape {}
+
+double area = switch (shape) {              // no default needed — exhaustive
+    case Circle c    -> Math.PI * c.r() * c.r();
+    case Rectangle r -> r.w() * r.h();
+};
+```
+
+**Pattern matching** — `instanceof` with a binding (16) removes the cast;
+`switch` patterns with guards (21) replace `if`/`else if` chains over types:
+
+```java
+if (o instanceof String s && s.length() > 3) { … }   // s is in scope, no cast
+
+String describe(Object o) {
+    return switch (o) {
+        case Integer i when i > 100 -> "big number";
+        case Integer i              -> "number " + i;
+        case String s               -> "string of " + s.length();
+        case null                   -> "nothing";     // switch can match null now
+        default                     -> "something else";
+    };
+}
+```
+
+**Virtual threads (21)** — the big one for a backend developer. Blocking code
+that scales like an event loop; covered in
+[Java concurrency](/java/3-concurrency-senior-must-have) and
+[OS concurrency](/cs-fundamentals/2-operating-systems-concurrency).
+
+**Smaller things worth naming:** `var` for local type inference (10); text
+blocks (15) for embedded SQL and JSON; helpful `NullPointerException` messages
+(14), which tell you *which* reference was null; `HttpClient` (11) with HTTP/2
+and async support; `Stream.toList()`, `mapMulti`, `takeWhile`/`dropWhile`; and
+`switch` expressions returning values (14).
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What does a stream do that a for loop can't?"** You describe the *what*,
+   so the library can fuse stages, short-circuit, and parallelise.
+2. **"Does `filter().map()` make two passes?"** No — one pass, each element
+   traverses the whole chain before the next.
+3. **"When does a stream execute?"** Only on the terminal operation.
+   Intermediate operations just build the pipeline.
+4. **"Which operations are stateful, and why care?"** `sorted` and `distinct`
+   must buffer everything, so filter *before* you sort.
+5. **"Can you reuse a stream?"** No — `IllegalStateException`. It has no
+   storage.
+6. **"When should you use a parallel stream?"** Large, CPU-bound, cheaply
+   splittable, unordered, no shared state — and only after benchmarking.
+7. **"What's the danger of a parallel stream?"** It shares the JVM-wide common
+   ForkJoinPool; blocking I/O inside one starves every other user of it.
+8. **"`orElse` vs `orElseGet`?"** `orElse`'s argument is evaluated even when a
+   value is present. Use `orElseGet` for anything expensive.
+9. **"Should `Optional` be a field or a parameter?"** Neither. It's a return
+   type. A parameter gives the caller three cases instead of two.
+10. **"Is a lambda an anonymous class?"** No — `invokedynamic` and
+    `LambdaMetafactory`, with no extra class file. And `this` means the
+    enclosing instance.
+11. **"Why must captured variables be effectively final?"** The lambda captures
+    a copy of the value, not the variable.
+12. **"What does a record give you?"** Constructor, accessors, `equals`,
+    `hashCode`, `toString` — and immutability, which makes it a safe map key.
+13. **"Why sealed types?"** They close the hierarchy so a `switch` can be
+    checked for exhaustiveness at compile time.
+14. **"What's the `toMap` trap?"** It throws on a duplicate key unless you pass
+    a merge function, and it throws on null values.
+15. **"`Collectors.toList()` vs `Stream.toList()`?"** Mutable `ArrayList` versus
+    unmodifiable list.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Side effects in a lambda** — mutating a shared list instead of collecting.
+- **`sorted()` before `filter()`**, sorting data you're about to throw away.
+- **`.parallel()` as a performance fix**, especially anywhere near I/O.
+- **`isPresent()` + `get()`**, which is a null check with extra steps.
+- **`Optional` fields and parameters.**
+- **`orElse(expensiveCall())`**, evaluated every time.
+- **`collect(toMap(...))` without a merge function**, which fails only on the
+  data that contains a duplicate.
+- **Streams for everything.** A three-line loop is often clearer and faster; the
+  stream API is a tool, not a style requirement.
+</Callout>
+
+### Where this connects
+
+- [Collections deep dive](/java/2-collections-framework-deep-dive) — what
+  streams collect into, and why records make good keys.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — the common
+  ForkJoinPool, `CompletableFuture` and virtual threads.
+- [Practice: flatMap on nested data](/java/practice-flatmap-on-nested-data) and
+  [streams duplicates](/java/practice-streams-duplicates) — the coding versions.
+- [OOP and design principles](/java/5-oop-design-principles) — where sealed
+  types and records change the usual advice.

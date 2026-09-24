@@ -1,0 +1,452 @@
+---
+title: "6. Exception Handling"
+topic: "java"
+order: 506
+group: "Core Java"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [exceptions, checked-exceptions, try-with-resources, suppressed, spring, error-handling]
+format: "mdx"
+summary: "What each branch of the Throwable hierarchy actually claims, the checked-exception debate argued from both sides, the code javac generates for try-with-resources and why suppressed exceptions exist, the finally traps, and the Spring patterns for rollback and consistent error responses."
+---
+
+## Layer 1 — The mental model
+
+Most people learn exceptions as syntax: `try`, `catch`, `finally`, and a rule
+about which ones the compiler nags you over. The framing that makes the whole
+topic cohere is different:
+
+> **Choosing an exception type is not a technical decision, it is a claim about
+> who can do something about the failure.** `Error` says nobody can. A checked
+> exception says the immediate caller plausibly can. An unchecked exception says
+> nobody should, because it is a bug that needs fixing, not handling.
+
+Read the hierarchy that way and every rule you were told to memorise turns into
+a consequence.
+
+```
+                    Throwable
+                        |
+        +---------------+---------------+
+        |                               |
+      Error                         Exception
+  (JVM is broken;              (application-level)
+   do not catch)                       |
+                        +--------------+--------------+
+                        |                             |
+             checked Exception              RuntimeException
+       (IOException, SQLException)     (NullPointerException,
+        "a caller can recover"          IllegalArgumentException)
+                                          "someone wrote a bug"
+```
+
+| Branch | What it means | Who catches it |
+|---|---|---|
+| `Error` | `OutOfMemoryError`, `StackOverflowError` — the runtime itself is compromised | Nobody, except a top-level logger just before dying |
+| Checked `Exception` | An expected external failure: the network dropped, the file is missing | The caller, who has a real alternative |
+| `RuntimeException` | A precondition was violated, i.e. a programming mistake | Nobody locally; a global handler turns it into a 500 |
+
+The single most valuable habit this framing produces: **before you write a
+`catch`, say out loud what you will do in it.** If the answer is "log it and
+carry on," you almost certainly want to let it propagate instead.
+
+---
+
+## Layer 2 — The mechanism
+
+### The hierarchy, and why `Error` is different
+
+`Throwable` is the only type the JVM will let you `throw`, and it splits into
+two children for a reason that is about *recoverability*, not severity.
+
+`Error` covers conditions where the abstractions you rely on have already
+failed. Catching `OutOfMemoryError` is usually futile: the handler itself needs
+to allocate, the logging framework needs to allocate, and building the message
+string needs to allocate. `StackOverflowError` is slightly more catchable but
+means you have unbounded recursion — a bug. `NoClassDefFoundError` means your
+deployment is wrong. In every case the correct response is to fail loudly and
+let the supervisor restart the process.
+
+`Exception` covers application-level failures, and splits again into checked
+(anything that is not a `RuntimeException`) and unchecked. The compiler treats
+the two differently, which brings us to the argument.
+
+### The checked-exception debate, argued properly
+
+Java is the only mainstream language with checked exceptions. C#, Kotlin,
+Scala, Python, Go and JavaScript all declined to copy them, and Kotlin in
+particular was designed by people who had watched Java's experience closely.
+That is a fact worth knowing, because "why doesn't Kotlin have them?" is a real
+follow-up.
+
+**The case for.** The compiler forces you to acknowledge a failure mode at the
+point where you might still be able to do something about it. A file might not
+exist; the type system says so, and you cannot pretend otherwise. `throws
+IOException` is documentation the compiler checks, which is more than a Javadoc
+comment can claim.
+
+**The case against**, which has three distinct parts:
+
+1. **They break composition.** A lambda cannot throw a checked exception unless
+   the functional interface declares it, and none of the standard ones do. So
+   every stream over an I/O call turns into a wrapper:
+
+   ```java
+   // the tax that checked exceptions impose on functional code
+   files.stream()
+        .map(path -> {
+            try { return Files.readString(path); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        })
+        .toList();
+   ```
+
+   The JDK shipping `UncheckedIOException` specifically to solve this is an
+   admission by the language's own authors.
+2. **They leak implementation details up the call stack.** If
+   `OrderRepository.findById` declares `throws SQLException`, every caller now
+   knows the repository uses JDBC, and switching to MongoDB changes signatures
+   all the way up. **This is exactly why Spring translates `SQLException` into
+   its unchecked `DataAccessException` hierarchy** — the abstraction stays
+   intact, and the translation also normalises vendor-specific error codes into
+   portable subtypes like `DuplicateKeyException`.
+3. **They encourage the worst possible handler.** Faced with a compiler error,
+   the path of least resistance is an empty catch block or `throws Exception`
+   on every method. A rule that is routinely defeated by the laziest available
+   workaround is a weak rule.
+
+**The position to actually state in an interview:** use unchecked exceptions by
+default; reserve checked exceptions for the narrow case where the immediate
+caller has a genuine, documented recovery path and you want the compiler to
+insist on it. That is the consensus in modern Java, it is what Spring does
+throughout, and saying "and here is the argument for the other side" is what
+makes it sound considered rather than repeated.
+
+### try-with-resources, and what the compiler actually generates
+
+The old pattern has a defect most people have never noticed:
+
+```java
+// BROKEN: if both use() and close() throw, the original exception disappears
+Resource r = open();
+try {
+    use(r);            // throws IllegalStateException — the real cause
+} finally {
+    r.close();         // also throws IOException — this one wins
+}
+```
+
+`finally` runs on the way out, and a `throw` inside it **replaces** the
+in-flight exception. The caller sees the `IOException` from `close()` and has no
+idea the real failure was in `use()`. Cleanup noise has swallowed the diagnosis.
+
+Java 7 fixed this by making the compiler generate the correct version for you.
+`try (var r = open()) { use(r); }` desugars to roughly this:
+
+```java
+// what javac generates for try-with-resources
+Resource r = open();
+Throwable primary = null;
+try {
+    use(r);
+} catch (Throwable t) {
+    primary = t;
+    throw t;
+} finally {
+    if (r != null) {
+        if (primary != null) {
+            try { r.close(); }
+            catch (Throwable secondary) { primary.addSuppressed(secondary); }
+        } else {
+            r.close();
+        }
+    }
+}
+```
+
+The key line is `addSuppressed`. **The exception from `close()` is attached to
+the original rather than replacing it**, and `getSuppressed()` returns the
+array. The stack trace prints the suppressed ones underneath, marked
+`Suppressed:`, so you see both failures with the real cause on top. That detail
+is a strong answer to "what does try-with-resources give you beyond less
+typing?" — the answer is not brevity, it is that **the old pattern lost
+exceptions and this one does not.**
+
+Three further contract points:
+
+- The resource must implement `AutoCloseable`. `Closeable` is the older
+  subinterface, narrowed to `throws IOException`; `AutoCloseable.close` may
+  throw anything.
+- **Resources are closed in reverse order of declaration**, which is what you
+  need when a `ResultSet` depends on a `Statement` that depends on a
+  `Connection`.
+- `close()` should be idempotent. `Closeable` requires it; `AutoCloseable` only
+  strongly recommends it, and a resource closed twice that is not idempotent is
+  a nasty bug.
+- Since Java 9 you may name an **effectively final** variable declared outside
+  the header, so `try (existingResource)` compiles.
+
+### The finally traps
+
+Two behaviours that are asked as puzzles and are genuinely worth knowing.
+
+```java
+// BROKEN: returns 1, and the exception vanishes entirely
+int broken() {
+    try {
+        throw new IllegalStateException("real problem");
+    } finally {
+        return 1;          // an abrupt completion in finally discards the exception
+    }
+}
+```
+
+**A `return`, `break` or `continue` inside `finally` discards whatever the
+`try` block was doing** — including a pending exception, and including the
+`try` block's own return value. There is no warning by default. Never put
+control flow in a `finally`.
+
+The other one: **`System.exit()` skips `finally` entirely**, because the JVM is
+terminating rather than unwinding the stack. So do shutdown-killing conditions
+like a `SIGKILL` or a JVM crash. If cleanup must survive the process ending, a
+shutdown hook is the mechanism, not `finally`.
+
+Also note a quieter case: `finally` runs even when the `try` block returns, and
+if `finally` modifies the variable being returned the change is not visible,
+because the return value was already copied to the stack.
+
+### Chaining, and why the cause is mandatory
+
+```java
+// BROKEN: the stack trace stops here, and you never learn why
+catch (SQLException e) {
+    throw new OrderLookupException("could not load order " + id);
+}
+
+// FIXED: the original stack trace is preserved as the cause
+catch (SQLException e) {
+    throw new OrderLookupException("could not load order " + id, e);
+}
+```
+
+Passing the cause preserves the entire original stack trace under a
+`Caused by:` section. Dropping it destroys the only evidence of where the
+failure actually originated, and you are left with a trace that begins in your
+own wrapper. **Every custom exception should have a `(String, Throwable)`
+constructor, and every wrap should use it.** `initCause()` exists for the cases
+where a constructor cannot take it.
+
+### Why catching `Exception` is usually wrong, and `Throwable` always is
+
+`catch (Exception e)` catches everything you anticipated *and* everything you
+did not — including every `RuntimeException`, so a `NullPointerException` from a
+typo in your own handler gets logged as a business failure and swallowed. The
+pattern to prefer is multi-catch, which is precise and, unlike two separate
+blocks, does not duplicate the body:
+
+```java
+catch (IOException | ParseException e) {
+    throw new IngestException("could not read feed", e);
+}
+```
+
+`catch (Throwable t)` additionally catches `Error`. Catching
+`OutOfMemoryError` and continuing means running on a JVM that is already
+failing, usually producing a cascade of incomprehensible secondary failures. It
+also catches `ThreadDeath` and interferes with the JVM's own shutdown paths.
+The one legitimate use is at the very top of a thread's run loop, to log the
+fatal condition before letting the thread die.
+
+One more subtlety worth having ready: **`InterruptedException` must never be
+swallowed.** Catching it clears the thread's interrupt flag, so either
+propagate it or call `Thread.currentThread().interrupt()` to restore the flag
+for code above you. See
+[Java concurrency](/java/3-concurrency-senior-must-have).
+
+### The cost: it is the stack trace, not the throw
+
+Throwing is cheap. **The expensive part is `fillInStackTrace()`, a native call
+in the `Throwable` constructor that walks the entire call stack and captures a
+frame for each level.** On a deep stack — and a Spring request stack is very
+deep — that can be hundreds of times the cost of a normal return. The unwinding
+itself is also slow, and an exception-throwing path defeats several JIT
+optimisations because it is not on the profiled hot path.
+
+This is the real reason for "never use exceptions for control flow." It is not
+style, it is that the mechanism is designed to be accurate rather than fast.
+
+If you genuinely need a cheap signal — a parser backtracking, a stateless
+sentinel — you can turn the expensive part off:
+
+```java
+// a stack-trace-free exception, safe only for a singleton sentinel
+public final class EndOfInput extends RuntimeException {
+    public static final EndOfInput INSTANCE = new EndOfInput();
+    private EndOfInput() {
+        super(null, null, /* enableSuppression */ false, /* writableStackTrace */ false);
+    }
+}
+```
+
+The `Throwable(String, Throwable, boolean, boolean)` constructor is there
+precisely for this, and it is a nice thing to know exists. The trade is that you
+lose all diagnostics, so it is only acceptable when the exception carries no
+information beyond its type.
+
+### Best practices, each with its reason
+
+- **Fail fast.** Validate arguments at the top of a method and throw
+  `IllegalArgumentException` or `IllegalStateException` immediately. An
+  exception thrown near the mistake is worth ten thrown three layers away.
+- **Throw the most specific type you have**, so a caller can catch precisely.
+- **Do not log and rethrow.** You get the same stack trace printed at every
+  layer, and now you are grepping four copies of one incident to find out how
+  many actually happened. Log once, at the boundary that decides the outcome.
+- **Never swallow.** An empty catch block is a decision to hide a failure, and
+  it is the single most expensive habit in this lesson. If you genuinely mean
+  "this cannot happen," throw an `AssertionError` with the cause attached.
+- **Do not use exceptions for expected outcomes.** "User not found" in a lookup
+  is an `Optional`; "user not found" when deleting a specific ID is an
+  exception. The distinction is whether absence is normal.
+- **Put context in the message.** `"order not found"` costs a database query to
+  debug; `"order not found: id=8821, tenant=acme"` does not.
+
+### The Spring API pattern
+
+For a web API, the goal is that no exception ever reaches the container
+untranslated, and that every error response has the same shape. That is
+`@RestControllerAdvice`:
+
+```java
+public record ApiError(String code, String message, Instant timestamp, String traceId) {}
+
+@RestControllerAdvice
+class GlobalExceptionHandler {
+
+    @ExceptionHandler(OrderNotFoundException.class)
+    ResponseEntity<ApiError> notFound(OrderNotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(new ApiError("ORDER_NOT_FOUND", e.getMessage(), Instant.now(), traceId()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    ResponseEntity<ApiError> invalid(MethodArgumentNotValidException e) {
+        return ResponseEntity.badRequest()
+            .body(new ApiError("VALIDATION_FAILED", summarise(e), Instant.now(), traceId()));
+    }
+
+    @ExceptionHandler(Exception.class)               // the backstop
+    ResponseEntity<ApiError> unexpected(Exception e) {
+        log.error("unhandled exception", e);          // logged ONCE, here
+        return ResponseEntity.internalServerError()
+            .body(new ApiError("INTERNAL_ERROR", "Unexpected error", Instant.now(), traceId()));
+    }
+}
+```
+
+Three things make this the answer rather than just code. Controllers stay free
+of `try`/`catch`, so business code reads as the happy path. **The backstop
+handler is the one place that logs**, which is what makes "don't log and
+rethrow" practical. And the catch-all returns a generic message while logging
+the detail, because a stack trace in an HTTP response body is an information
+disclosure. Spring also offers `ProblemDetail` (RFC 7807) if you want a
+standardised body instead of a custom record.
+
+The last piece is rollback. **`@Transactional` rolls back on `RuntimeException`
+and `Error` by default, and commits on a checked exception.** The rationale is
+the same hierarchy meaning from Layer 1: a checked exception was declared as an
+expected outcome the caller can handle, so Spring assumes the work so far was
+intentional, whereas an unchecked exception means a bug and the transaction is
+not trustworthy. It is a default that surprises people, and the override is
+`@Transactional(rollbackFor = MyCheckedException.class)`. The mechanics of why
+this only works through the proxy are in
+[transaction management](/java/5-transaction-management-transactional).
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Error versus Exception?"** `Error` means the runtime itself is
+   compromised and nobody can recover; `Exception` is an application-level
+   failure. The split is about recoverability, not severity.
+2. **"Checked versus unchecked — when do you use each?"** Checked when the
+   immediate caller has a real recovery path you want the compiler to enforce;
+   unchecked for programming errors. Default to unchecked.
+3. **"Argue against checked exceptions."** They break composition with lambdas
+   and streams, they leak implementation details up the call stack, and they
+   encourage empty catch blocks.
+4. **"Why does Spring wrap `SQLException`?"** To keep the persistence
+   technology out of caller signatures, and to normalise vendor error codes into
+   a portable `DataAccessException` hierarchy.
+5. **"What does try-with-resources generate?"** A `finally` that closes in
+   reverse declaration order and calls `addSuppressed` on the primary exception
+   rather than replacing it.
+6. **"What are suppressed exceptions?"** Secondary failures from `close()`,
+   attached to the original via `getSuppressed()`. The old try/finally pattern
+   lost the original entirely.
+7. **"`Closeable` versus `AutoCloseable`?"** `AutoCloseable` is the general
+   interface; `Closeable` extends it, narrows `close` to `IOException`, and
+   requires idempotence.
+8. **"Does `finally` always run?"** Not on `System.exit()`, a JVM crash, or a
+   killed process. And a `return` inside `finally` silently discards a pending
+   exception.
+9. **"Why pass the cause when wrapping?"** It preserves the original stack trace
+   under `Caused by:`. Without it you lose all evidence of where the failure
+   started.
+10. **"Why not catch `Exception`?"** It catches unanticipated runtime bugs too,
+    so your own `NullPointerException` gets logged as a business failure.
+    Multi-catch is the precise alternative.
+11. **"Why never catch `Throwable`?"** It catches `Error`, meaning you continue
+    on a broken JVM. Acceptable only at the top of a thread's run loop, to log
+    before dying.
+12. **"Are exceptions expensive, and can you make a cheap one?"** The throw is
+    cheap; `fillInStackTrace()` walking the stack is what costs, which is why
+    they must not be used for control flow. The four-argument `Throwable`
+    constructor with `writableStackTrace` set to false turns it off, which is
+    safe only for a sentinel carrying no information.
+13. **"Why is log-and-rethrow bad?"** The same incident appears at every layer,
+    so your logs overstate the failure count. Log once at the boundary.
+14. **"How do you handle exceptions in a REST API?"**
+    `@RestControllerAdvice` with `@ExceptionHandler` methods, a consistent error
+    body, a catch-all that logs once and returns a generic message.
+15. **"Which exceptions roll back a Spring transaction?"** Unchecked and
+    `Error` by default; checked exceptions commit unless you set `rollbackFor`.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **The empty catch block.** Add at least a comment explaining why the failure
+  is genuinely safe to ignore — usually you will find it isn't.
+- **`catch (Exception e)` wrapping an entire method body**, which hides bugs in
+  the handler alongside the failures you expected.
+- **Swallowing `InterruptedException`**, which clears the interrupt flag and
+  makes the thread unstoppable. Restore it or propagate it.
+- **`e.printStackTrace()` in production code.** It writes to stderr, bypasses
+  your logging configuration, and is invisible to log aggregation.
+- **Losing the cause** by calling the message-only constructor when wrapping.
+- **Logging the exception message without the exception** —
+  `log.error("failed: " + e.getMessage())` throws away the stack trace, which
+  is the part you actually need.
+- **Exceptions for expected outcomes**, like a not-found on a search. Use
+  `Optional` and reserve exceptions for genuine anomalies.
+- **A `return` in `finally`**, which discards the pending exception.
+- **Assuming a checked exception rolls back a transaction.** It does not.
+- **Leaking internals in an API error body** — stack traces and SQL text in a
+  500 response are an information disclosure.
+</Callout>
+
+### Where this connects
+
+- [Transaction management](/java/5-transaction-management-transactional) — the
+  rollback rules in detail, and why proxy-based `@Transactional` misses
+  self-invocation.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — how
+  `@RestControllerAdvice` and exception translation are wired through AOP
+  proxies and `BeanPostProcessor`.
+- [Java concurrency](/java/3-concurrency-senior-must-have) —
+  `InterruptedException`, the interrupt flag, and how exceptions surface from
+  `Future.get` as an `ExecutionException`.
+- [Java 8+ features](/java/4-java-8-features) — why lambdas and checked
+  exceptions compose badly, and what `Optional` replaces.
+- [JVM internals](/java/1-jvm-internals) — stack frames, which is what
+  `fillInStackTrace` is walking, and what `StackOverflowError` really means.

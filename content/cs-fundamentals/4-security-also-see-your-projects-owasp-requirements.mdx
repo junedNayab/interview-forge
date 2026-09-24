@@ -1,0 +1,345 @@
+---
+title: "4. Security (also see your project's OWASP requirements)"
+topic: "cs-fundamentals"
+order: 804
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [security, owasp, jwt, authentication, authorization, hashing, injection]
+format: "mdx"
+summary: "Authentication vs authorization, why password hashing is deliberately slow, what a JWT can and cannot do, the OWASP items that actually appear in code review — and a line-by-line audit of your own url-shortener's auth."
+---
+
+## Layer 1 — The mental model
+
+Security questions in a backend interview are rarely about cryptography. They're
+about whether you think in terms of **trust boundaries**:
+
+> Every place data crosses from somewhere you control into somewhere you don't —
+> or the reverse — is a boundary, and every boundary needs an explicit decision
+> about what you believe.
+
+Most vulnerabilities are one of two failures at a boundary:
+
+1. **Confusing data with code.** SQL injection, XSS and command injection are
+   all the same bug: user-supplied *data* got interpreted as *instructions*. The
+   fix is always the same too — keep them in separate channels rather than
+   trying to sanitise your way out.
+2. **Trusting the client.** The client is fully under the attacker's control.
+   Hiding a button, validating in JavaScript, or checking a role in the
+   front-end are all decoration. **Every authorization decision must happen on
+   the server, on every request.**
+
+And one principle that covers most of the rest: **defence in depth**. No single
+control is sufficient, so assume each one will fail and ask what's behind it.
+A hashed password matters precisely because you assume the database will
+eventually leak.
+
+---
+
+## Layer 2 — The mechanism
+
+### Authentication vs authorization
+
+**Authentication (authn)** is *who are you* — proving identity. **Authorization
+(authz)** is *what may you do* — checking permissions. They fail differently
+and they're reported differently: `401 Unauthorized` actually means
+*unauthenticated*, and `403 Forbidden` means authenticated but not permitted.
+(The HTTP spec names them backwards; knowing that is a small credibility win.)
+
+Authorization is the one that goes wrong in practice, and OWASP now ranks
+**broken access control as the #1 risk**. The classic is **IDOR** — insecure
+direct object reference:
+
+```java
+// BROKEN: authenticated, but no ownership check.
+@GetMapping("/api/urls/{id}")
+public UrlDto get(@PathVariable Long id) {
+    return urlService.findById(id);          // any logged-in user, any id
+}
+
+// FIXED: authorization is a check on this user and this object.
+@GetMapping("/api/urls/{id}")
+public UrlDto get(@PathVariable Long id, Principal principal) {
+    Url url = urlService.findById(id);
+    if (!url.getOwner().getEmail().equals(principal.getName())) {
+        throw new AccessDeniedException("not yours");
+    }
+    return toDto(url);
+}
+```
+
+Being logged in is not permission to touch *this* row. Say that sentence in an
+interview and you've covered the most common real-world vulnerability.
+
+### Hashing vs encryption vs encoding
+
+Candidates mix these up constantly, and the distinction is easy to make crisp:
+
+| | Reversible? | Key? | Purpose | Use |
+|---|---|---|---|---|
+| **Encoding** (Base64, URL) | Yes, by anyone | No | Representation | **Not security at all** |
+| **Hashing** (bcrypt, SHA-256) | No | No | Fingerprint / verification | Passwords, integrity |
+| **Encryption** (AES-GCM) | Yes, with the key | Yes | Confidentiality | Data at rest and in transit |
+
+Base64 is not encryption. It appears in security contexts (it's how a JWT's
+parts are written) which misleads people — **anyone can decode it, instantly,
+with no key.**
+
+### Why password hashing is deliberately slow
+
+This is the question that separates memorised answers from understood ones.
+
+SHA-256 is a *fast* hash — a modern GPU computes billions per second. If you
+store `SHA-256(password)`, an attacker who steals your database can brute-force
+every common password essentially immediately. Speed is a feature for integrity
+checking and a catastrophe for passwords.
+
+**bcrypt and Argon2 are deliberately slow and deliberately expensive**, with a
+tunable work factor, so one guess costs ~100 ms instead of ~1 ns. That doesn't
+inconvenience your login endpoint and it makes large-scale brute force
+economically impossible. Argon2 goes further and is **memory-hard**, which
+specifically defeats GPUs and ASICs — they have enormous parallelism but limited
+memory per core.
+
+**A salt** is a unique random value stored alongside each hash. It doesn't make
+one password harder to crack; it stops an attacker cracking *all* of them at
+once, because a precomputed rainbow table is now useless and identical passwords
+no longer produce identical hashes. bcrypt generates and embeds the salt for
+you, which is why a bcrypt hash is self-contained.
+
+So the full answer to "how do you store passwords?" is: **bcrypt or Argon2, with
+a per-password salt, with a work factor tuned so verification takes ~100 ms, and
+never anything from the SHA or MD5 families on their own.**
+
+### JWT: what it does and what it can't
+
+A JWT is three Base64url parts: `header.payload.signature`. The header names the
+algorithm, the payload holds claims (`sub`, `exp`, `iat`, roles), and the
+signature is an HMAC or a digital signature over the first two.
+
+**The payload is not encrypted — it is signed.** Anyone holding the token can
+read every claim. Signing proves the token wasn't *modified*; it does nothing to
+hide it. So never put anything sensitive in a JWT.
+
+The reason to use one is statelessness: any server can verify a token with the
+key alone, no session store, no shared state. That's also the source of every
+JWT drawback:
+
+- **You cannot revoke it.** Logout, a password change, a ban — the token stays
+  valid until `exp`. The mitigation is short-lived access tokens (5–15 minutes)
+  plus a refresh token you *can* revoke, which reintroduces a bit of state
+  exactly where it's cheap.
+- **Size.** A JWT rides on every request and is much bigger than a session ID.
+- **Key rotation** needs a `kid` header so old tokens stay verifiable during the
+  changeover.
+
+<Callout type="pitfall" title="The alg:none and algorithm-confusion attacks">
+Two classic JWT vulnerabilities, both caused by letting the *token* choose how
+it's verified:
+
+**`alg: none`** — an attacker sets the header algorithm to `none`, strips the
+signature, and a naive library accepts it as valid.
+
+**RS256 → HS256 confusion** — a server that verifies with "whatever algorithm
+the header says" and holds an RSA key pair can be attacked by re-signing the
+token with HMAC using the *public* key as the secret. The public key is public,
+so the attacker can forge any token.
+
+**The fix is the same for both: the verifier must pin the expected algorithm and
+key, never read it from the token.** Modern libraries do this by default — your
+project's `Jwts.parser().verifyWith(signingKey)` is the correct shape — but the
+attacks are still asked about because the failure mode is total.
+</Callout>
+
+### OWASP Top 10, in the order you'll actually meet them
+
+**1. Broken access control** (covered above). Enforce authz server-side on every
+endpoint, deny by default, and never rely on an unguessable ID.
+
+**2. Injection.** SQL injection is the flagship, and the fix is not escaping —
+it's **parameterised queries**, which send the SQL and the data over separate
+channels so the data can never be parsed as syntax:
+
+```java
+// BROKEN — string concatenation. "' OR '1'='1" ends the argument.
+"SELECT * FROM users WHERE email = '" + email + "'"
+
+// FIXED — PreparedStatement: the database parses the query first, binds after.
+PreparedStatement ps = conn.prepareStatement(
+    "SELECT * FROM users WHERE email = ?");
+ps.setString(1, email);
+```
+
+JPA and Spring Data parameterise for you — **unless** you build a JPQL or native
+query by concatenation, which is exactly how injection still reaches modern
+codebases. Note also that you cannot parameterise a table or column name, so
+dynamic `ORDER BY` must be validated against an allow-list. See
+[JDBC fundamentals](/java/1-jdbc-fundamentals).
+
+**3. Cryptographic failures.** Secrets in source control, TLS not enforced,
+sensitive data logged, home-grown crypto. The rule: use vetted primitives
+(AES-GCM for symmetric encryption, bcrypt/Argon2 for passwords) and never invent
+your own.
+
+**4. XSS** — attacker-supplied content executes as script in another user's
+browser. Stored XSS persists in your database; reflected XSS comes back in a
+response; DOM XSS never touches the server. **Escape on output, contextually**,
+because the correct escaping differs between HTML body, an attribute, and a
+`<script>` block. Add a **Content-Security-Policy** header as the second layer,
+and mark session cookies `HttpOnly` so a successful XSS still can't read them.
+
+**5. CSRF** — a malicious site causes the user's browser to make an
+authenticated request to yours, relying on the browser attaching cookies
+automatically. Defences: anti-CSRF tokens and `SameSite=Lax|Strict` cookies.
+
+The nuance that matters for your project: **CSRF only applies when the browser
+attaches credentials automatically.** A stateless API where the client reads a
+token from storage and sets an `Authorization` header is not vulnerable, because
+the attacker's site can't make the browser add that header. That's why disabling
+CSRF in a token-based Spring Security config is correct — *provided* the token
+never lives in a cookie. If you later move it into one, CSRF comes back and the
+disabled config becomes a real hole.
+
+**6. Security misconfiguration** — default credentials, verbose stack traces in
+responses, debug endpoints exposed, permissive CORS. Note that **CORS is not a
+security control**: it's a browser policy that governs which origins may *read*
+responses. `Access-Control-Allow-Origin: *` on an authenticated API is a
+misconfiguration, but CORS never replaces server-side authorization.
+
+**7. Vulnerable dependencies** — Log4Shell was one line in a transitive
+dependency. Scan continuously (`dependency-check`, Dependabot, Snyk), because
+this is the risk you inherit rather than write.
+
+**8. SSRF** — your server fetches a URL supplied by a user and is tricked into
+requesting internal addresses like `169.254.169.254` (the cloud metadata
+endpoint, which hands out credentials). Allow-list destinations; never deny-list.
+
+Two cross-cutting principles: **least privilege** (every component gets the
+minimum access it needs — the database user your app connects with should not be
+able to `DROP TABLE`) and **fail securely** (an error should deny, not allow —
+`catch (Exception e) { return true; }` in an auth check is how systems get
+owned).
+
+<Callout type="pitfall" title="Security review: the JWT signing secret in your url-shortener">
+**A credential is hardcoded in source control**, and it's the highest-severity
+finding in the project. `src/main/resources/application.yml` contains:
+
+```yaml
+app:
+  jwt:
+    secret: <redacted>     # a literal HS256 key, committed in plain text
+```
+
+`JwtTokenProvider` builds the HMAC signing key directly from this value. Because
+`generateToken` puts the user's **email** in the `sub` claim, anyone who can read
+the repository can **mint a valid token for any user** — full account takeover,
+no exploit required. And `application-docker.yml` externalises the datasource
+but **not** this secret, so the committed value is what runs under Docker.
+
+The fix is to read it from the environment **with no default in the file**, so
+the app fails to start rather than silently running with a known key:
+
+```yaml
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET}      # no fallback — fail fast if unset
+```
+
+Then generate a real random 256-bit value per environment and store it in a
+secrets manager. The database credentials (`postgres`/`postgres`, in both the
+YAML and the compose file) are lower severity because they're local-only, but
+they should move the same way.
+
+**This is a good thing to volunteer in an interview**, framed as "here's what I'd
+fix before this went to production, and why the JWT secret is the urgent one."
+Showing you can audit your own code is worth more than a project with no
+findings.
+</Callout>
+
+<Callout type="interview" title="The rest of your project's auth, reviewed">
+What it gets right, and you should say so: **BCryptPasswordEncoder** for
+passwords (correct algorithm, salt handled for you); **`verifyWith(signingKey)`
+with `parseSignedClaims`**, which pins the key and defeats the `alg:none` and
+algorithm-confusion attacks; **`SessionCreationPolicy.STATELESS`** with CSRF
+disabled, which is the right pairing for a token API.
+
+What you should be ready to be challenged on:
+
+- **24-hour token expiry with no refresh token.** `expiration-ms: 86400000` is
+  a full day in which a stolen token works and a logout does nothing. The
+  production answer is a 15-minute access token plus a revocable refresh token.
+- **No revocation path at all** — no logout, no blocklist, no token version
+  claim. Changing a password doesn't invalidate existing tokens.
+- **The subject is an email address**, which is a mutable identifier. If a user
+  changes their email, outstanding tokens point at nothing. A user ID is the
+  safer claim.
+</Callout>
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Authentication vs authorization?"** Who you are versus what you may do.
+   401 means unauthenticated despite its name; 403 means not permitted.
+2. **"How do you store passwords?"** bcrypt or Argon2, per-password salt, work
+   factor tuned to ~100 ms. Never bare SHA or MD5.
+3. **"Why not SHA-256 for passwords?"** It's fast by design — billions per
+   second on a GPU. Password hashing must be deliberately slow.
+4. **"What does a salt prevent?"** Rainbow tables and cracking every account at
+   once. It doesn't make a single password harder.
+5. **"Is a JWT encrypted?"** No — signed. Anyone can read the payload. Never put
+   secrets in it.
+6. **"How do you log a user out with JWTs?"** You can't, really. Short-lived
+   access tokens plus a revocable refresh token, or a server-side blocklist,
+   which trades away the statelessness you chose JWTs for.
+7. **"What's the `alg:none` attack?"** Letting the token dictate verification.
+   Pin the algorithm and key on the verifier.
+8. **"How do you prevent SQL injection?"** Parameterised queries — separate
+   channels for code and data. Not escaping. Allow-list anything you can't
+   parameterise, like `ORDER BY`.
+9. **"What's IDOR?"** Authenticated but no ownership check. Being logged in
+   isn't permission to touch *this* row.
+10. **"Stored vs reflected XSS, and the fix?"** Persisted versus echoed back.
+    Escape contextually on output; add CSP and `HttpOnly` cookies as depth.
+11. **"Do you need CSRF protection on a token API?"** No, if the token is in an
+    `Authorization` header — the browser won't add it for an attacker. Yes, the
+    moment it lives in a cookie.
+12. **"Is CORS a security control?"** No. It governs which origins may read a
+    response; it never replaces server-side authorization.
+13. **"What's SSRF and why is the cloud metadata endpoint the target?"**
+    User-controlled URLs fetched by your server; `169.254.169.254` returns
+    instance credentials. Allow-list, never deny-list.
+14. **"How do you manage secrets?"** Environment variables injected from a
+    secrets manager, never committed, no defaults in config so a missing secret
+    fails startup. Rotate on a schedule.
+15. **"What's least privilege here?"** The app's database user shouldn't be able
+    to drop tables; the service's IAM role shouldn't have `*`.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Any secret in source control.** Treat the repository as public — once
+  committed, a credential is compromised and must be rotated, not just deleted.
+- **A config default for a secret**, which means production silently runs with
+  the development key.
+- **Authorization checked in the UI**, which is not a check.
+- **Concatenated JPQL or native queries**, the modern route to SQL injection.
+- **Long-lived tokens with no revocation.**
+- **Stack traces returned to the client**, handing over your internals.
+- **Logging tokens, passwords or full request bodies.**
+- **Deny-listing instead of allow-listing.** You will never enumerate every bad
+  input.
+</Callout>
+
+### Where this connects
+
+- [1. Networking](/cs-fundamentals/1-networking) — what TLS proves, and what
+  it doesn't.
+- [JDBC fundamentals](/java/1-jdbc-fundamentals) — `PreparedStatement`, the
+  concrete injection fix.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — how
+  the security filter chain and method-level checks are wired.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the project these findings come from, in full design context.
+- [3. Distributed systems concepts](/cs-fundamentals/3-distributed-systems-concepts)
+  — trust boundaries multiply once there's more than one service.

@@ -1,0 +1,126 @@
+---
+title: "8. Start here, today"
+topic: "roadmap"
+order: 8
+difficulty: "easy"
+estimatedMinutes: 8
+tags: [roadmap, action-plan, first-day, diagnostic]
+format: "mdx"
+summary: "Five concrete things to do in the next two and a half hours — fix the committed secrets, run a DSA diagnostic, read the design framework, rewrite the project bullets, and schedule tomorrow."
+---
+
+## Do these five things now
+
+[Start here](/roadmap/start-here) explains what this site is and
+[the plan](/roadmap/3-the-integrated-plan-everything-sequenced-your-chart)
+explains the fifteen weeks. This page is the next two and a half hours. Work
+through it in order; none of it requires you to have read anything else first.
+
+### 1. Fix the committed credentials — 30 minutes
+
+Open `application.yml` in the URL shortener. It contains a hardcoded JWT signing
+secret and hardcoded database credentials.
+
+Move both to environment variables or a secrets manager. Make the application
+fail loudly at startup if they are absent rather than falling back to a default —
+a default secret is worse than no secret, because it ships silently. Rotate the
+values that were committed, since anything in git history should be treated as
+public. Add a `.env.example` listing what is required.
+
+**This is first because it is the one item on the list with a deadline that is
+not yours.** You are about to start linking this repository on a resume, and a
+committed signing key is the first thing a senior reviewer notices. It turns a
+decent project into a conversation about your security judgement.
+
+### 2. Run the DSA diagnostic — 50 minutes
+
+Pick two patterns from [the DSA track](/dsa) that you have not touched recently —
+[dynamic programming](/dsa/pattern-12-dynamic-programming) and
+[graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) are the usual candidates.
+Solve one medium in each, with a twenty-five-minute timer, **talking out loud
+the entire time.**
+
+The point is not the problems. It is to find out two things: how rusty you
+actually are, and how it feels to narrate while thinking. If the narration
+feels absurd and difficult, that is the most useful information you will get
+today, because it is the skill the coding round measures and the one that
+silent practice never builds.
+
+Write down which patterns felt slow. That list is your secondary track for the
+next three weeks.
+
+### 3. Read the system design framework — 25 minutes
+
+Read [the framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+once, straight through.
+
+Do not try to learn it. The purpose today is to see the shape of the thing you
+are going to spend six of the next fifteen weeks on, and to notice that the
+round is scored on process rather than on knowing an answer. That reframing is
+most of what makes the phase survivable, and you want it in your head from day
+one rather than from week five.
+
+While you read, note how much of it is already in your project: cache-aside
+reads, a rate limiter, a database behind a cache, an analytics write path. You
+are not starting from zero on this track. You are starting from having built a
+small version of the canonical question without knowing that is what it was.
+
+### 4. Rewrite the project bullets on your resume — 40 minutes
+
+Open [resume guidance](/roadmap/6-resume-guidance-projects-skills-sections) and
+rewrite the URL shortener section using the action-technology-outcome shape.
+Four or five bullets.
+
+Then do the part that actually matters: for each bullet, write down the three
+follow-up questions an interviewer would ask, and answer them in writing. Any
+bullet whose follow-ups you cannot answer gets deleted or gets fixed. **Every
+line on a resume is forty-five minutes of interview surface, and you get to
+choose what you are asked about.**
+
+Do this today rather than later because applications have a four-to-six-week
+delay built into them, and the resume is the only item in the whole plan that
+is on someone else's clock.
+
+### 5. Set up the tracker and book tomorrow — 15 minutes
+
+Make a spreadsheet with one row per week and these columns: phase, sessions with
+output, out-loud tests passed, timed attempts, notes. See
+[progress tracking](/roadmap/5-progress-tracking) for why those four and not
+hours.
+
+Then put two blocks in your calendar for tomorrow — forty-five minutes in the
+morning and ninety in the evening — and treat them as meetings.
+[Your weekly rhythm](/roadmap/4-your-weekly-rhythm-the-shape-of-a-day) explains
+the shape. The calendar entry is doing real work here: the plan fails far more
+often from never starting the evening block than from studying the wrong thing
+in it.
+
+## This week
+
+With today done, the rest of week 0 is short:
+
+- Read [how product-company hiring actually works](/roadmap/1-how-product-company-hiring-actually-works)
+  and [the four tracks](/roadmap/2-the-four-tracks). About forty minutes, and
+  they explain why the plan is weighted the way it is.
+- Finish the rest of the resume and send it to **five companies you do not
+  especially want** — you need the pipeline running and you need the first loop
+  to be a cheap one.
+- Skim the remaining DSA pattern lessons and mark the weak ones.
+
+Then start [phase 1](/roadmap/3-the-integrated-plan-everything-sequenced-your-chart)
+on Monday.
+
+## What not to do today
+
+**Do not start learning system design properly.** It is the biggest track and
+starting it at the end of a long day, out of sequence, produces two hours of
+reading you will not retain. It has six weeks allocated. Let it have them.
+
+**Do not buy anything.** The books in
+[where to actually solve problems](/roadmap/7-where-to-actually-solve-problems)
+have a week or more before you need them, and buying resources is a very
+effective substitute for starting.
+
+**Do not redesign the plan.** Adjusting a study plan is enjoyable, feels
+productive, and produces nothing. The plan is adequate. The variable that
+decides the outcome is whether you sit down tomorrow evening.

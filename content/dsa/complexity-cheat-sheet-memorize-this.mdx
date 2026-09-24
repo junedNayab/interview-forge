@@ -1,0 +1,266 @@
+---
+title: "Complexity cheat sheet (memorize this)"
+topic: "dsa"
+order: 102
+difficulty: "easy"
+estimatedMinutes: 21
+tags: [complexity, big-o, amortized, data-structures, constraints, master-theorem]
+format: "mdx"
+summary: "The constraint-to-algorithm inference table that tells you the intended solution before you have an idea, complexity tables for every common structure with worst versus average, what amortized actually means, and how to state complexity precisely in an interview."
+---
+
+This is a reference, but not a table to recite. Each number below has a reason,
+and the reason is what an interviewer is actually probing when they ask "what is
+the complexity?" Read it once for the reasoning, then come back for the tables.
+
+## Read the constraints first — they tell you the answer
+
+**This is the single most useful thing on this page.** Before you have any idea
+how to solve a problem, the input bound tells you roughly what shape the intended
+solution has. A modern machine executes on the order of `10^8` simple operations
+per second in a compiled language, so work backwards from that.
+
+| If n is up to | You can afford | Which usually means |
+|---|---|---|
+| 10–12 | `O(n!)` | Permutations, brute-force orderings |
+| 20–25 | `O(2^n)` or `O(2^n * n)` | Subsets, bitmask DP, meet in the middle |
+| 100 | `O(n^4)` | Nested interval DP, small brute force |
+| 500 | `O(n^3)` | Floyd-Warshall, interval DP, matrix chain |
+| 2,000–5,000 | `O(n^2)` | Two-dimensional DP, all pairs, LCS |
+| 10^5 | `O(n log n)` | Sort, heap, binary search, balanced tree, graph traversal |
+| 10^6 | `O(n)` or `O(n log n)` with small constants | One pass, hashing, counting sort, sieve |
+| 10^8 and above | `O(n)` with a tiny constant, or `O(log n)` | Arithmetic formula, streaming, binary search on the answer |
+
+Three inferences worth making explicit, because they convert the table into a
+habit.
+
+**`n` up to `10^5` with a quadratic idea means you need to remove a factor of
+`n`.** `(10^5)^2` is `10^10`, which is about a hundred seconds. The usual
+removals are sorting to enable a single pass, a hash map to replace an inner
+scan, a two-pointer or sliding window to replace a nested loop, or a heap to
+replace a repeated minimum search.
+
+**`n` up to 20 with an optimisation question is an instruction to think
+exponentially.** Nobody sets a bound of 20 for an `O(n log n)` solution. That
+bound exists because `2^20` is about a million, which is comfortable, and
+`2^25` is not. It is telling you to enumerate subsets or write bitmask DP.
+
+**A bound of 500 is permission to write `O(n^3)`.** `500^3` is `1.25 * 10^8`,
+roughly one second. If you have been trying to find something clever, stop — the
+setter has told you the cubic solution is intended.
+
+The growth rates, with concrete numbers so the gaps are felt rather than
+recited. For `n` equal to one million: `log n` is 20, `sqrt(n)` is 1,000,
+`n log n` is 20 million, and `n^2` is `10^12`, which is several hours.
+**The interesting jump is not from `O(n)` to `O(n log n)` — that factor of 20 is
+often smaller than the constant factor difference between two implementations.
+It is from `O(n log n)` to `O(n^2)`, which is the difference between a second and
+a coffee break.**
+
+## Big-O, Theta, Omega — briefly, and correctly
+
+Big-O is an **upper** bound: `f` is `O(g)` if `f` grows no faster than `g`, up to
+a constant. Omega is a **lower** bound. Theta is both, so it is a tight
+description.
+
+Strictly, saying quicksort is `O(n^2)` is true and saying it is `O(n^3)` is also
+true, because Big-O only promises "no worse than". In practice everyone uses
+Big-O to mean Theta and nobody objects. The place the distinction actually earns
+you something is in stating *which case* you mean: quicksort is `Theta(n log n)`
+on average and `Theta(n^2)` in the worst case, and "quicksort is `O(n log n)`" is
+sloppy in a way an interviewer may pick at. Say "average case" or "worst case"
+explicitly and the issue disappears.
+
+## Amortized analysis, and what it really claims
+
+An `ArrayList` is backed by a fixed array. When it fills, `add` allocates a new
+array — in the JDK, roughly 1.5 times the old size — and copies everything. That
+copy is `O(n)`. So how is `add` described as `O(1)`?
+
+**Amortized `O(1)` means that any sequence of `n` operations costs `O(n)` in
+total, so the average cost per operation is constant — even though an individual
+operation can be expensive.** It is a guarantee about the total, not a
+probabilistic statement, and that distinction matters: amortized is not the same
+as "average case". Average case is about the distribution of inputs and can be
+defeated by an unlucky input. Amortized is about a sequence and cannot be
+defeated at all.
+
+The doubling argument, which is what you say out loud: growing to size `n`
+triggers resizes at sizes roughly `1`, `2`, `4`, `8`, up to `n`, and the copying
+work is `1 + 2 + 4 + ... + n`, which is less than `2n`. So `n` insertions cost
+less than `3n` operations in total, and the average per insertion is constant.
+**The key is that the expensive operation gets rarer at exactly the rate it gets
+more expensive.** Growing by a fixed increment instead of a multiplicative factor
+breaks this — increasing capacity by 10 each time gives `n/10` resizes averaging
+`n/2` work each, which is `O(n^2)` overall.
+
+The same argument covers `HashMap` resizing, `StringBuilder` growth, and the
+inverse-Ackermann bound for union-find. And it comes with a real caveat worth
+mentioning: **amortized bounds say nothing about latency.** One `add` in a
+million can take a hundred milliseconds if the array is large, which is why a
+low-latency service pre-sizes its collections.
+
+## Data structure complexities
+
+Average case first, with the worst case called out where it differs and where the
+difference matters.
+
+| Structure | Access by index | Search | Insert | Delete | Notes |
+|---|---|---|---|---|---|
+| Array | O(1) | O(n) | O(n) | O(n) | Fixed size; the baseline for cache behaviour |
+| `ArrayList` | O(1) | O(n) | O(1) amortized at end, O(n) at index | O(n) | Resizing is the amortized part |
+| `LinkedList` | O(n) | O(n) | O(1) at ends, O(n) to reach an index | O(1) given a node | Beaten by `ArrayDeque` in practice |
+| `ArrayDeque` | — | O(n) | O(1) amortized at both ends | O(1) at both ends | The right queue and stack |
+| `HashMap` / `HashSet` | — | O(1) avg, **O(log n) worst** | O(1) avg | O(1) avg | Java 8 treeifies long chains, so worst is log not linear |
+| `TreeMap` / `TreeSet` | — | O(log n) | O(log n) | O(log n) | Worst equals average; red-black tree |
+| `PriorityQueue` | O(1) peek | **O(n)** | O(log n) | O(log n) at root, O(n) by value | No index, so `contains` is linear |
+| Balanced BST | — | O(log n) | O(log n) | O(log n) | Same as `TreeMap` |
+| Unbalanced BST | — | O(log n) avg, **O(n) worst** | same | same | Sorted input degenerates into a list |
+| Trie | — | O(L) | O(L) | O(L) | `L` is key length, independent of how many keys |
+| Union-Find | — | O(α(n)) amortized | O(α(n)) amortized | not supported | With path compression and union by rank |
+| Heap (build) | — | — | O(n) to heapify | — | Not `O(n log n)`; see the heaps lesson |
+
+Four things in that table that people state wrongly:
+
+**`HashMap` worst case is `O(log n)` in Java 8 and later**, not `O(n)`. A bucket
+whose chain reaches 8 entries, in a table of at least 64, converts to a red-black
+tree. Before Java 8 the worst case really was `O(n)`, and that was a denial of
+service vector.
+
+**`PriorityQueue.contains` is `O(n)`.** A heap has no lookup structure. This is
+the single most common wrong complexity claim in interviews.
+
+**Sorting is `O(n log n)`** for comparison sorts, and that is a proven lower
+bound: there are `n!` possible orderings and each comparison yields one bit, so
+you need at least `log2(n!)` comparisons, which is `Theta(n log n)` by Stirling.
+Counting, radix and bucket sorts beat it only by not comparing — they need bounded
+keys. In Java, `Arrays.sort` on primitives is dual-pivot quicksort, which is
+`O(n^2)` in the worst case and not stable; on objects it is Timsort, which is
+`O(n log n)` worst case and stable. Knowing which is which is a good detail.
+
+**A trie's operations are `O(L)`, not `O(log n)`.** The number of stored keys
+does not appear in the bound at all, which is the whole point of the structure.
+
+## Space complexity, including the part people forget
+
+Space complexity is the *extra* memory beyond the input, and there are three
+contributions.
+
+**Explicit allocations** — your arrays, maps and result lists. The easy part.
+
+**The recursion stack**, which is the part that gets forgotten. **A recursive
+function using no heap memory at all still costs `O(depth)` space**, one frame per
+active call. Quicksort is described as in-place and sorting `O(1)` extra, but its
+stack is `O(log n)` when the recursion is balanced and `O(n)` when it is not.
+Merge sort is `O(n)` for the buffer plus `O(log n)` for the stack. A DFS over a
+graph is `O(V)` in the worst case, which is why a recursive flood fill over a
+million-cell grid overflows the JVM's default thread stack of around 512KB. If
+your solution is recursive, state the stack depth as part of the space answer —
+volunteering it is a reliable signal.
+
+**Output space**, which is conventionally excluded when the output is the answer
+itself. Subsets is `O(n)` working space even though it returns `O(n * 2^n)` of
+data. Say which convention you are using.
+
+## How to state complexity in an interview
+
+Four habits, in order of how often they matter.
+
+**Define your variables.** "`O(n)`" is ambiguous the moment there is more than
+one input. Say "`O(V + E)` where `V` is vertices and `E` is edges", or "`O(m * n)`
+for an `m` by `n` grid", or "`O(n * k)` where `k` is the average word length".
+Interviewers ask "what is `n` here?" precisely to find out whether you have
+thought about it.
+
+**Name the case.** Average, worst, or amortized. "`O(1)` average, `O(log n)`
+worst after treeification" for a `HashMap` lookup is a complete answer.
+
+**Give time and space together, unprompted.** Including the recursion stack.
+
+**Say where the cost comes from.** "`O(n log n)`, dominated by the sort — the
+pass afterwards is linear" tells the interviewer you know which line to attack if
+they ask you to improve it. That is far more useful than the bare symbol, and it
+sets up the follow-up conversation on your terms.
+
+## Master theorem, practically
+
+For a recurrence of the form `T(n) = a * T(n / b) + f(n)` — `a` subproblems, each
+of size `n / b`, plus `f(n)` work to split and combine — compare `f(n)` against
+`n^(log_b a)`, which is the total leaf work. Whichever dominates wins; if they
+are equal, you pay an extra `log n` factor for every level contributing equally.
+
+In practice three recurrences cover almost everything you will meet:
+
+| Recurrence | Solution | Where it appears |
+|---|---|---|
+| `T(n) = T(n/2) + O(1)` | `O(log n)` | Binary search — one branch, constant work |
+| `T(n) = 2T(n/2) + O(n)` | `O(n log n)` | Merge sort, quicksort average — `log n` levels of `O(n)` |
+| `T(n) = 2T(n/2) + O(1)` | `O(n)` | Tree traversal, heapify — the leaves dominate |
+
+The intuition behind the middle row is the one to internalise: there are `log n`
+levels of recursion, and each level does `O(n)` total work across all its
+subproblems, so the product is `n log n`. The third row differs because constant
+work per node means the total is just the node count, and half of all nodes in a
+balanced binary recursion are leaves.
+
+Two more worth recognising: `T(n) = T(n/2) + O(n)` is `O(n)`, because the work
+halves each level and `n + n/2 + n/4 + ...` converges to `2n` — that is
+quickselect and binary-search-on-the-answer. And `T(n) = 2T(n-1) + O(1)` is
+`O(2^n)`, which is the Towers of Hanoi and naive subset recursion shape.
+
+<Callout type="interview" title="Complexity questions you will actually be asked">
+1. **"What is the time and space complexity?"** Give both, name the variables,
+   name the case, and include the recursion stack in the space.
+2. **"Why `O(n log n)` and not `O(n)`?"** Because the sort dominates. If I could
+   avoid sorting — with a hash map, or counting sort on bounded keys — it would be
+   linear.
+3. **"Is `HashMap.get` really `O(1)`?"** `O(1)` average. Worst case is `O(log n)`
+   in Java 8 and later because long chains become red-black trees; before that it
+   was `O(n)`.
+4. **"What does amortized mean?"** Any sequence of `n` operations totals `O(n)`,
+   so the average is constant even though one operation may be linear. It is a
+   guarantee about the sequence, not about the input distribution.
+5. **"Why is `ArrayList.add` amortized `O(1)`?"** Capacity grows
+   multiplicatively, so the copying work across all resizes sums to less than
+   `2n`. Growing by a fixed increment instead would be `O(n^2)` overall.
+6. **"Can you sort faster than `O(n log n)`?"** Not by comparing. `log2(n!)` is
+   `Theta(n log n)` and each comparison gives one bit. Counting or radix sort is
+   `O(n + k)` when the keys are bounded integers.
+7. **"What is the space complexity of your recursion?"** `O(depth)` for the call
+   stack, plus anything allocated. For a DFS on a grid that is `O(m * n)` in the
+   worst case, which can overflow the stack.
+8. **"n is up to 10^5 and your solution is `O(n^2)`."** That is `10^10`
+   operations, far too slow. I need to drop a factor of `n` — sorting plus a
+   single pass, a hash map, a sliding window, or a heap.
+9. **"Why is building a heap `O(n)`?"** The cost per node is its height, and the
+   number of nodes halves as height rises. The series sums to `2n`.
+10. **"What is `O(α(n))`?"** Inverse Ackermann, the amortized cost of union-find
+    with path compression and union by rank. Below 5 for any realistic `n`, so
+    effectively constant, but not literally `O(1)`.
+11. **"Average versus worst case for quicksort?"** `O(n log n)` average,
+    `O(n^2)` worst on adversarial pivots, mitigated by random or median-of-three
+    pivot selection. `Arrays.sort` on primitives uses it; on objects Java uses
+    Timsort, which is `O(n log n)` worst case and stable.
+12. **"How do you decide the approach from the constraints?"** Work back from
+    roughly `10^8` operations per second. `n` up to 20 means exponential is
+    intended; `n` up to 500 means cubic is fine; `n` up to `10^5` means I need
+    `O(n log n)` or better.
+</Callout>
+
+### Where this connects
+
+- [How to approach any coding problem](/dsa/how-to-approach-any-coding-problem-say-this-out-loud-in-the)
+  — where reading the constraints fits into the first two minutes.
+- [Pattern 4 — Binary Search](/dsa/pattern-4-binary-search) — the `O(log n)`
+  recurrence and the overflow-safe midpoint.
+- [Pattern 9 — Heaps](/dsa/pattern-9-heaps-priority-queue) — why heapify is
+  `O(n)` and why `O(n log k)` beats `O(n log n)`.
+- [Pattern 11 — Graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find) — complexity
+  expressed in `V` and `E`, and the inverse-Ackermann bound.
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) — the
+  states-times-work-per-state rule that gives every DP complexity.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  treeification, resizing, and why cache locality beats Big-O between `ArrayList`
+  and `LinkedList`.
+- [Coding round survival tips](/dsa/coding-round-survival-tips) — stating
+  complexity as part of the narration, not as an afterthought.

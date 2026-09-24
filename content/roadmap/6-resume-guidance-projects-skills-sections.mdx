@@ -1,0 +1,202 @@
+---
+title: "6. Resume guidance (Projects & Skills sections)"
+topic: "roadmap"
+order: 6
+difficulty: "easy"
+estimatedMinutes: 13
+tags: [roadmap, resume, projects, skills, url-shortener, interview-surface]
+format: "mdx"
+summary: "The action-technology-outcome bullet formula, how to present the url-shortener so it reads as engineering rather than a tutorial, what belongs in the skills section, and why every line is interview surface area."
+---
+
+## The rule that governs everything else
+
+**Everything on your resume is interview surface area.** A line that says
+"Kafka" buys you a fifteen-minute conversation about consumer groups and
+partition rebalancing. A line that says "optimised database performance" buys
+you "which query, and how did you measure it?"
+
+This cuts both ways, and the useful direction is the one people ignore: you can
+*choose* what you get asked about. A resume is partly a list of the topics you
+would like to spend the interview on. If you write three lines about caching and
+one about Kubernetes, you will mostly be asked about caching. That is a lever,
+and it is worth using deliberately.
+
+The corollary is the hard rule: **do not list anything you cannot defend for ten
+minutes.** Not "have heard of". Not "used once in a tutorial". Ten minutes of
+someone competent asking why. The cost of being caught is much higher than the
+benefit of the keyword, because it converts a knowledge gap into a credibility
+problem, and credibility problems contaminate everything else you said.
+
+## Bullets: action, technology, outcome
+
+Every bullet should have three parts. Most bad bullets are missing the third,
+and some are missing the first two as well.
+
+```
+[Action verb] + [what, with which technology] + [measurable outcome]
+```
+
+Compare:
+
+> **Weak:** "Worked on improving API performance using Redis caching."
+>
+> **Strong:** "Cut p99 latency on the redirect endpoint from 180 ms to under
+> 15 ms by caching the URL record and moving click tracking off the request
+> path, raising sustained throughput roughly tenfold."
+
+The second version names the specific endpoint, the specific change, the
+mechanism, and two numbers measured the same way. It is also a complete
+behavioral answer in compressed form, which is not a coincidence — the bullets
+on your resume and your
+[story bank](/behavioral/general-behavioral-tips) should be the same material.
+
+A few mechanics that matter more than they should:
+
+**Lead with the verb, in past tense, and vary it.** Built, designed, cut,
+migrated, instrumented, diagnosed, automated. Avoid "responsible for" and
+"worked on", which describe a position rather than an action.
+
+**Numbers, even approximate ones.** Latency, throughput, query count, data
+volume, users, cost, time saved, defects prevented. If you genuinely have no
+metrics, use a scale or scope number instead — "across three services" or "for a
+dataset of 40 million rows" — which is at least concrete. An unquantified bullet
+is not fatal; a resume where *no* bullet is quantified reads as someone who has
+never measured anything.
+
+**One line each, two at most.** Three-line bullets are not read.
+
+**Put the interesting one first.** Within each role or project, the first bullet
+gets a disproportionate share of the attention. Do not lead with "developed REST
+APIs using Spring Boot", which describes several million people.
+
+## Presenting the url-shortener
+
+A URL shortener is, on its face, an unimpressive project — it is a common
+tutorial, and a screener has seen dozens. That is fine, because **what makes a
+project section work is not the novelty of the product, it is the visible
+engineering judgement.** A URL shortener with real caching, real rate limiting
+and an honest account of its failure modes reads far better than an ambitious
+system nobody could defend.
+
+You have two advantages here worth exploiting. First, it is genuinely the
+canonical system design interview question, so the work you have already done
+maps directly onto
+[Case 1](/system-design/case-1-design-a-url-shortener-your-project-master-this-one).
+Second, you know what is wrong with it, which is a much rarer quality in a
+candidate than having built it.
+
+A defensible version:
+
+> **URL Shortener Service** — Java 17, Spring Boot, PostgreSQL, Redis, Docker
+> *(github.com/your-handle/url-shortener)*
+>
+> - Built a redirect service with Base62 short-code generation and cache-aside
+>   reads through Redis, handling around N requests per second in load testing
+>   at a p99 of M milliseconds.
+> - Diagnosed a cache-hit path that still queried Postgres on every request
+>   because click tracking loaded the entity for a foreign key; restructured the
+>   cached value and moved click recording off the hot path, cutting p99 from
+>   180 ms to under 15 ms.
+> - Found and fixed a correctness bug where link expiry was only evaluated on
+>   the database fallback path, so cached entries kept redirecting for up to
+>   24 hours past expiry; bounded the cache TTL by the remaining link lifetime.
+> - Implemented Redis-backed per-IP rate limiting with `INCR` and `EXPIRE`,
+>   failing open with an alert on limiter degradation rather than rejecting
+>   traffic on a Redis outage.
+> - Secured endpoints with stateless JWT authentication; externalised all
+>   credentials and signing keys to environment configuration.
+
+Substitute your real numbers, and only include the bullets that describe work
+you actually did. Note the shape of the middle three: each one names a problem,
+a diagnosis and an outcome, which is what makes them read as engineering rather
+than as a feature list. Note also that the last one is the least interesting and
+therefore last.
+
+<Callout type="pitfall" title="Before you link the repository">
+Someone will open it. The `application.yml` in that project currently contains a
+hardcoded JWT signing secret and hardcoded database credentials, and a committed
+secret is the first thing a senior reviewer notices — it turns a good project
+into a conversation about your security judgement.
+
+Move both to environment variables or a secrets manager, make the application
+fail at startup when they are missing rather than falling back to a default,
+rotate the committed values, and add a `.env.example` documenting what is
+required. It is an hour of work and it removes a guaranteed negative.
+</Callout>
+
+**Include a README that states the tradeoffs.** A short section headed "known
+limitations and what I would change" is unusual enough to be memorable, and it
+pre-empts the interviewer's best questions by answering them first. It is also
+the single clearest signal of seniority you can put in a repository.
+
+## The skills section
+
+Its main job is getting through keyword filters, so it should be scannable and
+grouped. Its secondary job is telling the interviewer which questions to ask,
+which means it needs to be honest about depth.
+
+```
+Languages       Java 17, SQL, Python (working knowledge)
+Frameworks      Spring Boot, Spring Data JPA, Hibernate, JUnit
+Data            PostgreSQL, Redis
+Tools           Docker, Git, Maven, Postman
+Concepts        REST API design, caching strategies, JWT authentication,
+                concurrency, query optimisation
+```
+
+Rules:
+
+**Group by category.** A single 40-item comma-separated list is unreadable and
+signals nothing except that you have used a computer.
+
+**Mark honest depth where it is uneven.** "Python (working knowledge)" is a
+useful qualifier that costs you almost nothing and protects you from a Python
+interview. What you must not do is list something at full strength that you
+would fail a basic question on.
+
+**Cut anything you would not choose to be asked about.** If you put Kubernetes
+on the list because it appeared in a job description, you have volunteered for a
+Kubernetes conversation you will lose. Fewer, defensible entries outperform a
+long list every time.
+
+**No proficiency bars or star ratings.** They are self-assessed, nobody believes
+them, and "4 out of 5 stars in Java" is a claim you will be asked to justify.
+
+**Include the concepts row.** It is the one most people omit, and it is the one
+that signals you think in terms of problems rather than tools.
+
+## Prepare the defence, not just the document
+
+When the resume is finished, do this before you send it. For every bullet, write
+down the three follow-up questions you would ask if you were interviewing
+yourself, and answer them in writing.
+
+For the latency bullet above: how did you measure it, what was the p50, why did
+you choose to move click tracking asynchronous rather than just caching the ID,
+what did that cost you in durability, and what was the bottleneck afterwards.
+If any of those has no answer, either get the answer or delete the bullet.
+
+**This exercise is where most of the value of this lesson is.** A resume you can
+defend line by line changes how the deep-dive round goes, because you stop
+hoping they skip a topic and start hoping they ask about it.
+
+## Format and length
+
+One page if you have under about eight years of experience. Two only if the
+second page earns itself.
+
+Plain single-column layout, standard fonts, no photo, no graphics, no columns —
+resume parsers handle multi-column layouts badly and silently, and you will not
+know it happened. Send PDF unless asked otherwise. Name the file with your name
+in it.
+
+Put the most relevant thing highest. For someone moving into a product company
+on the strength of a project, that ordering is usually: a two-line summary,
+skills, experience, projects — unless the project is genuinely stronger evidence
+than the job, in which case move it above experience and accept that this is a
+slightly unconventional choice.
+
+Drop the objective statement, the photograph, the date of birth, the marital
+status and the full postal address. A city, an email, a phone number, a GitHub
+link and a LinkedIn link is the complete header.

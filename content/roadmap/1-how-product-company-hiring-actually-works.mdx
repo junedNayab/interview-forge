@@ -1,0 +1,205 @@
+---
+title: "1. How product-company hiring actually works"
+topic: "roadmap"
+order: 1
+difficulty: "easy"
+estimatedMinutes: 14
+tags: [roadmap, hiring-process, interview-loop, levels, referrals, hiring-committee]
+format: "mdx"
+summary: "Each stage of the pipeline from recruiter screen to hiring committee, what the scorecard actually records in each round, how the weighting shifts between mid and senior, and realistic timelines."
+---
+
+## Why the process is worth understanding
+
+Because the rounds are scored independently, and you cannot compensate. A
+brilliant coding round does not rescue a weak design round — they go into
+separate boxes on separate scorecards and get read by people who were not in the
+other room. Understanding the shape of the funnel tells you where your effort
+actually converts into offers, which is rarely where it feels most productive.
+
+The other reason: much of what feels arbitrary about these loops is not. A
+"no signal" outcome is a rejection, interviewers are writing evidence rather than
+opinions, and the final decision is often made by people who never met you. Once
+you know that, several otherwise puzzling pieces of advice — write down every
+question you were asked, think out loud, always have questions — become obviously
+correct.
+
+## The pipeline
+
+### 1. Resume screen
+
+Usually a recruiter with a few hundred applications, spending well under a minute
+each, plus an automated keyword filter in many cases. What survives: relevant
+technology keywords in the right places, recognisable companies or products,
+quantified outcomes, and no unexplained gaps.
+
+This is the highest-leverage and least-worked-on stage. Nothing else in this
+roadmap matters if you do not get past it, and it is the cheapest thing to fix.
+See [resume guidance](/roadmap/6-resume-guidance-projects-skills-sections).
+
+### 2. Recruiter screen — 20 to 30 minutes
+
+Not technical. The recruiter is checking that you exist as described, that you
+are interested, that your compensation expectations are plausible, and that you
+can hold a conversation.
+
+Prepare three things: a two-minute summary of your background, a clean answer to
+"why are you looking?", and a compensation range. Discuss the range as what you
+are seeing in the market rather than as a number you will accept. Rejections
+here are usually about level mismatch or location rather than ability.
+
+You should also *ask* things here: how many rounds, what each round is, and what
+level the role is mapped to. Recruiters answer this readily and it determines
+what you prepare.
+
+### 3. Online assessment — 60 to 120 minutes
+
+Common at larger companies and at volume-hiring times. Typically two to four
+algorithmic problems on HackerRank, CodeSignal or an internal platform, sometimes
+with a debugging section or a short work-styles questionnaire.
+
+Scored almost entirely on **test cases passed**. Nobody reads your code unless
+you are borderline. This is the one stage where elegance is worthless and
+correctness under time pressure is everything — which makes it the stage that
+rewards raw problem volume more than any other. Some companies also record how
+long you took and whether you left the tab.
+
+### 4. Technical phone screen — 45 to 60 minutes
+
+One or two algorithmic problems with a live interviewer, in a shared editor,
+usually without execution. Roughly medium difficulty.
+
+Scored on: did you reach a working solution, did you reach the optimal complexity,
+did you communicate while doing it, and did you handle the edge cases. The
+communication component is real — a correct silent solution frequently scores
+below a correct narrated one, because the interviewer has to write evidence and
+silence produces none.
+
+### 5. The onsite loop — 4 to 6 rounds
+
+Usually one day, sometimes split across two. A typical backend loop at mid to
+senior level:
+
+| Round | Length | What is actually scored |
+|---|---|---|
+| **DSA 1** | 45 min | Pattern recognition, optimal complexity, edge cases, clean code |
+| **DSA 2** | 45 min | Same, usually harder or a different pattern family |
+| **System design (HLD)** | 45–60 min | Scoping, estimation, tradeoff reasoning, depth on one component, self-critique |
+| **LLD or machine coding** | 60–120 min | Class modelling, SOLID, extensibility, working code under time |
+| **Behavioral / hiring manager** | 45–60 min | Ownership, conflict, failure, collaboration, motivation |
+| **Backend deep dive** *(varies)* | 45 min | Java, concurrency, JPA, SQL, and your own project under interrogation |
+
+Not every company runs all six. Indian product companies and startups weight
+machine coding heavily; the large global companies weight HLD and behavioral
+more. Ask the recruiter which you are getting.
+
+Two things worth knowing about the loop. First, **the deep-dive and behavioral
+rounds are where your resume gets tested** — the project you listed is fair game
+for forty-five minutes. Second, at least one interviewer is usually assigned the
+behavioral signal explicitly, which means it is not a chat, whatever it feels
+like.
+
+### 6. Hiring manager round
+
+Sometimes merged with behavioral. This person is deciding whether they want you
+on their team specifically, and they are the one who has to justify the hire. The
+content is behavioral plus role fit plus, often, a genuine conversation about
+what you would work on.
+
+This is the round where your questions matter most, because you are being
+assessed on judgement rather than knowledge, and the questions you ask are
+evidence of judgement. See
+[general behavioral tips](/behavioral/general-behavioral-tips) for four that do
+real work.
+
+### 7. Hiring committee or bar raiser
+
+At the larger companies, a group that did not interview you reads the written
+feedback and decides. This matters more than most candidates realise, because it
+means **your interviewers' notes are the entire input.** The committee cannot see
+that you were charming or that the problem was unusually hard. They see written
+evidence against a rubric.
+
+Practical consequences: anything you did not say out loud did not happen; a round
+with no strong negative but no specific evidence is usually recorded as "no
+signal", which functions as a soft no; and consistency across rounds is checked —
+if you described yourself as owning something in one round and as a contributor
+in another, someone will notice.
+
+## How levels change the weighting
+
+Most companies map to something like L3/SDE-1 (entry), L4/SDE-2 (mid, roughly
+two to five years), L5/senior (roughly five and up, though the band is wide).
+The transition you are likely targeting is mid to senior, and the weighting
+shifts sharply across it:
+
+- **At entry and mid level**, DSA dominates. A strong coding performance can
+  carry a mediocre design round. Design questions are often scoped down or
+  replaced with LLD.
+- **At senior level, system design and behavioral start to dominate.** The coding
+  bar does not go away but it stops being the differentiator, because everyone
+  who reaches the loop clears it. What decides the outcome is whether you can
+  drive an ambiguous design problem and whether the behavioral evidence shows
+  ownership.
+
+This is why "I'm strong at DSA" is a weaker position than it feels at senior
+level. The returns on your five-hundred-and-first LeetCode problem are close to
+zero; the returns on your first ten system design practice runs are enormous.
+
+Down-levelling is common and worth being prepared for: a candidate interviewed
+for senior who performs well on coding and weakly on design is frequently offered
+the level below rather than rejected. If that happens, it is almost always the
+design round that did it.
+
+## Realistic timelines
+
+From first contact to offer, assuming nothing goes wrong:
+
+- Recruiter screen to online assessment or phone screen: one to two weeks.
+- Phone screen to onsite: one to three weeks, mostly scheduling.
+- Onsite to decision: three days to two weeks; longer where a committee meets on
+  a fixed cadence.
+- Offer to negotiation closed: one to two weeks.
+
+**Six to ten weeks end to end is normal.** Twelve is not unusual. Plan for this:
+start applying while you are still preparing rather than after, because the
+pipeline delay means your first loop will happen four to six weeks after you
+begin, which is roughly when you want it to.
+
+Run loops in parallel rather than sequentially, for two reasons: competing offers
+are the only real leverage in compensation negotiation, and the first loop is
+always the worst one. If there is a company you badly want, do not interview
+there first.
+
+Most companies have a cooling-off period after a rejection — typically six months
+to a year — so an early attempt at your top choice is expensive.
+
+## How referrals change the funnel
+
+A referral does one thing well: it gets your resume read by a human instead of
+filtered. That is a large effect at the top of the funnel and roughly zero effect
+after it. Referred candidates are not graded more leniently, and at companies
+with a hiring committee the referral is often not visible at the decision stage.
+
+Getting one is more tractable than it seems. Former colleagues are the obvious
+source. Beyond that, a short, specific message naming the team or role, with
+your resume attached and an easy way to say no, has a much better hit rate than
+a generic request — and most referral programmes pay a bonus, so you are asking
+for something the other person is mildly incentivised to give.
+
+What a referral cannot do is compensate for a resume that does not support the
+level. If you get referred and screened out anyway, the problem is the resume,
+not the referral.
+
+## What this means for how you prepare
+
+Three conclusions follow from the above, and they drive
+[the four tracks](/roadmap/2-the-four-tracks) and
+[the plan](/roadmap/3-the-integrated-plan-everything-sequenced-your-chart):
+
+1. **Your weakest track sets your ceiling,** because rounds are scored
+   independently and a weak round is rarely rescued.
+2. **At senior level, design and behavioral carry more weight than additional
+   DSA volume,** which is the opposite of how most people allocate their time.
+3. **Everything on your resume is interview surface area.** The project you list
+   will be interrogated for forty-five minutes by someone who is good at this.

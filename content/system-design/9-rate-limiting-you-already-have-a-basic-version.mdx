@@ -1,0 +1,62 @@
+---
+title: "9. Rate limiting (you already have a basic version!)"
+topic: "system-design"
+order: 209
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 4
+tags: [rate-limiting, redis, token-bucket]
+format: "mdx"
+summary: "The five algorithms at a glance, and why a shared counter is the only thing that works across a scaled-out fleet."
+---
+
+Rate limiting protects against abuse and accidental overload. Your
+`url-shortener` has a working one — `RateLimitInterceptor`, 100 requests per 60
+seconds per IP.
+
+### The algorithms
+
+| Algorithm | Idea | Memory/key | Catch |
+|-----------|------|---|---|
+| Fixed window | `N` requests per fixed interval | O(1) | Allows **2× the limit** across a boundary |
+| Sliding window log | Keep a timestamp per request | O(limit) | Exact, but memory explodes at scale |
+| **Sliding window counter** | Weight the previous window by its overlap | O(1) | Approximate — and a good general default |
+| **Token bucket** | Tokens refill at rate `R`, each request spends one | O(1) | Expresses *sustained rate + burst*; the API standard |
+| Leaky bucket | Requests drain at a constant rate | O(queue) | Delays bursts instead of rejecting; adds latency |
+
+### The one rule that matters at scale
+
+**The counter must be shared.** A per-instance in-memory counter is silently
+wrong the moment you run more than one server: with `N` instances each allowing
+`N` requests, the effective limit is `N ×` what you configured, and it drifts
+every time you autoscale.
+
+So the counter lives in Redis. Note that the obvious implementation is subtly
+broken:
+
+```java
+Long count = redis.opsForValue().increment(key);   // creates key with NO TTL
+if (count == 1) redis.expire(key, window);         // a failure here is permanent
+```
+
+`INCR` and `EXPIRE` are two non-atomic round trips. Fail between them and the key
+never expires, so that identity is rate-limited **forever**. The fix is a Lua
+script, which Redis runs atomically and which also halves the round trips.
+
+<Callout type="note" title="Your implementation, accurately">
+Earlier notes suggested your limiter was per-instance and should be moved to
+Redis. **It is already Redis-backed** — `RateLimitInterceptor` uses `INCR` plus
+`EXPIRE` on `rate_limit:{ip}` and fails open if Redis is down. So you're past the
+mistake this section warns about.
+
+The three things it *does* need are the fixed-window boundary burst, the
+non-atomic `INCR`/`EXPIRE` above, and the key being
+`request.getRemoteAddr()` — which behind a load balancer is the proxy's IP, so
+every user shares one bucket.
+</Callout>
+
+**Go deeper:** [Case 2 — design a distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+covers all five algorithms with their tradeoffs, an atomic token-bucket Lua
+script, the two-tier design for cutting the Redis round trip, key design and
+`X-Forwarded-For`, the fail-open/fail-closed decision, and a full critique of
+your implementation.

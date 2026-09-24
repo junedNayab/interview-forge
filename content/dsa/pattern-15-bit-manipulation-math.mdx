@@ -1,0 +1,422 @@
+---
+title: "Pattern 15 — Bit Manipulation & Math"
+topic: "dsa"
+order: 117
+difficulty: "medium"
+estimatedMinutes: 28
+tags: [bit-manipulation, xor, bitmask, java-operators, gcd, sieve, modular-arithmetic, overflow]
+format: "mdx"
+summary: "The handful of bit idioms that actually appear in interviews and why each works, Java's signed-shift and overflow rules, bitmasks as sets, and the four math routines worth knowing cold: Euclid, the sieve, fast exponentiation, and overflow-safe arithmetic."
+---
+
+## Layer 1 — When you reach for this
+
+> Bit manipulation is a small vocabulary — maybe eight idioms — that shows up
+> either as the entire problem or as a two-line trick inside a larger one. **The
+> value is not cleverness; it is that a bitmask lets you treat a set of up to 32
+> elements as a single integer, which makes it hashable, comparable, and usable
+> as an array index.** That is what unlocks bitmask DP and subset enumeration.
+
+Signals that a problem wants bits:
+
+- **"Without using the `+` operator"**, "without arithmetic", "using constant
+  space". These are explicit invitations.
+- **"Appears once while everything else appears twice"**, or three times, or
+  "find the two singles". XOR problems, all of them.
+- **"Count the set bits"**, "is it a power of two", "reverse the bits", "swap
+  without a temporary".
+- **A subset or a set of visited items where `n` is at most about 20.** The
+  constraint bound is the signal; a subset of 20 elements is an integer below
+  `2^20`, and that is a perfectly good array index. See
+  [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) for the
+  DP that uses it.
+- **Flags and permissions**, masks, feature toggles — the real-world use.
+- **"Take the answer modulo `10^9 + 7`"**, which is a signal for the modular
+  arithmetic half of this lesson rather than the bit half.
+
+Math signals: primes, factors, divisibility, GCD or LCM, "how many trailing
+zeros in `n` factorial", digit manipulation, and anything where the numbers are
+large enough that `int` will overflow.
+
+The anti-signals are worth stating because bit tricks are seductive:
+
+- **The problem is about ordering or searching**, and someone remembered a bit
+  trick. If a `HashSet` solves it in `O(n)`, the bit version is not better for
+  being cleverer.
+- **`n` is larger than 64.** A bitmask no longer fits in a primitive, and while
+  `BitSet` or a `long[]` works, the "subset as an index" advantage is gone, so
+  bitmask DP is off the table.
+- **You reached for XOR because the problem mentions pairs**, but the pairs are
+  not exact duplicates. XOR cancels identical values only.
+
+---
+
+## Layer 2 — The mechanism
+
+### The operators, and the invariants they carry
+
+`&` is AND, `|` is OR, `^` is XOR, `~` is bitwise NOT, and the shifts are
+`<<` for left, `>>` for signed right, and `>>>` for unsigned right. Each idiom
+below is one of these applied with a reason.
+
+**`x & 1` tests parity.** The lowest bit is the ones place, so it is 1 exactly
+when `x` is odd. This works for negative numbers too, unlike `x % 2`, which in
+Java returns `-1` for odd negatives — a real source of bugs in digit loops.
+
+**`x >> 1` halves, `x << 1` doubles.** Shifting is multiplication and division
+by powers of two. For non-negative values `x >> 1` and `x / 2` agree; for
+negatives they do not, because the shift rounds towards negative infinity while
+division rounds towards zero. `-3 >> 1` is `-2`; `-3 / 2` is `-1`.
+
+**`x & (x - 1)` clears the lowest set bit.** Subtracting 1 flips the lowest set
+bit to 0 and turns every zero below it into a 1; ANDing with the original keeps
+only the bits above, so exactly one set bit disappears. Two consequences follow
+immediately. **Counting set bits becomes a loop that runs once per set bit
+rather than once per bit position** — `O(popcount)` instead of `O(32)` — which is
+Brian Kernighan's algorithm. And `x` is a power of two exactly when
+`x > 0 && (x & (x - 1)) == 0`, because a power of two has precisely one set bit
+and clearing it leaves zero. The `x > 0` guard matters: zero passes the AND test
+and is not a power of two.
+
+**`x & -x` isolates the lowest set bit.** In two's complement, `-x` is
+`~x + 1`, which is `x` with every bit above the lowest set bit flipped and
+everything at and below it preserved. ANDing therefore leaves exactly that one
+bit. This is the operation that makes Fenwick trees work, and it is the clean way
+to iterate over the set bits of a mask one at a time.
+
+**XOR is the interesting one.** Three properties do all the work: `x ^ x == 0`,
+`x ^ 0 == x`, and it is commutative and associative, so order does not matter.
+Put together: **XOR everything in an array where every value appears twice except
+one, and the pairs annihilate regardless of position, leaving the single
+value** — in `O(n)` time and `O(1)` space, with no hash set. Missing Number is
+the same idea, XORing the values against the indices. XOR is also its own
+inverse, which is what makes `a ^= b; b ^= a; a ^= b` swap two variables without
+a temporary — worth being able to explain and worth never writing, since it
+fails when both operands alias the same variable.
+
+The harder XOR variant to have ready: **find the two numbers that each appear
+once when all others appear twice.** XOR everything to get `a ^ b`. That value is
+non-zero, so pick any set bit of it — `d = xor & -xor` is the natural choice.
+That bit differs between `a` and `b` by definition, so partition the array by
+whether each element has that bit set, and XOR each partition separately. Each
+partition contains one of the singles and complete pairs of everything else.
+
+**Bitmask as a set.** With `n` at most about 20, a subset is an integer:
+`mask | (1 << i)` adds element `i`, `mask & ~(1 << i)` removes it,
+`(mask >> i) & 1` tests it, `mask ^ (1 << i)` toggles it, and
+`Integer.bitCount(mask)` is the set's size. Enumerating all subsets is simply
+counting from 0 to `(1 << n) - 1`. The idiom that surprises people is enumerating
+all **sub**-subsets of a given mask, which is `for (int s = mask; s > 0;
+s = (s - 1) & mask)` and visits each submask exactly once; over all masks that
+totals `3^n` iterations, not `4^n`.
+
+```java
+// Count set bits — Brian Kernighan: one iteration per SET bit, not per bit position.
+int count = 0;
+while (x != 0) { x &= (x - 1); count++; }
+
+// Iterate the set bits of a mask, lowest first.
+for (int m = mask; m != 0; m &= (m - 1)) {
+    int lowest = m & -m;                        // isolate
+    int index  = Integer.numberOfTrailingZeros(lowest);
+    // ... use index
+}
+
+// Enumerate every subset of an n-element set.
+for (int mask = 0; mask < (1 << n); mask++) {
+    for (int i = 0; i < n; i++)
+        if ((mask & (1 << i)) != 0) { /* element i is in this subset */ }
+}
+```
+
+### Java specifics that actually matter
+
+**`>>` versus `>>>`.** Java has no unsigned integer types, so the language
+compensates at the operator level. `>>` is an *arithmetic* shift: it copies the
+sign bit into the vacated high positions, which preserves the value's sign and
+makes `x >> k` equal to dividing by `2^k` rounded towards negative infinity.
+`>>>` is a *logical* shift: it always fills with zeros, treating the value as
+32 unsigned bits. `-8 >> 1` is `-4`; `-8 >>> 1` is 2147483644.
+
+**`>>>` exists precisely because Java removed unsigned types.** Whenever you are
+treating an `int` as a bag of 32 bits rather than as a number — reversing bits,
+counting bits, hashing, walking a value bit by bit — `>>>` is the correct
+operator, and `>>` will loop forever on a negative input because the sign bit
+keeps refilling. This is the bug in every hand-written `Number of 1 Bits` that
+fails on negative input. Note there is no `<<<`: left shift has no sign
+ambiguity, since the vacated bits are at the bottom.
+
+**Shift counts are taken modulo 32** for `int` and modulo 64 for `long`. So
+`1 << 32` is `1`, not `0`, which is a genuinely surprising result and a real
+source of bugs when a shift amount is computed rather than literal.
+
+**Overflow is silent and wraps.** `Integer.MAX_VALUE + 1` is
+`Integer.MIN_VALUE`. The asymmetry that catches people is that the negative range
+is one larger than the positive: `-2147483648` to `2147483647`. Therefore
+**`Math.abs(Integer.MIN_VALUE)` is `Integer.MIN_VALUE`** — negating it overflows
+back to itself, and `Math.abs` returns it unchanged rather than throwing. Any
+code that takes an absolute value before processing digits, or that negates to
+normalise a sign, has a latent bug on exactly that one input, and Reverse
+Integer and String to Integer both test it. Use `Math.addExact` and friends when
+you want a thrown exception instead of a wrap, or promote to `long`.
+
+**Useful library methods**, all intrinsics that compile to a single CPU
+instruction on modern hardware: `Integer.bitCount`,
+`Integer.numberOfTrailingZeros`, `Integer.numberOfLeadingZeros`,
+`Integer.highestOneBit`, `Integer.reverse`, and `Long.bitCount`. Use them, and
+mention you know the manual version — writing Kernighan's loop after saying "in
+production I would call `Integer.bitCount`" is the right order.
+
+**`char` is unsigned 16-bit**, the only unsigned type in Java, which is why
+`c - 'a'` works cleanly as an index and why bit tricks on character sets use a
+single `int` as a 26-bit mask. That is the basis of Maximum Product of Word
+Lengths, where two words share no letters exactly when `maskA & maskB` is zero.
+
+### The math that shows up
+
+**GCD by Euclid.** `gcd(a, b) = gcd(b, a % b)`, terminating when `b` is 0.
+
+```java
+int gcd(int a, int b) { return b == 0 ? a : gcd(b, a % b); }
+int lcm(int a, int b) { return a / gcd(a, b) * b; }   // divide FIRST to avoid overflow
+```
+
+**Why it terminates, and why it is fast.** Correctness: any common divisor of
+`a` and `b` also divides `a % b`, since `a % b` is `a - qb`, so the pair of
+numbers changes but the set of common divisors does not. Termination: `a % b` is
+strictly less than `b`, so the second argument strictly decreases and is
+non-negative, which cannot continue forever. Speed: after two steps the larger
+argument is at least halved, because if `b <= a/2` then `a % b < b <= a/2`, and
+if `b > a/2` then `a % b = a - b < a/2`. So the number of steps is `O(log
+min(a, b))`. Note the `lcm` line divides before multiplying; doing it the other
+way overflows on inputs that the correct order handles fine.
+
+**Sieve of Eratosthenes.** Mark multiples of each prime starting from its square.
+
+```java
+boolean[] composite = new boolean[n + 1];
+for (int p = 2; (long) p * p <= n; p++)
+    if (!composite[p])
+        for (int m = p * p; m <= n; m += p) composite[m] = true;   // start at p*p
+```
+
+Starting at `p * p` rather than `2p` is correct because every smaller multiple
+of `p` has a factor below `p` and was already marked. **The complexity is
+`O(n log log n)`**: the inner loop runs `n / p` times for each prime `p`, so the
+total is `n` times the sum of the reciprocals of the primes up to `n`, and that
+sum grows like `log log n`. Close enough to linear that for any `n` you can
+allocate an array for, the sieve is effectively free. Space is `O(n)` bits, which
+is the real constraint; above roughly `10^8` you need a segmented sieve.
+
+**Fast modular exponentiation.** Compute `base^exp mod m` in `O(log exp)` by
+squaring, reading the exponent bit by bit.
+
+```java
+long power(long base, long exp, long mod) {
+    long result = 1;
+    base %= mod;
+    while (exp > 0) {
+        if ((exp & 1) == 1) result = result * base % mod;   // this bit is set
+        base = base * base % mod;                           // square for the next bit
+        exp >>= 1;
+    }
+    return result;
+}
+```
+
+Each iteration consumes one bit of the exponent, so there are `log2(exp)`
+iterations. Use `long` for the intermediate products: two values below `10^9`
+multiply to nearly `10^18`, which fits a `long` but overflows an `int` many times
+over. This routine also computes a modular inverse when the modulus is prime, by
+Fermat's little theorem — the inverse of `a` is `a^(m-2) mod m` — which matters
+for any combinatorics problem asking for a result modulo `10^9 + 7`.
+
+**Overflow-safe arithmetic.** The midpoint `(lo + hi) / 2` overflows when both
+are large; this was a real bug in the JDK's own binary search for nine years.
+Write `lo + (hi - lo) / 2`, which can never exceed `hi`. For multiplication,
+promote to `long`, or use the `*Exact` methods that throw on overflow. And note
+that `Integer.MIN_VALUE / -1` overflows too.
+
+### Worked example: Counting Bits
+
+Return an array where entry `i` is the number of set bits in `i`, for all `i`
+from 0 to `n`. The naive answer calls `Integer.bitCount` on each, which is fine
+and `O(n)` with a large constant. The intended answer is a one-line DP, and it is
+a nice demonstration of a bit identity becoming a recurrence:
+
+```java
+int[] dp = new int[n + 1];
+for (int i = 1; i <= n; i++)
+    dp[i] = dp[i >> 1] + (i & 1);      // bits of i/2, plus the bit we dropped
+```
+
+The adaptation: `i >> 1` is `i` with its lowest bit removed, so `i` has exactly
+the same set bits as `i >> 1` plus possibly that lowest bit, which `i & 1`
+reports. The alternative recurrence `dp[i] = dp[i & (i - 1)] + 1` uses the
+clear-lowest-bit identity instead and is equally valid. Either way, **the DP
+works because the sub-value is strictly smaller and therefore already
+computed** — the same reasoning as any other DP iteration order.
+
+### Worked example: Sum of Two Integers without `+`
+
+Addition decomposes into two bitwise pieces: `a ^ b` is the sum with all carries
+ignored, and `(a & b) << 1` is exactly the carries, shifted into the positions
+where they must be added. Repeat until there is no carry left.
+
+```java
+int add(int a, int b) {
+    while (b != 0) {
+        int carry = (a & b) << 1;
+        a = a ^ b;          // sum without carry
+        b = carry;          // now add the carry in
+    }
+    return a;
+}
+```
+
+This terminates because each iteration pushes the carry at least one position
+left, so after at most 32 rounds there is nowhere left for it to go. It works
+for negative numbers without modification, which is the payoff of two's
+complement: subtraction and negative values are the same arithmetic.
+
+### Edge cases and traps
+
+- **`>>` on a negative value in a bit-counting loop**, which never terminates.
+  Use `>>>`.
+- **`Math.abs(Integer.MIN_VALUE)`** returning a negative number.
+- **`(lo + hi) / 2` overflowing** in binary search on large indices.
+- **`1 << 31`** being `Integer.MIN_VALUE`, and `1 << 32` being `1`. Use
+  `1L << k` when `k` can reach 31 or beyond.
+- **Operator precedence.** `&`, `|` and `^` bind *looser* than `==` in Java, so
+  `a & 1 == 0` parses as `a & (1 == 0)` and does not compile. Parenthesise every
+  bit expression inside a comparison.
+- **`x % 2 == 1` failing for negative odd numbers**, where the remainder is
+  `-1`. Use `(x & 1) == 1`.
+- **Integer division truncating towards zero**, so `-7 / 2` is `-3` while
+  `-7 >> 1` is `-4`.
+- **Assuming XOR finds any duplicate.** It finds the value appearing an odd
+  number of times; with three of a kind or arbitrary counts you need
+  bit-position counting modulo 3, or a different approach entirely.
+- **Sieving with `int` overflow** in the `p * p` bound. Cast to `long`.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What does `x & (x - 1)` do?"** Clears the lowest set bit. It gives an
+   `O(popcount)` bit count and the power-of-two test
+   `x > 0 && (x & (x - 1)) == 0`.
+2. **"And `x & -x`?"** Isolates the lowest set bit, because `-x` is `~x + 1` in
+   two's complement. It is how Fenwick trees navigate and how you iterate set
+   bits.
+3. **"Why does XOR solve Single Number?"** `x ^ x` is 0 and `x ^ 0` is `x`, and
+   XOR is commutative, so every pair annihilates regardless of order. `O(n)` time
+   and `O(1)` space with no hash set.
+4. **"Find the two numbers appearing once."** XOR everything to get `a ^ b`,
+   isolate any differing bit with `xor & -xor`, partition by that bit, and XOR
+   each side.
+5. **"What if every other number appears three times?"** XOR no longer cancels.
+   Count each of the 32 bit positions modulo 3 and rebuild the answer, or track
+   two accumulators representing "seen once" and "seen twice".
+6. **"`>>` versus `>>>`?"** Arithmetic versus logical. `>>` copies the sign bit,
+   `>>>` fills with zeros. Use `>>>` whenever you are treating the value as bits
+   rather than as a number.
+7. **"Why does Java have `>>>` at all?"** There are no unsigned integer types, so
+   the unsigned behaviour is provided at the operator level instead. There is no
+   `<<<` because left shift has no sign ambiguity.
+8. **"What is `Math.abs(Integer.MIN_VALUE)`?"** `Integer.MIN_VALUE`. The negative
+   range is one wider than the positive, so negating it overflows to itself.
+9. **"How do you avoid overflow in a midpoint?"** `lo + (hi - lo) / 2` instead of
+   `(lo + hi) / 2`. This was a real bug in the JDK's binary search.
+10. **"Why is the sieve `O(n log log n)`?"** The inner loop runs `n / p` times
+    per prime, and the sum of the reciprocals of primes up to `n` grows like
+    `log log n`.
+11. **"Why does the sieve start marking at `p * p`?"** Every smaller multiple of
+    `p` has a factor below `p` and has already been marked by that factor.
+12. **"Why does Euclid's algorithm terminate?"** The second argument strictly
+    decreases and stays non-negative. It is `O(log min(a, b))` because the larger
+    value at least halves every two steps.
+13. **"Compute `a^b mod m` for a huge `b`."** Binary exponentiation, `O(log b)`,
+    squaring the base and consuming one exponent bit per iteration. Keep the
+    intermediates in `long`.
+14. **"The input is a stream of billions of integers and you need the one
+    appearing once."** XOR is perfect for exactly this — constant memory, one
+    pass, order-independent, and it can be merged across shards because XOR is
+    associative. For "distinct count" instead, that is a HyperLogLog sketch, not
+    an exact algorithm.
+15. **"How would you handle a set of 10,000 elements as a mask?"** `BitSet` or a
+    `long[]`, which keeps the set operations but loses the ability to use the
+    mask as an array index, so bitmask DP stops being viable.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Using `>>` where you needed `>>>`**, producing an infinite loop on negatives.
+- **Forgetting parentheses** around a bit expression compared with `==`, since
+  `&` binds looser than `==`.
+- **`1 << k` when `k` can be 31 or more.** Use `1L << k`.
+- **`x % 2 == 1`** for parity, which is false for negative odd numbers.
+- **Multiplying before dividing in `lcm`**, which overflows unnecessarily.
+- **Writing the XOR swap in real code.** It breaks when both arguments alias the
+  same variable and it is not faster.
+- **Reaching for bit tricks for readability-sensitive logic.** A named boolean is
+  better than a mask nobody can decode six months later.
+- **Assuming `Integer.MIN_VALUE` behaves like every other number** in anything
+  involving absolute value, negation, or division by `-1`.
+- **Sieving beyond what memory allows** instead of segmenting.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Single Number** — the XOR cancellation in its purest form.
+- **Number of 1 Bits** — Kernighan's loop, and the `>>>` trap on negative input.
+- **Counting Bits** — the DP recurrence built from a bit identity.
+- **Power of Two** — the one-line test, including the zero guard.
+- **Missing Number** — XOR against the indices, and the Gauss-sum alternative
+  with its overflow caveat.
+- **Reverse Bits** — a 32-step loop, then the divide-and-conquer swap.
+- **Hamming Distance** — XOR then count, composing two idioms.
+
+**Medium**
+
+- **Single Number II** — every element appears three times except one; bit
+  counting modulo 3.
+- **Single Number III** — two singles; partition on a differing bit.
+- **Sum of Two Integers** — addition as XOR plus carry.
+- **Subsets** — iterative bitmask enumeration, next to the
+  [backtracking](/dsa/pattern-10-backtracking) version.
+- **Maximum Product of Word Lengths** — a 26-bit character mask and the
+  disjointness test by AND.
+- **Bitwise AND of Numbers Range** — the answer is the common binary prefix, and
+  seeing why is the whole problem.
+- **Divide Two Integers** — repeated doubling, with the `Integer.MIN_VALUE`
+  overflow case the problem exists to test.
+- **Count Primes** — the sieve and the `p * p` starting point.
+- **Pow(x, n)** — fast exponentiation, with the negative-exponent edge case.
+
+**Hard**
+
+- **Maximum XOR of Two Numbers in an Array** — a binary trie plus greedy bit
+  choice, linking this pattern to [tries](/dsa/pattern-8-tries-prefix-trees).
+- **Partition to K Equal Sum Subsets** — bitmask DP over which elements are used.
+- **Shortest Path Visiting All Nodes** — BFS where the state is
+  `(node, visitedMask)`, the clearest demonstration of why a set needs to be an
+  integer.
+
+### Where this connects
+
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) —
+  bitmask DP, where `n` at most 20 lets a subset be an array index.
+- [Pattern 10 — Backtracking](/dsa/pattern-10-backtracking) — subset enumeration
+  by counting masks instead of recursing.
+- [Pattern 8 — Tries](/dsa/pattern-8-tries-prefix-trees) — the binary trie behind
+  maximum-XOR queries.
+- [Pattern 4 — Binary Search](/dsa/pattern-4-binary-search) — where the
+  overflow-safe midpoint actually matters.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — why an
+  `n` of 20 points at `2^n` and an `n` of 10 points at `n!`.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  `HashMap`'s hash spread is `h ^ (h >>> 16)`, which is this pattern doing real
+  work inside the JDK.

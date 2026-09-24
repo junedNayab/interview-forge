@@ -1,0 +1,385 @@
+---
+title: "Pattern 5 — Stack"
+topic: "dsa"
+order: 107
+difficulty: "medium"
+estimatedMinutes: 27
+tags: [stack, monotonic-stack, next-greater-element, histogram, expression-evaluation, arraydeque]
+format: "mdx"
+summary: "The stack as deferred decision-making: matching pairs, the monotonic stack invariant that makes next-greater-element O(n), Daily Temperatures and Largest Rectangle in Histogram with the sentinel trick, two-stack expression evaluation, iterative DFS ordering, and O(1) min-stack."
+---
+
+## Layer 1 — When you reach for this
+
+Most people learn a stack as a data structure and then wait for a problem to say
+"stack". It never does. The useful framing is behavioural rather than
+structural.
+
+> Reach for a stack when you meet an item you **cannot resolve yet**, and the
+> information that will resolve it arrives later. The stack holds the pending
+> items, and it holds them in exactly the right order: **the most recently
+> deferred item is the first one that the next piece of input can settle.**
+
+That last property is the reason a stack and not a queue. Nesting and locality
+both have last-in-first-out structure: the innermost open bracket is the first
+to close, and the nearest unresolved smaller element is the first to find its
+next greater element.
+
+Signals in the problem statement:
+
+- **"Valid parentheses", "balanced", "matching", "well-formed"** — anything with
+  open and close tokens, including tags and nested encodings.
+- **"Next greater element", "next smaller", "previous greater"**, and their
+  disguises: **"how many days until a warmer temperature"**, "the span of a
+  stock price", "how far can this element see".
+- **"Largest rectangle", "maximal rectangle", "trapping rain water"** — each
+  bar's answer depends on the nearest bar on each side that breaks a monotone
+  condition.
+- **"Evaluate the expression"**, "reverse Polish notation", "basic calculator",
+  "decode the nested string".
+- **"Undo", "backtrack", "the most recent"** — the LIFO semantics stated
+  outright.
+- **"Implement recursion iteratively"**, or a tree or graph traversal where
+  recursion depth is a stated risk.
+- **A designed structure with O(1) operations**, such as a min-stack or a queue
+  built from two stacks.
+
+Anti-signals:
+
+- **"The earliest", "first in, first out", "level by level", "shortest path in
+  an unweighted graph"** — all of those are queues. A stack gives you *a* path,
+  a queue gives you the *shortest* one.
+- **"The k largest so far"** needs a [heap](/dsa/pattern-9-heaps-priority-queue);
+  a stack cannot maintain order statistics.
+- **A window maximum at every position.** A monotonic **deque** is needed, not a
+  stack, because elements must also be evicted from the front as the window
+  moves. See [sliding window](/dsa/pattern-3-sliding-window).
+- **Matching that is not properly nested**, such as counting characters
+  regardless of order. A counter is enough, and a stack is over-engineering. For
+  single-bracket-type balance checks, an `int` counter is the better answer and
+  saying so is a point in your favour.
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant for matching problems
+
+> **The stack holds exactly the open tokens that have not yet been closed, in
+> the order they were opened.**
+
+Correctness is then two checks and a final condition: every closing token must
+match the top of the stack, the stack must be non-empty when a closing token
+arrives, and the stack must be empty at the end. Each of those three failures
+corresponds to a distinct malformed input, and naming all three is what gets the
+edge cases right the first time.
+
+```java
+Deque<Character> stack = new ArrayDeque<>();
+for (char c : s.toCharArray()) {
+    if (c == '(' ) stack.push(')');              // push what we EXPECT to see
+    else if (c == '[') stack.push(']');
+    else if (c == '{') stack.push('}');
+    else if (stack.isEmpty() || stack.pop() != c) return false;   // unmatched or wrong
+}
+return stack.isEmpty();                           // leftovers mean unclosed brackets
+```
+
+Pushing the expected closer rather than the opener removes the mapping table and
+collapses the comparison to one equality. Use `ArrayDeque`, not
+`java.util.Stack`: `Stack` extends `Vector`, so every operation is synchronised
+and it iterates bottom-to-top, which is the opposite of what you expect. That
+choice is itself a small interview signal, and the reasoning is in
+[the collections deep dive](/java/2-collections-framework-deep-dive).
+
+### The monotonic stack, which is the real content
+
+A monotonic stack maintains an ordering invariant on its contents, and that
+invariant is what makes a whole family of problems linear.
+
+> **The stack holds the indices of elements that are still waiting for an
+> answer, and their values are monotone from bottom to top.**
+
+For "next greater element", the stack is **decreasing**. Read the invariant
+backwards to see why it is the right one: if an element deeper in the stack were
+smaller than one above it, the deeper element would already have been answered
+by that shallower one, so it could not still be waiting. **Being on the stack
+and being unanswered are the same condition, and monotonicity is a consequence,
+not an extra rule.**
+
+```java
+// Daily Temperatures: answer[i] = days until a warmer temperature, or 0.
+int[] answer = new int[temps.length];
+Deque<Integer> stack = new ArrayDeque<>();          // INDICES, values decreasing
+for (int i = 0; i < temps.length; i++) {
+    while (!stack.isEmpty() && temps[stack.peek()] < temps[i]) {
+        int j = stack.pop();                         // i is j's answer
+        answer[j] = i - j;
+    }
+    stack.push(i);                                   // i is now waiting
+}
+return answer;                                       // anything left keeps its 0
+```
+
+**Why it is O(n) despite the nested `while`:** each index is pushed exactly once
+and popped at most once, so the total number of loop-body executions across the
+entire run is at most n. This is the same amortised argument as sliding window,
+and it is worth stating in those words.
+
+Four decisions define any monotonic-stack problem, and deciding them explicitly
+is faster than trying to recall the right variant:
+
+- **Increasing or decreasing?** Decreasing for next-greater; increasing for
+  next-smaller.
+- **Strict or non-strict comparison?** With duplicates, `<` versus `<=` decides
+  whether equal elements answer each other. For rectangle area it does not
+  change the final maximum; for "count distinct spans" it does.
+- **Indices or values?** Almost always indices, because distances and widths
+  need positions.
+- **What happens to what remains on the stack at the end?** Either it keeps a
+  default (no answer exists), or you drain it against a sentinel.
+
+### Worked example: Largest Rectangle in Histogram
+
+The hardest common application, and the one that shows the pattern is about
+reasoning rather than the data structure. For each bar, the largest rectangle
+with that bar as its height extends left until a strictly shorter bar and right
+until a strictly shorter bar. So every bar's answer is defined by its nearest
+smaller element on each side — two monotonic stack queries, which can be fused
+into one pass.
+
+The invariant: **the stack holds indices of bars in increasing height order, and
+each one's left boundary is the index below it in the stack.** When bar `i` is
+shorter than the top, the top's right boundary is `i`, so its rectangle is now
+fully determined and can be popped and measured.
+
+```java
+Deque<Integer> stack = new ArrayDeque<>();          // indices, heights increasing
+int best = 0;
+for (int i = 0; i <= heights.length; i++) {
+    int h = (i == heights.length) ? 0 : heights[i];  // SENTINEL: a zero-height bar at the end
+    while (!stack.isEmpty() && heights[stack.peek()] > h) {
+        int height = heights[stack.pop()];
+        // left boundary is the new top; if the stack is empty, the bar extends to index 0
+        int left = stack.isEmpty() ? -1 : stack.peek();
+        best = Math.max(best, height * (i - left - 1));
+    }
+    stack.push(i);
+}
+```
+
+Two tricks carry this solution:
+
+**The sentinel.** Running the loop one step past the end with a virtual bar of
+height zero forces every remaining bar to be popped and measured, because zero
+is shorter than everything. Without it you need a duplicated drain loop after
+the main loop, which is where the off-by-one bugs live. A sentinel converts a
+special case into an ordinary iteration, and that idea generalises far beyond
+this problem.
+
+**The width formula `i - left - 1`.** It is *not* `i - poppedIndex`. When the
+popped bar is the shortest so far, its rectangle extends left past the bars that
+were already popped, all the way to just after the element now on top of the
+stack. The `-1` is because `left` is the index of the blocking bar, which is not
+part of the rectangle. When the stack is empty, `left` is `-1` and the width
+becomes `i`, meaning the bar spans everything to the left. Getting this line
+right is the whole problem.
+
+Maximal Rectangle in a binary matrix is this algorithm applied to each row,
+where the histogram is the running column heights. Saying that reduces a hard
+problem to one you have already solved.
+
+### Expression evaluation and the two-stack method
+
+**Reverse Polish notation** needs one stack: push operands, and on an operator
+pop two, apply, push the result. The order matters — the first pop is the right
+operand. That is the entire algorithm, and it is why compilers convert to
+postfix.
+
+**Infix with precedence** needs two stacks: one for values and one for
+operators. Push operands. On an operator, first apply every stacked operator
+whose precedence is greater than or equal to the incoming one, then push the new
+operator. An opening bracket pushes a barrier; a closing bracket applies
+everything back to the barrier. At the end, apply what is left. The
+greater-than-or-equal test is what makes subtraction and division
+left-associative; using a strict comparison makes `8 - 3 - 2` evaluate to 7.
+
+Basic Calculator variants are simplified by noticing that **a sign can be folded
+into the number**, so you only ever add. Then a single stack holding the running
+result and the sign at each open bracket is enough. Decode String is the same
+shape with two stacks, one for repeat counts and one for partial strings.
+
+### Iterative DFS, and why the order differs
+
+A stack turns recursion into a loop, which matters when recursion depth is a
+risk. But **the naive iterative version does not produce the same order as the
+recursive one**, and the reason is a good thing to be able to explain.
+
+```java
+Deque<TreeNode> stack = new ArrayDeque<>();
+stack.push(root);
+while (!stack.isEmpty()) {
+    TreeNode node = stack.pop();
+    visit(node);
+    if (node.right != null) stack.push(node.right);   // RIGHT first...
+    if (node.left  != null) stack.push(node.left);    // ...so LEFT pops first
+}
+```
+
+Recursion visits left before right; a stack reverses whatever you push, so you
+must push right first to get preorder. Inorder is genuinely harder and needs an
+explicit "walk left pushing everything, then pop, visit, and move right" loop,
+because you must return to a node after its left subtree. Postorder is most
+easily obtained by running a modified preorder that visits root, right, left and
+then reversing the output. The details belong with
+[trees](/dsa/pattern-7-trees-dfs-bfs); the point here is that **the call stack
+is a stack, and converting between them is mechanical once you see what the
+recursion was storing.**
+
+### Min-stack in O(1)
+
+Support push, pop, top, and `getMin`, all in constant time. The insight is that
+**you cannot recompute the minimum on demand, so you must record it at push
+time**: store with each element the minimum of the stack at the moment it was
+pushed. Then popping automatically restores the previous minimum, because it was
+never overwritten.
+
+```java
+Deque<int[]> stack = new ArrayDeque<>();            // { value, minAtThisPoint }
+void push(int x) {
+    int min = stack.isEmpty() ? x : Math.min(x, stack.peek()[1]);
+    stack.push(new int[] { x, min });
+}
+int getMin() { return stack.peek()[1]; }
+```
+
+The follow-up is to do it with O(1) *extra* space per element in the common
+case: keep a second stack that is pushed only when the new value is less than or
+equal to the current minimum, and popped only when the popped value equals the
+current minimum. The equality case must use `<=` on push, or duplicated minima
+get lost.
+
+### Edge cases and traps
+
+- **Popping an empty stack.** Every `pop` or `peek` needs an emptiness guard
+  first; in Java `ArrayDeque.pop` throws rather than returning null.
+- **Not checking that the stack is empty at the end** of a matching problem.
+  `"((("` is unbalanced and the loop never notices.
+- **Pushing values instead of indices** in a monotonic stack, which makes
+  distances and widths uncomputable.
+- **The width formula** in the histogram, as described above.
+- **Forgetting the drain** after the main loop, or forgetting the sentinel that
+  makes it unnecessary.
+- **`null` in an `ArrayDeque`.** It forbids null elements, so a
+  null-terminated-sentinel style does not compile the way it might with
+  `LinkedList`.
+- **`java.util.Stack`'s iteration order**, which is bottom-to-top and the
+  opposite of `ArrayDeque`'s. If you ever iterate a stack, verify the direction.
+- **Operator associativity** in an infix evaluator, decided by whether the
+  precedence comparison is strict.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the complexity of a monotonic stack solution?"** O(n) time and
+   O(n) space: each index is pushed once and popped at most once.
+2. **"It has a nested `while` — how is that linear?"** The inner loop's total
+   iterations across the whole run are bounded by the number of pushes, which is
+   n. That is amortised analysis, not per-iteration.
+3. **"Why `ArrayDeque` and not `Stack`?"** `Stack` extends `Vector`, so it is
+   synchronised and slower, and it iterates in the opposite order. `ArrayDeque`
+   is the modern choice for both stack and queue.
+4. **"When is a stack wrong and a queue right?"** Whenever you need the oldest
+   pending item — level-order traversal and shortest path in an unweighted
+   graph.
+5. **"Valid Parentheses with only one bracket type — can you avoid the
+   stack?"** Yes: a counter, incremented and decremented, never allowed to go
+   negative, and zero at the end. O(1) space.
+6. **"Next Greater Element where the array is circular."** Iterate `2n` times
+   using `i % n`, and only push during the first pass. The second pass only
+   resolves leftovers.
+7. **"Can you do Largest Rectangle without a stack?"** Divide and conquer on the
+   minimum bar gives O(n log n) average but O(n²) worst case. The stack version
+   is O(n) in all cases.
+8. **"Explain the sentinel in the histogram solution."** A virtual zero-height
+   bar past the end forces every remaining bar to be popped, which removes the
+   duplicated drain loop and its off-by-one risks.
+9. **"Implement a queue using two stacks."** An input stack and an output stack;
+   move elements over only when the output stack is empty. Each element is moved
+   at most once, so dequeue is O(1) amortised even though a single call can be
+   O(n).
+10. **"Min-stack in O(1) — and what about O(1) extra space?"** Store the minimum
+    alongside each element, or keep a second stack of minima pushed on `<=`. The
+    genuinely O(1)-space trick stores an encoded difference from the current
+    minimum, which needs `long` to avoid overflow.
+11. **"Convert this recursion to iteration."** Replace the call stack with an
+    explicit stack of frames; push children in reverse to preserve order. Useful
+    when depth could exceed the JVM's stack.
+12. **"What's the max stack depth, and what happens if it's exceeded?"** O(n) in
+    the worst case, and in recursive form a `StackOverflowError` — which is a
+    real answer for a skewed tree or a linked list of a million nodes.
+13. **"Evaluate an infix expression with precedence and brackets."** Two stacks;
+    apply stacked operators of greater or equal precedence before pushing, and
+    treat an open bracket as a barrier.
+14. **"Sliding window maximum — is that a stack?"** No, a monotonic deque, since
+    you must also evict from the front as the window advances.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Peeking or popping without an emptiness check**, which throws rather than
+  returning null.
+- **Forgetting the final `stack.isEmpty()` check** in a matching problem.
+- **Storing values rather than indices** in a monotonic stack.
+- **`i - poppedIndex` as the rectangle width** instead of `i - left - 1`.
+- **Leaving unpopped elements unprocessed** because there is no sentinel and no
+  drain loop.
+- **Using `java.util.Stack`** and inheriting `Vector`'s synchronisation and
+  reversed iteration.
+- **Pushing `null` into an `ArrayDeque`**, which throws.
+- **Strict versus non-strict comparison** with duplicate values, which silently
+  changes the answer in counting problems.
+- **Operand order on a binary operator** — the first pop is the right operand,
+  which matters for subtraction and division.
+</Callout>
+
+### Problems to drill
+
+**Easy** — establish the two invariants.
+
+- **Valid Parentheses** — the matching invariant and all three failure modes.
+- **Min Stack** — recording state at push time rather than recomputing.
+- **Remove All Adjacent Duplicates in String** — the stack as a running
+  reduction.
+- **Implement Queue using Stacks** — amortised analysis in a design question.
+
+**Medium** — the monotonic stack.
+
+- **Daily Temperatures** — the canonical next-greater problem.
+- **Next Greater Element I and II** — the mapping version and the circular one.
+- **Evaluate Reverse Polish Notation** — one stack, and operand order.
+- **Decode String** — two stacks for nested repetition.
+- **Remove K Digits** — a monotonic stack used for greedy lexicographic
+  construction.
+
+**Hard**
+
+- **Largest Rectangle in Histogram** — the sentinel and the width formula.
+- **Maximal Rectangle** — the histogram algorithm applied per row.
+- **Basic Calculator** — brackets, unary minus, and precedence together.
+
+### Where this connects
+
+- [Sliding window](/dsa/pattern-3-sliding-window) — the monotonic deque, which
+  is this pattern with eviction at both ends.
+- [Trees, DFS and BFS](/dsa/pattern-7-trees-dfs-bfs) — iterative traversals, and
+  the call stack made explicit.
+- [Two pointers](/dsa/pattern-2-two-pointers) — the other solution to Trapping
+  Rain Water, at O(1) space.
+- [Backtracking](/dsa/pattern-10-backtracking) — recursion that is a stack of
+  decisions you undo.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  why `ArrayDeque` beats both `Stack` and `LinkedList`.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — the
+  amortised vocabulary you need for the "why is it O(n)" answer.

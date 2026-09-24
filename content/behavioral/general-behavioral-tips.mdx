@@ -1,0 +1,286 @@
+---
+title: "General Behavioral Tips"
+topic: "behavioral"
+order: 905
+difficulty: "medium"
+estimatedMinutes: 22
+tags: [behavioral, star, story-bank, failure, questions-to-ask, red-flags]
+format: "mdx"
+summary: "STAR with the 20/60/20 time split, the missing fifth element, the eight-story bank that covers almost every prompt, the red flags that get candidates rejected, and how to answer 'why are you leaving?' without grievance."
+---
+
+## What this round is actually assessing
+
+The behavioral round is not a personality test and the interviewer is not deciding
+whether you are pleasant. They are deciding something narrower and harder:
+*can this person be trusted with ambiguity, disagreement and failure?* Every
+question is a probe at one of those three.
+
+That framing explains a lot of otherwise confusing feedback. A candidate who was
+friendly, articulate and clearly competent gets rejected "on the behavioral" —
+and the real reason is that across forty-five minutes they never described a
+decision they owned, never named a mistake, and described every conflict as
+resolving itself.
+
+**At senior level, most rejections are behavioral rather than technical.** That
+is not a motivational line; it follows from how the loop is weighted. By the time
+you are being considered for a mid-to-senior backend role, the technical bar is
+being tested in three or four separate rounds and your DSA and design scores tend
+to cluster. The behavioral round is often the only place where the hiring
+committee gets evidence about ownership, and it is the round candidates prepare
+for last. If you have been rejected after strong coding rounds, this is the first
+place to look.
+
+It is also the most improvable round on the loop. Nobody gets appreciably better
+at dynamic programming in a week; you can get noticeably better at this in a
+week, because the failure modes are structural and the fixes are mechanical.
+
+## STAR, taught properly
+
+Everyone knows STAR: Situation, Task, Action, Result. Almost nobody uses it with
+the right proportions, and the proportions are the entire point.
+
+### The 20/60/20 split
+
+For a four-minute answer, aim for roughly:
+
+```
+Situation + Task   ~20%   (~45 seconds)  enough context to make the rest legible
+Action             ~60%   (~2.5 minutes) what YOU did, decision by decision
+Result             ~20%   (~45 seconds)  what changed, with numbers
+```
+
+**The most common failure in behavioral interviews is spending three minutes
+setting up the situation and thirty seconds on what you actually did.** It feels
+responsible while you are doing it — you are being thorough, you are making sure
+they understand the system. From the other side of the table it reads as someone
+who cannot distinguish between context and contribution, and it leaves the
+interviewer with a detailed picture of an architecture and no picture of you.
+
+The fix is to time yourself. Record a story on your phone, play it back with a
+stopwatch, and find the moment you first say what *you* did. If that moment is
+past the ninety-second mark, the setup is too long.
+
+The setup needs exactly the facts required to understand why the problem was
+hard. "A Spring Boot redirect service in front of Postgres, with Redis as a read
+cache, doing a few hundred requests a second" is enough. They do not need your
+team structure or the history of the project.
+
+### The fifth element nobody teaches
+
+Add **L for Learning** at the end: what you learned, and what you would do
+differently now.
+
+This is the highest-leverage addition you can make. A clean STAR answer proves
+you can execute; the learning coda proves you can reflect, which is what is
+being scored when someone is assessing seniority. It also pre-answers the
+follow-up the interviewer was about to ask.
+
+Keep it short and specific. Not "I learned the importance of monitoring," which
+is a fortune cookie. Closer to: "The real lesson was that I had no visibility
+into cache hit rate at all, so I couldn't have caught this from dashboards. Now
+the first thing I add to any cache is a hit-rate metric and an alert on it
+dropping."
+
+## "I" versus "we"
+
+Interviewers are assessing one person, and "we decided to move to a queue"
+contains no information about you. It is the most common way strong engineers
+accidentally erase themselves from their own stories.
+
+The instinct behind it is good — interviewers do notice candidates who claim
+suspicious amounts of credit, so do not overcorrect into "I redesigned the
+entire platform." The fix is to separate the two layers explicitly:
+
+> "The team decided to move the click tracking off the request path. My part was
+> the analysis that made the case — I instrumented the redirect endpoint, showed
+> that the synchronous insert was about 60% of p99, and wrote the proposal.
+> Another engineer built the consumer; I did the producer side and the backfill."
+
+That credits the team, is honest about scope, and still tells the interviewer
+exactly what you contributed. Scan your prepared stories for the word "we" and
+ask whether each sentence would still be true with "I" — and if not, add the
+sentence that says what your part was.
+
+## Quantify, and say when you are estimating
+
+"Reduced p99 latency from 800 ms to 120 ms" beats "made it much faster" by a wide
+margin, and not because interviewers love numbers. A number is evidence that you
+measured, which is evidence that you knew what you were changing and could tell
+whether it worked. "Much faster" is compatible with having changed something at
+random and felt good about it.
+
+Numbers worth having ready: latency at a named percentile before and after,
+throughput, error rate, database queries per request, data volume, and how long
+the work took.
+
+If you do not have real numbers — common for side projects and for work you did
+two years ago — **estimate out loud and label it as an estimate.** "I don't have
+the exact figure; from memory it was around 400 ms and came down to well under
+100, so roughly a 4x improvement." Interviewers are generally fine with
+estimates. They are not fine with discovering, two follow-ups later, that a
+confident number was invented.
+
+## Build a story bank, not a set of answers
+
+The mistake is preparing one answer per question. There are hundreds of possible
+behavioral questions and you will not cover them — but there are only about eight
+*kinds* of evidence an interviewer is collecting.
+
+Prepare **six to eight stories** that between them cover:
+
+1. **A hard technical problem you solved** — depth, debugging method, persistence.
+2. **A failure or mistake you owned** — accountability and correction.
+3. **A conflict or disagreement** — how you handle being wrong, and being right.
+4. **Influencing without authority** — persuading someone who did not report to you.
+5. **Learning something fast** — how you get up to speed under pressure.
+6. **Shipping under a deadline** — scoping, tradeoffs, what you cut.
+7. **Improving something nobody asked you to** — initiative and ownership.
+8. **Feedback you received and acted on** — coachability.
+
+The skill that makes a bank work is **re-framing**: the same underlying event,
+told with a different emphasis, answers several prompts. A story about finding a
+caching bug is a "hard technical problem" story if you emphasise the
+investigation, an "initiative" story if you emphasise that nobody asked you to
+look, and a "failure" story if you wrote the bug yourself and emphasise the
+correction. Write each story once, then annotate it with the three or four
+prompts it can serve.
+
+<Callout type="tip" title="Write them in one page each">
+For each story keep a single page with: two lines of situation, five or six
+bullets of action in order, the numbers, the learning, and a list of the
+follow-up questions you would ask if you were the interviewer. Rehearse from the
+bullets, never from a script — a memorised paragraph is audible and it collapses
+the moment someone interrupts it.
+</Callout>
+
+## How to talk about failure
+
+"Tell me about a time you failed" is where good candidates most often damage
+themselves, in one of two directions.
+
+The first is picking a fake failure — "I worked too hard on a project and it went
+over scope." Interviewers have heard this several hundred times. It reads as
+either a lack of self-awareness or an unwillingness to be honest, and both are
+worse than the actual failure would have been.
+
+The second is over-correcting into self-flagellation. Three minutes of "I should
+have known better, it was completely my fault" makes the interviewer
+uncomfortable and tells them nothing useful.
+
+The shape that works: pick a real failure with real consequences, state what went
+wrong in two sentences without hedging, and then **spend most of the answer on
+the correction and the systemic change.** The systemic change is the part that
+separates seniority from apology. "I added a test" is fine. "I added a test, and
+then I realised the reason the bug shipped was that our staging environment had
+no cache, so the entire class of cache-only bugs was invisible until production —
+so I got Redis added to staging" is a different answer entirely.
+
+Own the part that was yours. If a teammate contributed to the failure, you can
+mention it factually once, but the moment the answer becomes about their mistake,
+you have lost.
+
+## Red flags that get people rejected
+
+<Callout type="pitfall" title="What interviewers write down as a negative">
+- **Blaming others.** Any story where every problem was caused by another team,
+  a bad manager or unreasonable deadlines. One such story is context; three is a
+  pattern and the pattern is you.
+- **No specifics.** Answers that stay at the level of "we followed best practices
+  and improved the architecture." If an answer contains no system, no number and
+  no decision, it did not happen as far as the scorecard is concerned.
+- **No numbers.** Especially in performance and scale stories, where the absence
+  is conspicuous.
+- **Rambling with no structure.** Five minutes with no visible beginning, middle
+  or end. Interviewers stop taking notes and start waiting.
+- **Never mentioning a mistake.** A candidate whose every story ends in clean
+  success has either not done anything hard or is not being straight.
+- **Being unable to name a weakness.** "I'm a perfectionist" is a non-answer.
+  Name a real one plus what you are doing about it — "I'm weak on system design
+  at scale, which is why I've spent the last three months on it" is a genuinely
+  good answer if it is true.
+- **Badmouthing a current employer.** Even when justified. The interviewer
+  silently substitutes their own company into the sentence.
+- **Having no questions.** Ending with "no, I think you covered everything"
+  reads as indifference, whatever you actually feel.
+</Callout>
+
+## Questions to ask the interviewer
+
+You are asked for questions at the end of almost every round, and the questions
+you ask are scored — not formally, but they shape the interviewer's write-up.
+They reveal what you pay attention to. Vague questions ("what's the culture
+like?") reveal nothing. These four do real work:
+
+**"How does the team handle on-call and incidents?"** This tells them you have
+operated software in production rather than only written it, and it tells you
+something you genuinely need to know. Listen for whether there is a blameless
+postmortem process and whether the on-call rotation is sane.
+
+**"What does a good code review look like on this team?"** Signals that you care
+about how code gets to production, not just about writing it, and the answer
+tells you whether the team is collaborative or territorial.
+
+**"What is a recent hard technical decision the team made, and how was it made?"**
+The strongest of the four. It gets you a concrete story rather than a slogan,
+and it shows you are interested in engineering judgement and decision-making
+process. A team that cannot produce an answer is telling you something.
+
+**"What would make someone unsuccessful in this role in the first six months?"**
+Inverting the usual question gets far more honest answers than "what does success
+look like?" People will tell you the real failure modes of the team when you ask
+this way.
+
+Ask two or three, not all four, and actually listen to the answers — a follow-up
+question shows the first one was not a script.
+
+## "Why are you leaving?" and "why this company?"
+
+If you are moving from a services or consulting company to a product company,
+this pair is awkward in a specific way, and it comes up in the recruiter screen
+and again with the hiring manager. It is worth scripting more tightly than
+anything else here.
+
+The trap is that the honest answer often contains real grievance — repetitive
+work, no ownership, client-driven timelines, no say in architecture. All of that
+may be true. **None of it should be the subject of your answer, because an
+answer framed as escape invites the question of what you will say about this
+company in two years.**
+
+Reframe from what you are leaving to what you are moving toward, and be specific
+about the kind of work:
+
+> "I've spent three years building backend services, and what I've found I want
+> more of is owning a system over time rather than handing it over — being the
+> person who runs it, watches it degrade under load, and fixes the design.
+> That's mostly a product-company shape of work, which is why I'm looking."
+
+That is honest, it is not a complaint, and it names a real difference between the
+two environments that any interviewer will recognise as legitimate.
+
+For "why this company?", the requirement is evidence that you did more than
+apply to a list. You do not need to be a fan — you need one concrete, checkable
+reason: a specific product or scale problem, an engineering blog post you
+actually read, or a team whose problem domain overlaps with what you have been
+building. One specific reason outperforms three generic ones.
+
+Never lead with money. Compensation is a legitimate reason to change jobs and
+everybody knows it, but it belongs in the recruiter conversation about the offer,
+not in the answer about motivation. If asked directly whether compensation is a
+factor, "it's a factor, but it isn't the reason I'm talking to you specifically"
+is a fine answer.
+
+## How to practise this
+
+Reading this page changes nothing by itself. The gap between knowing STAR and
+producing a structured four-minute answer while nervous is entirely practice.
+
+Write your stories as one-page bullet outlines. Record yourself answering out
+loud, without notes, four minutes each. Play it back with a stopwatch and check
+three things: the 20/60/20 split, how many times you said "we" where you meant
+"I", and how many numbers you used. Then have someone ask two follow-ups on each
+one, because follow-ups are where under-prepared stories come apart.
+
+Then work through the four story lessons in this track, which build answers from
+your own project rather than from a template. Start with
+[the challenging bug](/behavioral/story-1-tell-me-about-a-challenging-bug-you-solved).

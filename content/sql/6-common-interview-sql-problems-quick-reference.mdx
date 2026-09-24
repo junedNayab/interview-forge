@@ -1,0 +1,504 @@
+---
+title: "6. Common Interview SQL Problems (Quick Reference)"
+topic: "sql"
+order: 706
+group: "Advanced SQL"
+difficulty: "hard"
+estimatedMinutes: 25
+tags: [sql, interview-problems, window-functions, gaps-and-islands, recursive-cte, median]
+format: "mdx"
+summary: "Twelve classic SQL interview problems worked end to end — the naive answer, the better answer, the follow-up the interviewer actually asks, and what your choice tells them about you."
+---
+
+Almost every SQL interview draws from the same dozen problems. What varies is
+not the problem but the follow-up, and that is where the interview is decided.
+Each problem below appears twice: the answer most candidates write, and the
+answer that survives being questioned.
+
+Use it as a rehearsal script: write the naive version from memory, then the
+better one, then say the follow-up out loud. If you cannot say why the better
+version is better, you do not have it.
+
+The schema throughout: `employees (id, name, dept_id, manager_id, salary,
+hire_date)`, `departments (id, name)`, `orders (id, customer_id, amount,
+created_at)`, `logins (user_id, login_date)`.
+
+---
+
+## Problem 1 — Nth highest salary
+
+**The problem.** Return the third-highest salary.
+
+**Naive.** `SELECT DISTINCT salary FROM employees ORDER BY salary DESC LIMIT 1
+OFFSET 2`. It works, but the `DISTINCT` does silent work most candidates cannot
+explain, and the form does not generalise across dialects.
+
+**Better.**
+
+```sql
+WITH ranked AS (
+    SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS rnk
+    FROM employees
+)
+SELECT DISTINCT salary FROM ranked WHERE rnk = 3;
+```
+
+**The follow-up.** *"What if two people tie for first place?"*
+
+This is the point of the question. With salaries 100, 100, 90, 80, the "third
+highest" is 80 under `DENSE_RANK` (three distinct values) and 90 under
+`ROW_NUMBER` (the literal third row). **The strong answer names the ambiguity
+before choosing**, then picks `DENSE_RANK`, since "third highest" normally means
+the third distinct value.
+
+**What it reveals.** Whether you know the ranking functions differ only on ties,
+and whether you notice under-specified requirements.
+
+---
+
+## Problem 2 — Employees earning more than their manager
+
+**The problem.** List employees whose salary exceeds their manager's.
+
+**Naive.** A correlated subquery per row:
+`e.salary > (SELECT m.salary FROM employees m WHERE m.id = e.manager_id)`.
+
+**Better.** A self join, one pass over each alias:
+
+```sql
+SELECT e.name AS employee, e.salary, m.name AS manager
+FROM employees e
+JOIN employees m ON m.id = e.manager_id
+WHERE e.salary > m.salary;
+```
+
+**The follow-up.** *"What happens to employees with no manager?"*
+
+Both versions drop them, which is correct here — the CEO cannot out-earn a
+manager who does not exist — but say so deliberately. If the question were "list
+every employee and flag those out-earning their manager", the inner join becomes
+a bug: you need `LEFT JOIN`, and `e.salary > NULL` is UNKNOWN rather than false,
+so the flag needs a `COALESCE` guard.
+
+**What it reveals.** That you think about NULL and about which rows a join
+drops, the same trap as in
+[1. JOINs](/sql/1-joins-know-them-cold).
+
+---
+
+## Problem 3 — Duplicate detection and removal
+
+**The problem.** Find duplicate emails, then delete duplicates keeping one row
+per email.
+
+**Naive.**
+
+```sql
+SELECT email, COUNT(*) FROM users GROUP BY email HAVING COUNT(*) > 1;
+
+DELETE FROM users
+WHERE id NOT IN (SELECT MIN(id) FROM users GROUP BY email);
+```
+
+The detection is fine. **The delete is dangerous**: if the subquery could
+produce a NULL, `NOT IN` deletes nothing at all, silently.
+
+**Better.**
+
+```sql
+-- ROW_NUMBER expresses any "which one do we keep" rule, not just MIN(id)
+WITH ranked AS (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY email
+                                  ORDER BY created_at DESC, id) AS rn
+    FROM users
+)
+DELETE FROM users WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
+```
+
+**The follow-up.** *"How do you stop them coming back?"*
+
+`CREATE UNIQUE INDEX ON users (lower(email))`. Deduplication is a one-off
+cleanup; the constraint is the actual fix. The `lower()` shows you know two
+spellings of one address are different strings to the database.
+
+**What it reveals.** Whether you reach for a constraint or keep writing cleanup
+scripts, and whether the `NOT IN` hazard is reflex.
+
+---
+
+## Problem 4 — Running total
+
+**The problem.** Show each order with the cumulative amount to date.
+
+**Naive.** A correlated subquery that re-scans per row, so O(n²):
+`(SELECT SUM(x.amount) FROM orders x WHERE x.created_at <= o.created_at)`.
+
+**Better.**
+
+```sql
+SELECT created_at, amount,
+       SUM(amount) OVER (ORDER BY created_at
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
+FROM orders;
+```
+
+**The follow-up.** *"You left out the frame in your first draft — what is the
+default, and does it matter here?"*
+
+The default with `ORDER BY` present is `RANGE BETWEEN UNBOUNDED PRECEDING AND
+CURRENT ROW`, which is why a running total works without a frame. It matters the
+moment two orders share a timestamp: `RANGE` gives both rows the same cumulative
+total because peers enter together, while `ROWS` gives each its own.
+
+**What it reveals.** The frame clause is the part of window functions almost
+nobody can discuss, so discussing it is a seniority signal.
+
+---
+
+## Problem 5 — Top N per group
+
+**The problem.** The three highest-paid employees in each department.
+
+**Naive.** A correlated count, quadratic and hard to read:
+`WHERE (SELECT COUNT(*) FROM employees x WHERE x.dept_id = e.dept_id AND
+x.salary > e.salary) < 3`.
+
+**Better.**
+
+```sql
+WITH ranked AS (
+    SELECT name, dept_id, salary,
+           ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC, id) AS rn
+    FROM employees
+)
+SELECT name, dept_id, salary FROM ranked WHERE rn <= 3;
+```
+
+**The follow-up.** *"Why the CTE — why not filter on `rn` in the `WHERE`?"*
+
+Because window functions are evaluated after `WHERE`, `GROUP BY` and `HAVING`,
+so when `WHERE` runs the value does not exist yet. It is impossible, not merely
+disallowed, and a CTE completes the pipeline so the outer query can filter the
+finished result.
+
+A second follow-up often arrives: *"is there a faster way on a big table?"* The
+window form ranks every row. Postgres has `DISTINCT ON (dept_id)` for top-1, and
+for top-N a `CROSS JOIN LATERAL` of
+`(SELECT ... WHERE e.dept_id = d.id ORDER BY salary DESC LIMIT 3)` over an index
+on `(dept_id, salary DESC)` reads three rows per department instead.
+
+**What it reveals.** Logical query order, and whether you know a second approach
+when the first one stops scaling.
+
+---
+
+## Problem 6 — Gaps and islands, and consecutive-day streaks
+
+**The problem.** Find users who logged in on three or more consecutive days.
+
+**Naive.** Three self joins on `login_date = login_date + 1`, which hard-codes
+the streak length.
+
+**Better.** Subtract a row number from the date: within a run of consecutive
+days both increase in lockstep, so the difference is constant and becomes the
+island's group key.
+
+```sql
+WITH grouped AS (
+    SELECT user_id, login_date,
+           login_date - (ROW_NUMBER() OVER (PARTITION BY user_id
+                                            ORDER BY login_date)) * INTERVAL '1 day' AS grp
+    FROM (SELECT DISTINCT user_id, login_date FROM logins) d
+)
+SELECT user_id, MIN(login_date) AS streak_start, COUNT(*) AS streak_length
+FROM grouped
+GROUP BY user_id, grp
+HAVING COUNT(*) >= 3;
+```
+
+Walk through it out loud: days 3, 4 and 5 get row numbers 1, 2 and 3, so all
+three produce the same `grp`, while day 8 after a gap gets row number 4 and a
+different `grp`, starting a new island.
+
+**The follow-up.** *"What if a user logs in twice on the same day?"*
+
+The duplicate consumes a row number and breaks the arithmetic, which the inner
+`SELECT DISTINCT` guards against. Interviewers add this to see whether you
+understood the trick or memorised it; `DENSE_RANK()` handles it natively.
+
+**What it reveals.** Gaps and islands is the canonical "have you actually used
+window functions" problem, and the pattern also solves consecutive-number runs.
+
+---
+
+## Problem 7 — Sessionisation with LAG
+
+**The problem.** Group a user's events into sessions, where a gap of more than
+thirty minutes starts a new session.
+
+**Naive.** Loop in application code. It works, and it is the wrong answer here.
+
+**Better.** Flag each row that starts a session, then take a running sum of
+those flags as the session number:
+
+```sql
+WITH flagged AS (
+    SELECT user_id, event_time,
+           CASE WHEN event_time - LAG(event_time) OVER w > INTERVAL '30 minutes'
+                  OR LAG(event_time) OVER w IS NULL
+                THEN 1 ELSE 0 END AS is_new_session
+    FROM events
+    WINDOW w AS (PARTITION BY user_id ORDER BY event_time)
+)
+SELECT user_id, event_time,
+       SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time) AS session_id
+FROM flagged;
+```
+
+**The follow-up.** *"Why two stages instead of one?"*
+
+Because you cannot nest a window function inside another in the same `SELECT`.
+The flag must be fully computed before anything can aggregate over it, so it
+needs its own stage — a constraint from the evaluation order.
+
+**What it reveals.** The "running sum of a boundary flag" idiom is the general
+solution to every grouping-by-condition problem.
+
+---
+
+## Problem 8 — Month-over-month growth
+
+**The problem.** Monthly revenue with the percentage change from the previous
+month.
+
+**Naive.** A self join of the monthly aggregate to itself on `month = month - 1`,
+which yields nothing for a month following a gap.
+
+**Better.**
+
+```sql
+WITH monthly AS (
+    SELECT DATE_TRUNC('month', created_at) AS month, SUM(amount) AS revenue
+    FROM orders GROUP BY 1
+)
+SELECT month, revenue,
+       LAG(revenue) OVER (ORDER BY month) AS prev_revenue,
+       ROUND(100.0 * (revenue - LAG(revenue) OVER (ORDER BY month))
+             / NULLIF(LAG(revenue) OVER (ORDER BY month), 0), 1) AS pct_change
+FROM monthly
+ORDER BY month;
+```
+
+**The follow-up.** *"What about a month with no orders?"*
+
+It is not a row in `monthly`, so `LAG` returns the month before *that* and the
+percentage silently compares across a gap. Generate a dense calendar and
+left-join:
+
+```sql
+SELECT g.month, COALESCE(m.revenue, 0) AS revenue
+FROM generate_series('2024-01-01'::date, '2024-12-01'::date, '1 month') AS g(month)
+LEFT JOIN monthly m ON m.month = g.month;
+```
+
+(MySQL has no `generate_series`; build the calendar with a recursive CTE or a
+numbers table.) The `NULLIF` above is the same instinct in miniature.
+
+**What it reveals.** That you think about missing data, not only rows that
+exist. Sparse data breaking a `LAG` is a real production bug.
+
+---
+
+## Problem 9 — Pivot: rows to columns
+
+**The problem.** One row per department, with a column per status counting
+orders.
+
+**Naive.** One correlated subquery per status in the `SELECT` list, each
+scanning the table again.
+
+**Better.** Conditional aggregation, a single pass:
+
+```sql
+SELECT dept_id,
+       COUNT(*) FILTER (WHERE status = 'NEW')      AS new_count,
+       COUNT(*) FILTER (WHERE status = 'SHIPPED')  AS shipped_count
+FROM orders GROUP BY dept_id;
+
+-- MySQL has no FILTER; SUM(CASE WHEN status = 'NEW' THEN 1 ELSE 0 END) is the
+-- portable form and means exactly the same thing.
+```
+
+**The follow-up.** *"What if the statuses are not known in advance?"*
+
+You cannot. SQL requires the result's column list at parse time, so a dynamic
+pivot needs generated SQL from the application, Postgres's `crosstab` from the
+`tablefunc` extension (which still needs a column definition), or pivoting in
+the presentation layer. **Saying plainly that it is not expressible in static
+SQL is the correct answer.**
+
+**What it reveals.** Knowing where SQL's expressive boundary is, and that `CASE`
+inside an aggregate is the portable idiom.
+
+---
+
+## Problem 10 — Median
+
+**The problem.** The median salary.
+
+**Naive.** `AVG` of the middle rows via `LIMIT` and `OFFSET` stitched together in
+application code — fiddly, and easy to get wrong on even counts.
+
+**Better.** Postgres has an ordered-set aggregate for exactly this:
+
+```sql
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY salary) AS median
+FROM employees;
+```
+
+The portable version, for MySQL or when asked to show the mechanism:
+
+```sql
+WITH ranked AS (
+    SELECT salary,
+           ROW_NUMBER() OVER (ORDER BY salary) AS rn,
+           COUNT(*)     OVER ()                AS total
+    FROM employees
+)
+SELECT AVG(salary) AS median
+FROM ranked
+WHERE rn IN ((total + 1) / 2, (total + 2) / 2);
+```
+
+The pair of expressions is the trick: for an odd count they collapse to one row,
+for an even count they pick the two middle rows.
+
+**The follow-up.** *"`PERCENTILE_CONT` versus `PERCENTILE_DISC`?"*
+
+`PERCENTILE_CONT` interpolates between the two middle values and can return a
+number that is not in the data; `PERCENTILE_DISC` returns an actual value from
+the set. For a median salary interpolation is what people mean; for a median
+customer ID it obviously is not.
+
+**What it reveals.** Whether you know your dialect's built-ins, and can fall
+back to first principles when they are missing.
+
+---
+
+## Problem 11 — Hierarchies with a recursive CTE
+
+**The problem.** Everyone in the reporting chain below a given manager, at any
+depth.
+
+**Naive.** A self join per level, fixing the depth at the number of joins.
+
+**Better.**
+
+```sql
+WITH RECURSIVE chain AS (
+    SELECT id, name, manager_id, 1 AS depth      -- anchor: the starting row
+    FROM employees WHERE id = 1
+  UNION ALL
+    SELECT e.id, e.name, e.manager_id, c.depth + 1   -- recursive: one level down
+    FROM employees e
+    JOIN chain c ON e.manager_id = c.id
+)
+SELECT * FROM chain ORDER BY depth, name;
+```
+
+The anchor runs once; the recursive term runs repeatedly against the rows the
+previous iteration produced, stopping when an iteration produces none.
+
+**The follow-up.** *"What if the data has a cycle?"*
+
+It runs until the server runs out of memory. Real hierarchies get corrupted, so
+guard it: carry a path array and exclude rows already in it, use Postgres 14's
+`CYCLE` clause, or cap the depth with a predicate on `c.depth`. Note that
+`UNION` instead of `UNION ALL` deduplicates each iteration, which is slower and
+still does not stop a cycle that revisits by a different path.
+
+**What it reveals.** Recursive CTEs separate people who have used SQL for
+structure from people who have only queried flat tables, and the cycle guard
+separates those who ran them in production.
+
+---
+
+## Problem 12 — Customers with no orders
+
+**The problem.** Every customer who has never placed an order.
+
+**Naive.** `WHERE c.id NOT IN (SELECT o.customer_id FROM orders o)`.
+
+**Better.**
+
+```sql
+SELECT * FROM customers c
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+```
+
+**The follow-up.** *"What is wrong with the first one?"*
+
+If one row in `orders` has a NULL `customer_id`, the naive query returns **zero
+rows**, silently. `x NOT IN (a, b, NULL)` expands to
+`x <> a AND x <> b AND x <> NULL`; the last term is UNKNOWN because nothing
+compares equal or unequal to NULL, `TRUE AND UNKNOWN` is UNKNOWN, and `WHERE`
+keeps only TRUE. `NOT EXISTS` asks a different question — did the subquery
+produce a row — and "no" is a definite answer.
+
+**What it reveals.** Three-valued logic, the most common correctness bug in SQL.
+
+---
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Second highest salary."** Name the tie ambiguity, then `DENSE_RANK` for
+   the second distinct value or `ROW_NUMBER` for the second row.
+2. **"Why is a correlated subquery slow?"** It re-executes per outer row; a join
+   or window function makes it one pass.
+3. **"Why must the ranking go in a CTE before you filter on it?"** Window
+   functions run after `WHERE`, so the column does not exist yet.
+4. **"What is the default window frame?"** `RANGE BETWEEN UNBOUNDED PRECEDING
+   AND CURRENT ROW` when `ORDER BY` is present, which is why running totals work
+   without a frame and why ties surprise.
+5. **"Explain the gaps-and-islands trick."** Date minus row number is constant
+   within a run, so it becomes a group key. Deduplicate first.
+6. **"How do you sessionise events?"** Flag a new session where the `LAG` gap
+   exceeds the threshold, then take a running `SUM` of the flag.
+7. **"How do you pivot rows into columns?"** Conditional aggregation with
+   `FILTER` or `CASE`. A dynamic column list is not expressible.
+8. **"Compute a median."** `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`, or
+   `ROW_NUMBER` with the `(n+1)/2` and `(n+2)/2` pair for portability.
+9. **"`PERCENTILE_CONT` versus `PERCENTILE_DISC`?"** Interpolated versus a value
+   present in the data.
+10. **"Write a recursive CTE."** Anchor term, `UNION ALL`, recursive term
+    joining back to the CTE name, and a cycle guard.
+11. **"Customers with no orders."** `NOT EXISTS`, plus why `NOT IN` returns zero
+    rows when the subquery contains a NULL.
+12. **"Delete duplicates keeping one."** `ROW_NUMBER` partitioned by the
+    duplicate key, then a unique index.
+13. **"Month-over-month growth with missing months."** Generate a dense calendar
+    and left-join, or `LAG` silently compares across the gap.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`ROW_NUMBER` with no tiebreaker** in a dedup delete. The survivor changes
+  between runs.
+- **`NOT IN` against a nullable column.**
+- **Forgetting `DISTINCT` before a gaps-and-islands row number.**
+- **Dividing by the previous value without `NULLIF`.**
+- **Assuming every month exists as a row.** Sparse data is normal and `LAG`
+  says nothing.
+- **Recursive CTEs with no cycle guard.**
+- **Reciting the solution without the reasoning.** The follow-up is scored.
+</Callout>
+
+### Where this connects
+
+- [1. JOINs](/sql/1-joins-know-them-cold) — anti-joins, three-valued logic and
+  the fan-out that inflates aggregates.
+- [2. Window functions](/sql/2-window-functions-the-senior-differentiator) — the
+  frame clause, ranking, `LAG`, and the query order behind the CTE requirement.
+- [3. Indexing and performance](/sql/3-indexing-performance) — the index that
+  makes top-N per group fast at scale.
+- [5. Query optimization checklist](/sql/5-query-optimization-checklist) —
+  checking that the elegant rewrite produced a better plan.
+- [SQL practice problems](/sql/practice-sql-problems) — more from scratch.

@@ -1,0 +1,399 @@
+---
+title: "2. Spring Data JPA / Hibernate"
+topic: "java"
+order: 602
+group: "Java + SQL"
+difficulty: "hard"
+estimatedMinutes: 24
+tags: [jpa, hibernate, persistence-context, dirty-checking, lazy-loading, cascade, entity-lifecycle]
+format: "mdx"
+summary: "The persistence context as identity map, first-level cache and unit of work at once — and how dirty checking, flush ordering, LazyInitializationException, getReference, cascades and entity equals/hashCode all fall out of that one object."
+---
+
+## Layer 1 — The mental model
+
+"An ORM that writes your SQL" predicts none of Hibernate's behaviour. It does
+not explain why changing a field persists without calling `save()`, why `save()`
+sometimes does nothing, why a query mid-method emits an `UPDATE` you did not ask
+for, or why the same code works inside a service method and throws outside it.
+One sentence explains all four:
+
+> Hibernate is not a SQL generator. It is a **write-behind cache of objects that
+> knows how to diff them.** The persistence context is that cache. Your entities
+> are not data you own — they are objects on loan from a unit of work that is
+> watching them, and which will decide on its own schedule what SQL your changes
+> imply.
+
+Once you hold that, the API stops looking arbitrary. The persistence context
+does three jobs at once, and nearly every question is about which of the three
+you are relying on:
+
+| Role | What it guarantees | Consequence you will be asked about |
+|---|---|---|
+| **Identity map** | One row, one object, per context | `find(1L) == find(1L)` is `true` by reference |
+| **First-level cache** | A repeat lookup by ID skips the database | Two `findById` calls, one `SELECT` |
+| **Unit of work** | Changes accumulate and flush together | Dirty checking, and SQL in an order you did not choose |
+
+And here is the layering, which interviewers do genuinely ask you to lay out:
+
+```
+  your code
+      |
+  Spring Data JPA   -- repository abstraction. Generates implementations
+      |                of interfaces. NOT part of the JPA spec.
+     JPA            -- the specification: EntityManager, JPQL, annotations.
+      |                jakarta.persistence.*  No behaviour of its own.
+  Hibernate         -- the implementation that actually does the work,
+      |                plus a large surface of its own beyond the spec.
+     JDBC           -- connections, statements, result sets.
+      |
+   database
+```
+
+The useful part is not the trivia. It is that **features people attribute to
+"JPA" are frequently Hibernate-only** — `@BatchSize`, subselect fetching, the
+statistics API — and knowing which is which separates "I use JPA" from "I know
+what I am standing on."
+
+---
+
+## Layer 2 — The mechanism
+
+### The persistence context, concretely
+
+There is one persistence context per transaction in a typical Spring
+application: a `Map` from an entity key (type plus identifier) to the managed
+instance, plus a second map holding a **snapshot** of each instance's field
+values as they were when it was loaded.
+
+That second map is where dirty checking comes from: at flush time Hibernate
+walks every managed entity and compares its current fields against the snapshot,
+and anything that differs becomes an `UPDATE`.
+
+Two consequences. **The persistence context roughly doubles the memory cost of
+every entity you load.** And flushing is `O(managed entities)`, not `O(changes)`,
+so a context bloated with read-only entities makes every flush slower even
+though nothing changed. Both are arguments for projections on read paths.
+
+### Entity lifecycle states
+
+```
+              new Employee()
+                    |
+                 TRANSIENT  -- a plain Java object. Hibernate has never seen it.
+                    |
+       persist()    |            ^
+                    v            |  (context closes, or evict/clear/detach)
+                 MANAGED  -------+
+                 ^      |
+      merge()    |      |  remove()
+                 |      v
+              DETACHED   REMOVED  -- scheduled for DELETE at flush; still
+                                     in the context until then.
+```
+
+The transitions that matter:
+
+`persist()` makes a transient instance managed. It does **not** necessarily
+issue an `INSERT` immediately — the write is queued until flush. The exception
+is `GenerationType.IDENTITY`, below.
+
+`merge()` is the one people misuse. It does not make your detached object
+managed. **It copies the detached object's state onto a managed instance and
+returns that instance**, loading it from the database first if necessary. Your
+original is still detached, so
+`employee.setName("x"); em.merge(employee); employee.setSalary(y);` loses the
+salary change. Always use the return value.
+
+`detach()` and `clear()` remove entities from the context and stop dirty
+checking — a legitimate technique in a batch job.
+
+<Callout type="note" title="Why IDENTITY generation quietly disables batch inserts">
+Hibernate cannot put an entity into the identity map without a key. With
+`GenerationType.IDENTITY` the key only exists after the database has run the
+`INSERT`, so **`persist()` must execute it immediately.** That defeats JDBC
+batching entirely: a thousand `persist()` calls become a thousand round trips no
+matter what your batch size says.
+
+`GenerationType.SEQUENCE` has no such problem, because Hibernate can ask the
+sequence for a value up front and queue the insert. With
+`@SequenceGenerator(allocationSize = 50)` it fetches fifty at a time, so a
+thousand inserts cost twenty sequence calls and one batched write.
+
+**This is the highest-value JPA performance fact that people do not know**, and
+it connects directly to [JDBC batching](/java/1-jdbc-fundamentals): batching the
+ORM has already made impossible cannot be recovered by a driver flag.
+
+</Callout>
+
+### Dirty checking, and why it surprises people
+
+```java
+@Transactional
+public void giveRaise(Long id) {
+    Employee e = repo.findById(id).orElseThrow();
+    e.setSalary(e.getSalary().multiply(new BigDecimal("1.1")));
+    // no save() call anywhere -- and the UPDATE still happens.
+}
+```
+
+This is intended behaviour, and also the thing that makes new users distrust the
+framework. `e` is managed; at commit Hibernate compares its fields against the
+snapshot, sees `salary` changed, and emits the `UPDATE`.
+
+Why it is *designed* rather than accidental: the unit of work exists so a
+business method can manipulate an object graph freely while the framework
+computes the minimal set of statements once, at the end, in an order that
+respects foreign keys. Writing on every setter would produce far more
+statements, in an order the database might reject.
+
+The flip side is the failure mode. **Any accidental mutation of a managed entity
+is a database write**, including a mapper that normalises a string on the way to
+a DTO. The defence is `@Transactional(readOnly = true)` on read paths, which
+puts Hibernate into `FlushMode.MANUAL` so dirty checking is skipped.
+
+### Flush timing, and the ordering rule
+
+A flush is where Hibernate translates queued state into SQL. It happens at three
+points:
+
+1. **Before the transaction commits.** Always.
+2. **Before a query whose results pending changes could affect.** This is
+   `FlushModeType.AUTO`, the default, and it is what makes read-your-own-writes
+   work inside a transaction.
+3. **When you call `flush()` explicitly** — when you want a generated value or a
+   constraint violation at a point you choose.
+
+`FlushModeType.COMMIT` suppresses the second. It is faster and almost always
+wrong, because a query can then return stale results that ignore changes you
+made moments earlier in the same method.
+
+The subtlety that produces real bugs: **within a flush, Hibernate does not
+execute statements in the order you wrote them.** It uses a fixed `ActionQueue`
+order — inserts, updates, collection operations, deletes. So this fails:
+
+```java
+// BROKEN: the INSERT runs before the DELETE, so the unique index is violated.
+repo.delete(existingWithEmail);
+repo.save(new User("same@email.com"));
+
+// FIXED: force the delete to reach the database first.
+repo.delete(existingWithEmail);
+repo.flush();
+repo.save(new User("same@email.com"));
+```
+
+That ordering is not a bug — it is what lets Hibernate insert parents before
+children without you thinking about it. But it means a manual `flush()` is
+occasionally correct rather than a code smell.
+
+### `save()` on a managed entity is a no-op
+
+Spring Data's `save()` calls `persist()` for a new entity and `merge()` for one
+that is not. If the entity is already managed, `merge()` finds the same instance
+and copies its state onto itself. Nothing happens. The `UPDATE` you eventually
+see came from dirty checking, not from your call.
+
+So the `save()` at the end of a transactional method is usually decorative —
+harmless, and reasonable when entities might be detached, but **the answer to
+"what does `save()` do to a managed entity" is "nothing, and the update still
+happens anyway."**
+
+There is a real trap behind it. `save()` on a *detached* entity with a non-null
+ID issues a `SELECT` then an `UPDATE`. Over a thousand detached entities that is
+two thousand statements, which is why bulk paths use `@Modifying` instead.
+
+### `getReference()` versus `find()`
+
+`find()` loads the row now, or returns `null`. `getReference()` returns a **lazy
+proxy** without touching the database; the `SELECT` fires the first time you
+touch a non-identifier property, and a missing row becomes an
+`EntityNotFoundException` at that later moment.
+
+The legitimate use is setting an association when you only have a foreign key:
+
+```java
+// Wasteful: loads the whole department to use its id as an FK.
+employee.setDepartment(em.find(Department.class, deptId));
+
+// Better: no SELECT at all -- the proxy's identifier is enough for the INSERT.
+employee.setDepartment(em.getReference(Department.class, deptId));
+```
+
+This works because Hibernate needs only the identifier to write the foreign key
+column, and the proxy knows its own identifier by construction. Two caveats: the
+proxy is not your entity class, so `getClass()` comparisons misbehave, and there
+is no existence check, so an invalid ID becomes a foreign key violation at flush.
+
+### `LazyInitializationException`, and the four fixes
+
+```java
+// BROKEN: the context closed when the transactional method returned.
+List<Department> depts = service.findAll();
+depts.get(0).getEmployees().size();   // LazyInitializationException
+```
+
+A lazy association is a proxy — a `PersistentBag` or `PersistentSet` for a
+collection, a generated subclass for a `@ManyToOne`. The proxy holds a reference
+to the session that created it, so once the persistence context closes the first
+access has nowhere to send its `SELECT` and throws.
+
+The four fixes with their trade-offs, because "use a fetch join" is only a third
+of an answer:
+
+**Fetch join.** `@Query("SELECT d FROM Department d JOIN FETCH d.employees")`.
+One query, graph initialised. The costs are that it breaks pagination and cannot
+fetch two collections at once — both covered in
+[the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question).
+
+**Entity graph.** `@EntityGraph(attributePaths = "employees")` on the repository
+method. Same effect, declarative, and it composes with derived query methods.
+
+**DTO projection.** Select exactly the columns you need into a record. The best
+answer for read paths and the one people reach for last: nothing is managed,
+nothing is dirty-checked, nothing can lazily load later.
+
+**Open Session In View.** Keep the session open for the whole request. Spring
+Boot enables it by default, which is why most people never meet this exception
+in development — and why their pool exhausts in production, since a connection
+is held for the whole request including serialisation. **OSIV converts a loud
+error into a silent performance problem**; see
+[transaction management](/java/5-transaction-management-transactional).
+
+<Callout type="note" title="A verified example from your url-shortener">
+In `src/main/java/com/urlshortener/entity/Url.java` the association is declared
+`@ManyToOne(fetch = FetchType.LAZY)` on the `user` field — an explicit override
+of JPA's `EAGER` default, which is the right call.
+
+In `src/main/java/com/urlshortener/service/AnalyticsService.java`, the method
+`getAnalytics` carries **no** `@Transactional` annotation and navigates
+`url.getUser().getId()` for its ownership check: a lazy association touched
+outside any transaction. `src/main/resources/application.yml` does not set
+`spring.jpa.open-in-view`, so it runs on the Spring Boot default of `true`.
+
+One honest nuance: Hibernate can often answer the *identifier* getter from an
+uninitialised proxy without a query, so that specific line may survive. Any
+other field of `user` would not, and this method is exactly the shape that
+starts throwing `LazyInitializationException` the day someone sets
+`open-in-view: false`.
+</Callout>
+
+### Cascades and `orphanRemoval`
+
+Cascade types propagate an operation from a parent to its associated entities:
+`PERSIST`, `MERGE`, `REMOVE`, `REFRESH`, `DETACH`, `ALL`. The mental model is
+ownership. **Cascade where the child genuinely cannot exist without the parent**
+— an order and its line items — and nowhere else. `CascadeType.ALL` on a
+`@ManyToOne` is almost always a bug: deleting one employee would delete their
+department and everyone in it, because the cascade runs from owned toward owner.
+
+`orphanRemoval = true` differs from `CascadeType.REMOVE` in a way that gets
+asked. `REMOVE` propagates a parent delete to the children. `orphanRemoval`
+deletes a child when it is **removed from the parent's collection** while the
+parent still exists. Both together is normal for a true composition.
+
+The related gotcha: Hibernate only notices a collection change if you mutate the
+collection it gave you. Replacing the field throws `A collection with
+cascade="all-delete-orphan" was no longer referenced`, because the instrumented
+collection was discarded. Mutate in place.
+
+### `equals` and `hashCode` on entities
+
+This is the hardest small problem in JPA, and the honest answer is that **the
+common pattern is imperfect rather than correct.**
+
+The difficulty is that an entity's identity changes: before `persist()` the ID
+is `null`, after it has a value. If `hashCode()` derives from the ID, an entity
+added to a `HashSet` while transient lands in one bucket and, once persisted,
+belongs in another — the same unreachable-key bug as in
+[the collections framework](/java/2-collections-framework-deep-dive), with a
+database in the middle.
+
+Using all business fields breaks as soon as one is mutable, and forces lazy
+associations to initialise just to compare. A **natural business key** is correct
+when one exists, and frequently one does not.
+
+The pattern most teams settle on: `equals()` compares the ID but returns `false`
+when either ID is `null`, and `hashCode()` returns a **constant**, so the hash
+never changes across a `persist()`. A constant hash collides every entity into
+one bucket — a real cost, but entity sets are small and correctness beats bucket
+distribution. Say the trade-off out loud; claiming a clean answer is the wrong
+move.
+
+Two notes. Lombok's `@Data` and `@EqualsAndHashCode` on an entity are dangerous
+because they include every field, pulling in lazy associations. And `getClass()`
+comparison breaks against proxies, so use `Hibernate.getClass()`.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"JPA, Hibernate, Spring Data JPA — what is each?"** A specification, the
+   implementation that does the work, and a repository abstraction on top. Only
+   the middle one has behaviour.
+2. **"What is the persistence context?"** A per-transaction map of managed
+   entities plus a snapshot of their loaded state — an identity map, a
+   first-level cache and a unit of work at the same time.
+3. **"Why did my entity update without calling `save()`?"** Dirty checking. At
+   flush, Hibernate diffs each managed entity against its snapshot.
+4. **"What does `save()` do to a managed entity?"** Nothing. `merge()` copies the
+   instance onto itself; the update comes from dirty checking regardless.
+5. **"When does a flush happen?"** Before commit, before a query that pending
+   changes could affect, and on an explicit `flush()`. The middle one is what
+   `FlushModeType.AUTO` means.
+6. **"Why did my delete-then-insert violate a unique constraint?"** A flush runs
+   inserts, then updates, then deletes. Force the order with `flush()`.
+7. **"`persist()` versus `merge()`?"** `persist()` makes a transient instance
+   managed. `merge()` copies a detached instance's state onto a managed one and
+   returns *that* — your original stays detached.
+8. **"`find()` versus `getReference()`?"** `find()` hits the database now;
+   `getReference()` returns a proxy and defers the `SELECT`, which is how you set
+   a foreign key without loading the row.
+9. **"What causes `LazyInitializationException`?"** Touching a lazy proxy after
+   the persistence context closed. Fix with a fetch join, an entity graph or a
+   DTO projection — not by re-enabling Open Session In View.
+10. **"Why is `GenerationType.IDENTITY` a performance problem?"** Hibernate needs
+    the key to manage the entity, so `persist()` must `INSERT` immediately, which
+    disables JDBC batching. `SEQUENCE` with an allocation size does not.
+11. **"`CascadeType.REMOVE` versus `orphanRemoval`?"** The first deletes children
+    with the parent; the second deletes a child removed from the collection while
+    the parent lives on.
+12. **"Why is `CascadeType.ALL` on `@ManyToOne` wrong?"** It cascades from the
+    owned side to the owner, so deleting an employee deletes the department.
+13. **"How do you write `equals`/`hashCode` for an entity?"** Business key if one
+    exists; otherwise ID-based `equals` returning false on null IDs plus a
+    constant `hashCode` — and say out loud that it is a trade-off.
+14. **"Why does `readOnly = true` matter here?"** `FlushMode.MANUAL`, so no dirty
+    checking. Flush cost scales with managed entities, not changes.
+15. **"When would you not use JPA at all?"** Bulk loads and reporting. An ORM is
+    a tool for transactional object manipulation, not a query engine.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Ignoring the return value of `merge()`** and mutating the detached original.
+- **Lombok's `@Data` on an entity**, which drags lazy associations into equality
+  and `toString()`.
+- **`@ManyToOne` left at its `EAGER` default** — a fetch you cannot turn off for
+  a specific query.
+- **`GenerationType.IDENTITY` in a bulk import path**, then wondering why the
+  batch size setting did nothing.
+- **Replacing a cascaded collection instead of mutating it.**
+- **Loading entities to compute an aggregate** instead of projecting.
+- **Mutating a managed entity in a "read" method**, which writes on commit.
+</Callout>
+
+### Where this connects
+
+- [Transaction management](/java/5-transaction-management-transactional) — what
+  opens and closes the persistence context, and why the thread matters.
+- [The N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) —
+  the most common consequence of lazy loading, and every fix with its cost.
+- [Spring Data repositories](/java/4-spring-data-repository) — the abstraction
+  above this one, and how its query methods are built.
+- [First-level and second-level cache](/java/6-hibernate-first-level-vs-second-level-cache)
+  — the persistence context viewed as a cache.
+- [JDBC fundamentals](/java/1-jdbc-fundamentals) — the statements and batching
+  this layer emits on your behalf.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  the `equals`/`hashCode` contract entity identity keeps violating.

@@ -1,0 +1,338 @@
+---
+title: "2. Collections Framework -- Deep Dive"
+topic: "java"
+order: 502
+group: "Core Java"
+difficulty: "medium"
+estimatedMinutes: 26
+tags: [collections, hashmap, equals-hashcode, concurrenthashmap, arraylist, performance]
+format: "mdx"
+summary: "HashMap from put() to treeification and why each design choice exists, the equals/hashCode contract as the bug it prevents, why ArrayList beats LinkedList even where Big-O says otherwise, and what ConcurrentHashMap actually guarantees."
+---
+
+## Layer 1 — The mental model
+
+`HashMap` is the single most-asked class in Java interviews, and the reason
+isn't that maps are hard. It's that **`HashMap` is a complete engineering case
+study in one class** — a hash function, collision resolution, dynamic resizing,
+a worst-case defence, and a thread-safety story, all in about a thousand lines
+you can read.
+
+So the question behind every HashMap question is the same one:
+
+> A hash map promises O(1) lookup. But an array has fixed size, hashing produces
+> collisions, and O(1) is an average. **What does the implementation do when the
+> promise is under threat?**
+
+Three threats, three mechanisms, and if you know which mechanism answers which
+threat you can reconstruct the whole class:
+
+| Threat | HashMap's answer |
+|---|---|
+| Two keys land in the same bucket | Chain them — a linked list in that bucket |
+| A bucket's chain gets long (bad hash, or an attack) | **Treeify** it into a red-black tree, O(n) → O(log n) |
+| The table fills up, so every bucket chains | **Resize** — double the array and redistribute |
+
+The second point deserves emphasis because it's the one people recite without
+knowing why it exists: treeification isn't a performance optimisation for normal
+use. Under a decent hash function, a bucket reaching 8 entries has a probability
+of about one in ten million. **Treeification is a security feature** — a defence
+against an attacker who deliberately submits keys that collide, turning your
+O(1) map into an O(n) list and your web server into a DoS victim. Saying that
+turns a memorised fact into a demonstrated understanding.
+
+---
+
+## Layer 2 — The mechanism
+
+### HashMap internals
+
+```java
+transient Node<K,V>[] table;   // bucket array, always a power of 2
+
+static class Node<K,V> {
+    final int hash;   // cached — recomputing hashCode() on every lookup
+    final K key;      // would be expensive, especially for Strings
+    V value;
+    Node<K,V> next;   // chain pointer
+}
+```
+
+**How `put()` works:**
+
+1. **Spread the hash:** `hash = h ^ (h >>> 16)`, where `h = key.hashCode()`.
+2. **Find the bucket:** `index = hash & (capacity - 1)`.
+3. Bucket empty → insert the node.
+4. Bucket occupied → walk the chain; if a node has the same hash **and**
+   `equals()` matches, replace the value.
+5. Otherwise append. If the chain reaches **8** *and* the table is at least
+   **64**, treeify that bucket.
+6. If `size > capacity × 0.75`, resize: double the table, redistribute.
+7. On removal, a tree shrinking to **6** untreeifies back to a list.
+
+Now the reasons, which is where the marks are.
+
+**Why `hash ^ (hash >>> 16)`?** Because the index is `hash & (capacity - 1)`,
+and for a small table that mask keeps only the **low** bits — a capacity of 16
+uses just the bottom 4. Any `hashCode` whose entropy lives in its high bits
+(very common: `Integer.hashCode()` is the value itself, so 16, 32, 48… all
+collide on a 16-bucket table) would collide catastrophically. XOR-ing the top 16
+bits down mixes that entropy into the range that's actually used. One cheap
+operation that rescues bad hash codes.
+
+**Why a power-of-two capacity?** So `hash % capacity` can be `hash & (capacity -
+1)`, which is a single AND instead of a division — division is one of the
+slowest integer operations, and this runs on every single lookup. The
+consequence is that `HashMap` silently rounds any capacity you ask for up to the
+next power of two.
+
+**Why 8 and 6, not 8 and 7?** The gap is **hysteresis**. If they were adjacent,
+a workload hovering at that size would convert back and forth on every
+insert and remove, paying the conversion cost repeatedly. The gap makes
+thrashing impossible.
+
+**Why does treeification need 64 table slots?** Below that, a long chain more
+likely means the table is too small rather than the hash is bad — so resizing is
+the better fix, and cheaper than building trees.
+
+**Why load factor 0.75?** The trade between space and collisions. Lower wastes
+memory, higher makes chains long. 0.75 is the empirical sweet spot, and the
+Javadoc notes it gives a good balance under a Poisson distribution of bucket
+occupancy.
+
+<Callout type="pitfall" title="The equals/hashCode contract, and the bug it prevents">
+The contract: **if `a.equals(b)` then `a.hashCode() == b.hashCode()`.** The
+reverse need not hold — unequal objects may share a hash code, and that's just a
+collision.
+
+Why it's mandatory: lookup goes to the bucket **first**. If two equal objects
+produce different hash codes, they land in different buckets and the map never
+compares them. Your key is in the map and `get()` returns null.
+
+```java
+class User {
+    String email;
+    @Override public boolean equals(Object o) { /* compares email */ }
+    // hashCode() NOT overridden → inherits identity hash
+}
+
+map.put(new User("a@b.com"), 1);
+map.get(new User("a@b.com"));   // → null. Equal, but different buckets.
+```
+
+The mutation version is subtler and worse, because it happens *after* insertion:
+
+```java
+Set<User> set = new HashSet<>();
+User u = new User("a@b.com");
+set.add(u);
+u.setEmail("c@d.com");       // hashCode changed — object is now in the wrong bucket
+set.contains(u);             // false. It's in the set, and unreachable.
+```
+
+**The rule that follows: keys must be immutable, or at least the fields used by
+`hashCode` must be.** This is the real argument for `record` keys and for why
+`String` caches its hash. If the interviewer asks "why are `String`s
+immutable?", this is one of the two good answers — the other being security of
+values already validated and handed to an API.
+</Callout>
+
+### Resizing, and the famous race
+
+Resizing allocates a table of double the size and redistributes every entry.
+Java 8 made this clever: because capacity doubles, an entry's new index is
+either **the same** or **old index + old capacity**, decided by a single bit —
+`(hash & oldCapacity) == 0`. No rehashing needed, just a split of each bucket
+into a "low" and "high" list.
+
+That rewrite also fixed a legendary bug. **Pre-Java 8, concurrent `put()` calls
+during a resize could produce a circular linked list**, after which a later
+`get()` would spin forever at 100% CPU. It was a classic production incident:
+a shared non-synchronised `HashMap` and a CPU pegged at 100% with no progress.
+
+<Callout type="note" title="Java 8 fixed the infinite loop, not the thread safety">
+The Java 8 implementation preserves order during a resize split and no longer
+forms cycles. **An unsynchronised `HashMap` is still not thread-safe** — you can
+still lose updates, read torn state, and see a `ConcurrentModificationException`.
+
+If an interviewer offers "Java 8 fixed HashMap's concurrency issues," correcting
+that precisely — it fixed *one specific catastrophic symptom*, not the
+underlying unsafety — is a strong moment.
+</Callout>
+
+Two practical notes on sizing: pass an expected capacity when you know it
+(`new HashMap<>(expected / 0.75f + 1)`), because each resize copies everything;
+and remember `HashMap` iteration order is **unspecified and changes on resize**,
+so any code that depends on it is a bug waiting for a different input size.
+
+### ConcurrentHashMap
+
+Java 7 used 16 segments, each separately locked — so 16-way concurrency, fixed.
+**Java 8 removed segments entirely**: writes `synchronized` on the *first node
+of the bucket*, so concurrency scales with the number of buckets, and empty
+buckets are filled with a lock-free CAS. Reads are almost entirely lock-free via
+`volatile` reads.
+
+What that buys and costs:
+
+- **Null keys and values are forbidden.** `HashMap` allows them, but in a
+  concurrent map a `null` from `get()` would be ambiguous — "absent" or "present
+  and null"? — and you cannot resolve the ambiguity with `containsKey()` because
+  another thread may act in between. Prohibiting null removes the race. This is
+  a great "why?" answer.
+- **`computeIfAbsent`, `merge`, `putIfAbsent` are atomic** per key. `get()`
+  followed by `put()` is not, and that's the bug people write.
+- **`size()` is an estimate** under concurrent modification, maintained by
+  distributed counters (the same idea as `LongAdder`).
+- **Iterators are weakly consistent**, not fail-fast: they never throw
+  `ConcurrentModificationException`, and may or may not reflect concurrent
+  updates. That's a different guarantee from `HashMap`'s fail-fast iterator,
+  which throws on a modCount change as a **best-effort bug detector** — never
+  something to rely on for correctness.
+
+Note also that `Collections.synchronizedMap()` is not equivalent: it wraps every
+method in one lock, so you get a single point of contention *and* compound
+operations still aren't atomic.
+
+### ArrayList vs LinkedList — why Big-O misleads
+
+| Operation | ArrayList | LinkedList |
+|---|---|---|
+| `get(i)` | **O(1)** | O(n) |
+| `add` at end | O(1) amortised | O(1) |
+| `add`/`remove` at index | O(n) | O(n) to find, O(1) to splice |
+| `add`/`remove` at head | O(n) | **O(1)** |
+| Memory per element | One reference | Reference + 2 pointers + object header |
+| Cache behaviour | **Contiguous — prefetcher loves it** | Pointer chase; likely a cache miss each hop |
+
+The table says LinkedList should win for head insertion and mid-list splicing.
+In practice **ArrayList wins almost always**, and the reason is the last row,
+not the Big-O. A `LinkedList` node is a separately allocated object, so
+traversal is a chain of cache misses at ~100 ns each, while `ArrayList` walks
+contiguous memory that the CPU prefetches. `System.arraycopy` moving 10,000
+elements is a single fast memory move; visiting 10,000 nodes is 10,000 potential
+misses.
+
+**Big-O counts operations; hardware charges for memory locality.** That sentence
+is the answer, and it generalises far beyond this class.
+
+The practical guidance: use `ArrayList` by default. If you need a queue or deque,
+use **`ArrayDeque`**, which beats `LinkedList` at its own game — it's a circular
+array, so it's O(1) at both ends *and* cache-friendly. `LinkedList`'s remaining
+niche is essentially "I hold an iterator and splice repeatedly," which is rare.
+
+### Choosing the right collection
+
+| Need | Use | Note |
+|---|---|---|
+| Indexed list | `ArrayList` | The default |
+| Queue / stack / deque | `ArrayDeque` | Not `Stack` (legacy, synchronised), not `LinkedList` |
+| Key → value | `HashMap` | O(1), no ordering |
+| Sorted keys, range queries | `TreeMap` | O(log n); `floorKey`, `ceilingKey`, `subMap` |
+| Insertion or access order | `LinkedHashMap` | Access-order mode is an LRU cache |
+| Uniqueness | `HashSet` | A `HashMap` with a dummy value |
+| Enum keys | `EnumMap` | Backed by an array — far faster than `HashMap` |
+| Concurrent map | `ConcurrentHashMap` | Not `Hashtable`, not `synchronizedMap` |
+| Concurrent list, read-heavy | `CopyOnWriteArrayList` | Every write copies — only for rare writes |
+| Producer/consumer handoff | `BlockingQueue` | `ArrayBlockingQueue` is **bounded** — use that |
+
+`LinkedHashMap` in access-order mode with `removeEldestEntry` is worth
+remembering verbatim, because "implement an LRU cache" is a standard question
+and this is the five-line answer:
+
+```java
+Map<K, V> lru = new LinkedHashMap<>(16, 0.75f, true) {   // true = access order
+    @Override protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > MAX_SIZE;
+    }
+};
+```
+
+See [the LRU cache practice problem](/java/practice-lru-cache) for the
+from-scratch version, which is what's usually actually wanted.
+
+### Immutable collections
+
+```java
+List<String> a = List.of("a", "b");        // Java 9+, immutable, rejects null
+List<String> b = List.copyOf(mutable);     // Java 10+, immutable snapshot
+List<String> c = Arrays.asList("a", "b");  // fixed-SIZE, but set() works
+List<String> d = Collections.unmodifiableList(backing);  // a VIEW
+```
+
+Two distinctions that get tested. `Arrays.asList` is **fixed-size, not
+immutable** — `add` throws but `set` succeeds, and it writes through to the
+backing array. And `Collections.unmodifiableList` is a **view**: mutating the
+original list changes what the "unmodifiable" one shows. `List.copyOf` is the
+one that's genuinely independent and immutable.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How does HashMap work?"** Hash, spread, mask to a bucket, chain on
+   collision, treeify a long chain, resize at 75% load.
+2. **"Why `hash ^ (hash >>> 16)`?"** The index uses only the low bits, so high-
+   bit entropy would be discarded. XOR mixes it down.
+3. **"Why is capacity a power of two?"** So the modulo becomes a bitwise AND.
+4. **"Why treeify at 8?"** It's a DoS defence, not an optimisation — with a good
+   hash the odds are about one in ten million. Untreeify at 6 gives hysteresis.
+5. **"Why does treeification also need 64 buckets?"** Below that, resizing is
+   the better and cheaper fix.
+6. **"What breaks if I override `equals` but not `hashCode`?"** Equal objects
+   hash to different buckets, so `get()` returns null for a key that's in the
+   map.
+7. **"Can a mutable object be a key?"** Only if the fields in `hashCode` never
+   change. Mutate one and the entry becomes unreachable.
+8. **"Why is `String` immutable?"** Safe hash caching and safe use as a key,
+   plus security for already-validated values.
+9. **"Is HashMap thread-safe after Java 8?"** No. Java 8 removed the resize
+   infinite loop; it did not make the class safe.
+10. **"How does ConcurrentHashMap achieve concurrency?"** Per-bucket
+    `synchronized` on the head node plus lock-free CAS for empty buckets — no
+    segments since Java 8.
+11. **"Why doesn't ConcurrentHashMap allow null?"** A null from `get()` would be
+    ambiguous, and you can't disambiguate with `containsKey` without a race.
+12. **"Fail-fast vs weakly consistent iterators?"** `HashMap` throws
+    `ConcurrentModificationException` on a modCount change — a bug detector, not
+    a guarantee. `ConcurrentHashMap` never throws and may reflect concurrent
+    updates.
+13. **"ArrayList or LinkedList?"** ArrayList, nearly always. Cache locality
+    beats the Big-O, and `ArrayDeque` covers the queue case better.
+14. **"Implement an LRU cache."** `LinkedHashMap` in access-order mode with
+    `removeEldestEntry` — then be ready to write it with a
+    `HashMap` plus a doubly-linked list.
+15. **"`Arrays.asList` vs `List.of`?"** Fixed-size and write-through versus
+    genuinely immutable.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Overriding `equals` without `hashCode`** (or one of them without the
+  other) — let the IDE or a `record` generate both.
+- **Mutating a key after inserting it.**
+- **Relying on `HashMap` iteration order.** It changes when the table resizes.
+- **`get()` then `put()` on a ConcurrentHashMap**, which is not atomic. Use
+  `computeIfAbsent` or `merge`.
+- **`Collections.synchronizedMap` for concurrency** — one global lock, and
+  compound operations still race.
+- **Unbounded queues between producer and consumer.** That's an
+  `OutOfMemoryError` waiting for a slow consumer.
+- **`CopyOnWriteArrayList` with frequent writes.** Every write copies the whole
+  array.
+- **Removing during a for-each loop** instead of using `Iterator.remove()` or
+  `removeIf`.
+</Callout>
+
+### Where this connects
+
+- [JVM internals](/java/1-jvm-internals) — collections are where most of your
+  allocation and retained heap lives.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — `ConcurrentHashMap`,
+  `LongAdder` and the memory model that makes lock-free reads work.
+- [LRU cache practice problem](/java/practice-lru-cache) — the from-scratch
+  implementation.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — eviction policies, one level up from `removeEldestEntry`.
+- [OS and concurrency](/cs-fundamentals/2-operating-systems-concurrency) — the
+  cache-locality argument, with the numbers behind it.

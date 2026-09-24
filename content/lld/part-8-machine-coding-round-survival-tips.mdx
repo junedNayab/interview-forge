@@ -1,0 +1,325 @@
+---
+title: "Part 8 — Machine-coding round survival tips"
+topic: "lld"
+order: 409
+difficulty: "medium"
+estimatedMinutes: 17
+tags: [lld, machine-coding, interview-technique, tactics, java]
+format: "mdx"
+summary: "Tactics for a timed 90–120 minute coding round — the first ten minutes, why a working skeleton beats a beautiful fragment, what to skip deliberately, and what evaluators actually grade."
+---
+
+## What this round is, and what wins it
+
+A machine-coding round gives you ninety to a hundred and twenty minutes, an
+empty project, a paragraph of requirements, and usually an evaluator who will
+either watch you or run your code afterwards. Sometimes they leave and come
+back; sometimes they sit silently; sometimes they interrupt with a new
+requirement at minute sixty specifically to see what breaks.
+
+> **The deliverable is a program that runs and demonstrates the requirements.**
+> Not a design document, not a complete system, not an elegant fragment. If the
+> evaluator cannot run it and see the core use case happen, most of the other
+> qualities do not get assessed at all.
+
+Everything below follows from that sentence.
+
+---
+
+## The first ten minutes decide the round
+
+**Minutes 0–5: read the problem twice and write the scope down.** Not in your
+head — in a comment at the top of your `main` class, or in a `README.md`. Two or
+three core use cases you will build, and three things you are explicitly not
+building. If an evaluator is present, say it out loud and get agreement. If not,
+the written note is your defence at review time: *"assumed in-memory, no
+persistence; no UI; payment processing out of scope."*
+
+Evaluators consistently report that the candidates who scope explicitly finish,
+and the ones who do not, do not.
+
+**Minutes 5–10: get the project compiling and running with a `main` that prints
+one line.** Before any design. A build you have not run is a risk you are
+carrying, and discovering a Gradle or Maven problem at minute eighty has ended
+more rounds than bad design has.
+
+```
+src/main/java/lld/
+  Main.java          // the driver and demo — write this FIRST, even empty
+  model/             // entities and value types
+  service/           // the coordinator
+  strategy/          // the interfaces on the axes of change
+```
+
+That is the whole structure. Do not build a six-module layered architecture; you
+are not going to fill it.
+
+<Callout type="tip" title="Set up fast, then never touch setup again">
+Use whatever you are fastest in. A plain `javac`-and-`java` project with no
+build tool is completely acceptable and occasionally the right call. If you use
+Gradle or Maven, have a skeleton memorised — dependencies for JUnit only, and
+nothing else.
+
+Do not spend ten minutes adding Lombok, a logging framework, or Spring. Every
+dependency is a risk to the build and none of them are being graded. `record`,
+`enum` and `System.out.println` are enough.
+</Callout>
+
+---
+
+## The central tactic: a working skeleton first
+
+This is the tip that changes outcomes more than any other.
+
+**Build a thin vertical slice that runs end to end, then thicken it.** For a
+parking lot: a lot with one hardcoded floor, one spot, one vehicle type, and a
+`main` that parks a car and prints the ticket. Fifteen minutes. It will be ugly.
+Run it.
+
+Now you have something to submit at every subsequent moment. Everything after
+that point is improvement on a working base rather than progress toward a
+first working moment.
+
+The alternative — designing the full class hierarchy, writing all fifteen
+classes, and running it for the first time at minute eighty — is how candidates
+end up with a beautiful design that does not compile. **A compiling, running,
+partial solution scores dramatically higher than a complete design that has
+never executed**, because the first one demonstrates every quality being graded
+and the second demonstrates none of them.
+
+The order to thicken in:
+
+1. Skeleton runs end to end for one use case. (15 min)
+2. The real entity model, with enums and records. (15 min)
+3. The interfaces on the axes of change, plus one implementation each. (20 min)
+4. The second core use case — unpark, checkout, undo. (15 min)
+5. Edge cases and one or two meaningful tests. (15 min)
+6. A `main` that demonstrates everything, and a short `README`. (10 min)
+
+Run the program after every step. Never let the build stay broken for more than
+a few minutes.
+
+---
+
+## Decisions that save you time
+
+**In-memory unless persistence was explicitly requested.** A `HashMap` field is
+the expected answer. Put it behind a repository interface — that costs you four
+lines and pre-answers "what if we needed a database?" with *"one new
+implementation of this interface; nothing else changes."*
+
+**No UI. Ever.** Unless the problem statement says the word "UI", building one
+is a way to spend forty minutes on the least-graded thing in the round. Your
+`main` method is the interface.
+
+**Hardcode the `main` as a driver and a demo.** This is not a shortcut you
+should feel bad about; it is the deliverable. Make it read like a story:
+
+```java
+public static void main(String[] args) {
+    System.out.println("=== Parking lot demo ===");
+
+    ParkingLot lot = buildLot();                       // hardcoded fixture
+
+    System.out.println("-- car arrives --");
+    Ticket t1 = lot.park(new Vehicle("KA-01-AA-1111", VehicleType.CAR));
+    System.out.println("issued " + t1.ticketId() + " for spot " + t1.spotId());
+
+    System.out.println("-- second car, lot now full --");
+    try {
+        lot.park(new Vehicle("KA-01-BB-2222", VehicleType.CAR));
+    } catch (NoSpotAvailableException e) {
+        System.out.println("rejected as expected: " + e.getMessage());
+    }
+
+    System.out.println("-- first car exits after 2 hours --");
+    System.out.println("fee = " + lot.unpark(t1.ticketId(),
+                                             t1.entryTime().plus(Duration.ofHours(2))));
+}
+```
+
+An evaluator running that sees the happy path, the failure path and the pricing
+in one screen of output. It takes eight minutes to write and it is the single
+most legible artefact you produce.
+
+**Write the interface before its implementations.** It takes thirty seconds and
+it forces you to decide what a component *is* before getting lost in how it
+works. It is also visible evidence of intent for whoever reads the code later.
+
+**Keep the package structure shallow.** Four packages is plenty. If one package
+saves you time, use one package — and say so in the README: *"kept everything in
+one package for speed; in real code this would split into model, service and
+strategy."* Naming the shortcut converts it from sloppiness into a judgement
+call.
+
+**Let Java do the typing for you.**
+
+```java
+// A record replaces about forty lines: fields, constructor, getters,
+// equals, hashCode, toString — and it is immutable, which is free thread safety.
+public record Ticket(String id, Vehicle vehicle, String spotId, Instant entryTime) { }
+
+// An enum replaces a class hierarchy when the behaviour is small, and it gives
+// you exhaustive switches the compiler checks.
+public enum SpotType {
+    COMPACT, LARGE, ELECTRIC;
+    public boolean fits(VehicleType v) { ... }
+}
+
+// Java 21 sealed interfaces, if the set really is closed:
+public sealed interface Command permits Park, Unpark, Status { }
+```
+
+`record` and `enum` are the two highest-leverage features in a timed round.
+Every entity that is a fact rather than a thing with a lifecycle should be a
+record.
+
+**Use exceptions rather than null or sentinel returns.** Throwing a
+`NoSpotAvailableException` is clearer than returning null, takes the same time,
+and demonstrates that you thought about the failure case.
+`Optional` is right for "legitimately absent"; exceptions are right for "this
+should not happen".
+
+---
+
+## Tests: a few meaningful ones beat none and beat many
+
+Most candidates write zero tests and explain that they ran out of time. A few
+write twenty trivial getter tests. Both score poorly.
+
+Write three to five tests that each assert something a bug would actually
+break:
+
+- The core happy path end to end, so the evaluator sees the system works.
+- One boundary: the lot is full, the item is out of stock, the balance is
+  insufficient.
+- The invariant the design exists to protect — for a shared resource, that means
+  the concurrency test:
+
+```java
+@Test void exactlyOneThreadClaimsTheLastSpot() throws Exception {
+    var spot = new ParkingSpot("S1", SpotType.COMPACT, 1, 1);
+    var start = new CountDownLatch(1);
+    var winners = new AtomicInteger();
+
+    Runnable attempt = () -> {
+        try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        if (spot.tryOccupy(new Vehicle("KA-01", VehicleType.CAR))) winners.incrementAndGet();
+    };
+
+    var a = new Thread(attempt); var b = new Thread(attempt);
+    a.start(); b.start(); start.countDown(); a.join(); b.join();
+
+    assertEquals(1, winners.get());
+}
+```
+
+That one test says more about you than fifteen others. If you genuinely have no
+time, write the test *names* as empty methods with a comment describing what
+each would assert. It takes ninety seconds and it demonstrates you know what
+needs testing, which is most of the signal.
+
+---
+
+## Handling the clock
+
+**Check the time at the halfway mark.** If the core use case does not run yet,
+stop designing and make it run. Cut a spot type, cut a strategy, hardcode a
+value. A working narrow thing beats a broken wide thing.
+
+**When you are nearly out of time, stub deliberately and say so in the code:**
+
+```java
+/**
+ * TODO: mirror of park() — release the spot, then delegate the fee to the
+ * pricing strategy. Left as a stub for time; the design supports it with no
+ * structural change.
+ */
+public Money unpark(String ticketId, Instant exitTime) {
+    throw new UnsupportedOperationException("not implemented — see javadoc");
+}
+```
+
+A stub with the intent written down reads as prioritisation. An unexplained
+missing method reads as running out of ability. Same code, entirely different
+signal.
+
+**Spend the last five minutes on a `README`**, not on one more feature. Four
+short sections: what is implemented, what is deliberately out of scope,
+assumptions, and how to run it. If an evaluator reviews your submission
+asynchronously — which is common — this is the only chance you have to explain
+your reasoning, and it is where you claim credit for the decisions that are not
+visible in the code.
+
+**If a new requirement arrives at minute sixty**, that is the real test. Do not
+panic and do not start rewriting. Say what you are going to change and why:
+*"that's a new pricing rule, so it's a new `PricingStrategy` implementation and
+one line in `main` — nothing else changes."* Then do it. The whole design
+existed for this moment.
+
+---
+
+## What evaluators actually grade
+
+Most machine-coding rubrics are some version of this, roughly in weight order:
+
+| What they check | What earns it |
+|---|---|
+| **It runs** | A `main` that demonstrates the core use cases without being edited |
+| **Requirements met** | The two or three things you agreed to build actually work |
+| **Clear responsibilities** | Each class's job is statable in one sentence; no God class |
+| **Extensibility** | Interfaces on the axes of change; a new rule is a new file |
+| **Naming and readability** | `tryOccupy`, not `doIt`. Specific exceptions, not `RuntimeException` |
+| **Edge cases** | Full lot, invalid ticket, duplicate exit — handled, not crashed |
+| **Concurrency** | If state is shared, it is protected, and you can explain the choice |
+| **Tests** | A few meaningful ones, or at minimum the names of the ones you would write |
+
+Three things are *not* on that list and candidates over-invest in all of them:
+the number of design patterns used, the depth of the package hierarchy, and
+completeness of features beyond the agreed scope.
+
+<Callout type="pitfall" title="The ways this round is usually lost">
+- **Nothing runs at the end.** The most common failure by a wide margin, and it
+  is entirely preventable by getting a skeleton running in the first fifteen
+  minutes.
+- **A God class.** One `Manager` with every method is the fastest way to write
+  the program and the fastest way to fail the extensibility question. Split by
+  who owns the data.
+- **Gold-plating the model.** Eight entity classes with full validation and no
+  working use case. Model only what the agreed use cases need.
+- **Building a UI or wiring a database nobody asked for.** Pure time
+  destruction, graded at zero.
+- **Fighting the build tool.** Test the build in minute five. Prefer the setup
+  you are fastest in over the one that looks professional.
+- **Silence.** If an evaluator is present, narrate. If not, write your reasoning
+  in comments and the README. Unexplained good decisions score as luck.
+- **`double` for money.** It will be noticed. Integer minor units or
+  `BigDecimal`.
+- **Leaving the last five minutes unused for the README.** You have made twenty
+  decisions and documented none of them.
+</Callout>
+
+<Callout type="tip" title="A checklist for the last ten minutes">
+1. Does it compile and run from a clean state?
+2. Does `main` demonstrate every requirement you agreed to?
+3. Is there any class you cannot describe in one sentence?
+4. Is any shared mutable state unprotected?
+5. Is there at least one meaningful test, or the names of the tests you would
+   write?
+6. Is there a README naming what is out of scope and why?
+
+Six checks, five minutes. They are worth more than a seventh feature.
+</Callout>
+
+### Where this connects
+
+- [Part 4 — how to drive an LLD round](/lld/part-4-how-to-drive-an-lld-interview-the-method)
+  — the same method for the shorter discussion-style round.
+- [Part 5 — the parking lot](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — the design these tactics are applied to, including the `main` driver.
+- [Part 7 — the four-week plan](/lld/part-7-your-4-week-lld-plan-youre-a-beginner-so-build)
+  — where the timed mock that rehearses all of this belongs.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — so the concurrency
+  row on the rubric is a real answer rather than the word "synchronized".
+- [Part 6 — practice problems](/lld/part-6-practice-problems-beginner-advanced)
+  — run three of these under a timer before the real thing.

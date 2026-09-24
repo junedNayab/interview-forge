@@ -1,0 +1,411 @@
+---
+title: "Pattern 7 — Trees (DFS & BFS)"
+topic: "dsa"
+order: 109
+difficulty: "medium"
+estimatedMinutes: 27
+tags: [trees, dfs, bfs, binary-search-tree, recursion, level-order, lca, serialization]
+format: "mdx"
+summary: "What each DFS order is actually for, the level-size trick in BFS, the return-value-versus-global decision that solves diameter and max path sum in one pass, BST validation by bounds rather than by parent comparison, LCA in both flavours, and the O(h) space answer."
+---
+
+## Layer 1 — When you reach for this
+
+Trees are the highest-frequency topic in the whole catalogue, and the reason is
+that they reward a single skill: expressing a problem as "what do I need from my
+children, and what do I return to my parent?" Once you can phrase a tree problem
+that way, the code is usually six lines.
+
+> **A tree is defined recursively, so recursion is not a technique here, it is a
+> transcription.** A binary tree is a node plus two binary trees. Any question
+> about a tree is therefore a question about a node plus the same question about
+> two smaller trees, and the whole job is identifying what the smaller answer
+> needs to be.
+
+Signals, which in this pattern are less about phrasing and more about shape:
+
+- **Anything with `root`, `left`, and `right`** in the signature.
+- **"Depth", "height", "path from root to leaf", "does a path sum to X",
+  "subtree"** — DFS, because the question is about a vertical relationship.
+- **"Level", "level order", "by rows", "right side view", "zigzag", "minimum
+  depth", "the shallowest"** — BFS, because the question is about horizontal
+  slices. Minimum depth in particular is a BFS question, since BFS can stop at
+  the first leaf while DFS must explore everything.
+- **"Binary search tree", "sorted order", "k-th smallest", "validate"** — the
+  BST property, and almost always an inorder traversal.
+- **"Lowest common ancestor", "distance between two nodes"** — postorder, where
+  the answer is assembled from below.
+- **"Serialize", "reconstruct from traversals", "clone"** — preorder, because
+  preorder emits the root before its subtrees, which is exactly what a rebuilder
+  needs.
+
+Anti-signals:
+
+- **A graph with cycles or multiple parents.** The tree templates recurse
+  without a visited set and will loop forever. See
+  [graphs](/dsa/pattern-11-graphs-bfs-dfs-union-find).
+- **"Shortest path with weights"**, which is Dijkstra, not BFS.
+- **A trie problem.** It is a tree, but the pattern is prefix-driven; see
+  [tries](/dsa/pattern-8-tries-prefix-trees).
+- **The tree is a heap** and the question is about extremes rather than
+  structure — that is [heaps](/dsa/pattern-9-heaps-priority-queue).
+
+---
+
+## Layer 2 — The mechanism
+
+### The invariant
+
+> **When the recursive call on a subtree returns, that subtree is fully and
+> correctly processed, and it has told me exactly the one thing I asked it
+> for.**
+
+That trust is what makes recursion tractable: you never trace the call stack in
+your head, you only decide the contract. Two questions define any tree
+recursion, and answering them out loud is the single most effective habit in
+this pattern:
+
+1. **What does this function return to its parent?**
+2. **What does a node do with what its children returned?**
+
+Plus the base case, which for trees is almost always "a null node returns the
+identity value": zero for height, true for validity, negative infinity or null
+for a maximum.
+
+### The three DFS orders, and what each is for
+
+They differ only in where you place the work relative to the two recursive
+calls, but each one exists because it makes a different class of problem
+trivial.
+
+**Preorder — root, left, right.** The root is emitted before anything below it.
+That is precisely what a reconstructor needs, because to build a node you must
+create it before you can attach its children. **Preorder is the serialization
+and copying order.** Serialize and Deserialize Binary Tree, Construct Tree from
+Preorder and Inorder, and Flatten Binary Tree to Linked List are all preorder.
+
+**Inorder — left, root, right.** For a binary search tree, **inorder produces
+the values in sorted order**, and this is the single most useful fact about
+trees in interviews. It immediately gives you: validation (the sequence must be
+strictly increasing), the k-th smallest element (stop after k emissions), the
+minimum absolute difference between any two nodes (adjacent in the inorder
+sequence), and the two swapped nodes in Recover Binary Search Tree (the
+inversions in the sequence).
+
+**Postorder — left, right, root.** The children are finished before the parent
+runs. Use it whenever the node's answer is a **function of its children's
+answers**: height, size, whether a subtree is balanced, whether a subtree is a
+valid BST, the sum of a subtree, and deletion, where you must free the children
+before the parent. **If your recursive function needs values from below, it is
+postorder, whether or not anyone calls it that.**
+
+```java
+int height(TreeNode node) {
+    if (node == null) return 0;                              // base: identity value
+    int left  = height(node.left);                           // ask the children...
+    int right = height(node.right);
+    return 1 + Math.max(left, right);                        // ...then combine. Postorder.
+}
+```
+
+### BFS and the level-size trick
+
+BFS uses a queue, and the one thing that makes it useful for interview questions
+is capturing the level boundary. **Record `queue.size()` before the inner loop
+and consume exactly that many nodes** — those are precisely the nodes of the
+current level, because everything added during the loop belongs to the next
+one.
+
+```java
+List<List<Integer>> levels = new ArrayList<>();
+if (root == null) return levels;
+Deque<TreeNode> queue = new ArrayDeque<>();
+queue.add(root);
+while (!queue.isEmpty()) {
+    int size = queue.size();                 // freeze the level boundary BEFORE adding children
+    List<Integer> level = new ArrayList<>();
+    for (int i = 0; i < size; i++) {
+        TreeNode node = queue.poll();
+        level.add(node.val);
+        if (node.left  != null) queue.add(node.left);
+        if (node.right != null) queue.add(node.right);
+    }
+    levels.add(level);
+}
+```
+
+Every level-flavoured variant is a two-line edit of this. Right Side View takes
+the last element of each level. Zigzag reverses alternate levels, or adds to the
+front of a deque. Average of Levels divides the sum by `size`. Minimum Depth
+returns the level index of the first node with no children.
+
+Complexity is O(n) time for both DFS and BFS, since every node is visited once.
+Space is where they differ, and it is a favourite question: **DFS uses O(h)
+stack space, which is O(log n) for a balanced tree and O(n) for a degenerate
+one; BFS uses O(w) where w is the maximum width, which for a complete tree is
+about n/2.** So DFS is the memory-efficient choice on a balanced tree and BFS on
+a deep, narrow one. Use `ArrayDeque` rather than `LinkedList` for the queue, for
+the reasons in
+[the collections deep dive](/java/2-collections-framework-deep-dive).
+
+### The return-value versus global decision
+
+This is the idea that unlocks the medium and hard tree problems, and it is
+rarely taught explicitly.
+
+Some problems ask about a quantity that is **not** the thing a node can usefully
+report to its parent. Diameter is the example. The longest path through the
+whole tree may bend at some node, going down the left subtree and back up and
+down the right. But a parent cannot use a bent path — it can only extend a
+**straight downward** path. So the two quantities are different:
+
+- What the parent needs: the **height** of this subtree, a straight path.
+- What the problem wants: the **best bent path**, which is a candidate answer at
+  every node.
+
+> **The resolution is to return one thing and record another.** The function
+> returns the height; alongside it, a field or an array cell tracks the best
+> bent path seen anywhere. One postorder pass, O(n), no repeated work.
+
+```java
+private int best = 0;
+
+private int height(TreeNode node) {
+    if (node == null) return 0;
+    int left  = height(node.left);
+    int right = height(node.right);
+    best = Math.max(best, left + right);   // RECORD: the bent path through this node
+    return 1 + Math.max(left, right);      // RETURN: what the parent can actually use
+}
+```
+
+Once you see this shape you have solved a family at once:
+
+- **Diameter of Binary Tree** — as above.
+- **Binary Tree Maximum Path Sum** — return the best straight downward sum,
+  clamped at zero so a negative subtree is simply not taken; record
+  `node.val + left + right` as the bent candidate.
+- **Balanced Binary Tree** — return the height, record a boolean, and the naive
+  version that calls `height()` inside `isBalanced()` is O(n²) while this one is
+  O(n). That comparison is a standard follow-up.
+- **Longest Univalue Path**, **House Robber III**, and most "best subtree"
+  questions.
+
+The alternative to a mutable field is to return a small record or an `int[]` of
+two values, which is cleaner functionally and avoids the field-reset problem if
+the method is called twice. Mention the trade; either is acceptable.
+
+### BST properties and why parent-child checks fail
+
+A binary search tree requires that **every** node in the left subtree is less
+than the node, not merely the immediate left child. The common wrong solution
+compares each node only with its children, which accepts this tree:
+
+```
+      5
+     / \
+    1   7
+       / \
+      4   8      <- 4 is less than 5 but sits in the right subtree
+```
+
+Every local comparison passes; the tree is invalid. **The fix is to carry the
+interval of legal values downward**, which is the correct framing of the BST
+property.
+
+```java
+boolean valid(TreeNode node, Long low, Long high) {
+    if (node == null) return true;                      // empty trees are valid
+    if (node.val <= low || node.val >= high) return false;
+    return valid(node.left,  low, (long) node.val)      // left subtree tightens the upper bound
+        && valid(node.right, (long) node.val, high);    // right subtree tightens the lower bound
+}
+// call with Long.MIN_VALUE and Long.MAX_VALUE
+```
+
+Use `long` bounds, or a tree containing `Integer.MIN_VALUE` as a leaf fails
+against an `Integer.MIN_VALUE` sentinel — a genuinely common test case. The
+alternative solution is an inorder traversal checking that each value exceeds
+the previous one, which is equally correct and arguably a better answer because
+it demonstrates the inorder property.
+
+### LCA: the BST version and the general one
+
+**In a BST**, the values navigate for you. If both targets are less than the
+current node, the ancestor is on the left; if both are greater, it is on the
+right; **the moment they split, or one equals the current node, you are at the
+lowest common ancestor.** It is O(h) and needs no recursion.
+
+```java
+while (root != null) {
+    if (p.val < root.val && q.val < root.val)      root = root.left;
+    else if (p.val > root.val && q.val > root.val) root = root.right;
+    else return root;                              // the split point
+}
+```
+
+**In a general binary tree** there is no ordering, so you must search. The
+postorder formulation is elegant: return the node itself if it is `p` or `q`,
+otherwise recurse both sides. If both sides return non-null, this node is the
+split point and therefore the answer; if only one does, pass it up.
+
+```java
+TreeNode lca(TreeNode root, TreeNode p, TreeNode q) {
+    if (root == null || root == p || root == q) return root;
+    TreeNode left  = lca(root.left,  p, q);
+    TreeNode right = lca(root.right, p, q);
+    if (left != null && right != null) return root;     // p and q are on opposite sides
+    return (left != null) ? left : right;               // both are below one side, or neither
+}
+```
+
+It is O(n) and it assumes both nodes exist in the tree. If that is not
+guaranteed, you need a second pass to confirm presence, and saying so
+unprompted is a good signal.
+
+### Serialization
+
+Preorder with explicit null markers is the standard answer, and the null markers
+are what make it work: **a preorder sequence alone is ambiguous, but a preorder
+sequence with nulls uniquely determines the tree**, because every recursion knows
+exactly where each subtree ends.
+
+```java
+void serialize(TreeNode node, StringBuilder sb) {
+    if (node == null) { sb.append("#,"); return; }       // the marker is essential
+    sb.append(node.val).append(',');
+    serialize(node.left, sb);
+    serialize(node.right, sb);
+}
+// deserialize consumes tokens in the same order, recursing on "#" as null
+```
+
+The related classic is reconstruction from two traversals. **Preorder plus
+inorder determines a binary tree; postorder plus inorder does too; preorder plus
+postorder does not** (it is ambiguous for nodes with a single child). Preorder
+gives you the root, inorder tells you how many nodes are in the left subtree,
+and a hash map from value to inorder index turns the repeated search into O(1),
+making the whole build O(n) instead of O(n²).
+
+### Edge cases and traps
+
+- **A null root.** Every method needs its base case first.
+- **A single node**, which is simultaneously root and leaf, and breaks
+  leaf-counting logic that assumes a parent.
+- **A skewed tree**, which makes recursion O(n) deep and can overflow the stack
+  at around ten thousand nodes. Say this when asked about robustness.
+- **Confusing "leaf" with "node having one child"** in depth problems. Minimum
+  Depth must not report 1 for a root with a single child chain below it.
+- **Integer bounds in BST validation**, as described.
+- **Negative values in path-sum problems.** Clamping a subtree contribution at
+  zero is correct for Maximum Path Sum; blindly summing is not.
+- **Reusing a mutable field across calls** without resetting it.
+- **Modifying the tree while traversing it**, which invalidates the recursion's
+  assumptions.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"What's the time complexity?"** O(n) for both DFS and BFS; every node is
+   visited exactly once.
+2. **"What's the space complexity?"** DFS is O(h) for the call stack: O(log n)
+   balanced, O(n) skewed. BFS is O(w) for the queue, which is about n/2 for a
+   complete tree.
+3. **"Which is better, DFS or BFS?"** DFS for path and subtree questions and for
+   memory on balanced trees; BFS for level questions and for minimum depth,
+   where it can stop at the first leaf.
+4. **"Why does inorder give sorted order in a BST?"** Because the invariant is
+   left subtree, then node, then right subtree, and inorder visits in exactly
+   that order.
+5. **"Find the k-th smallest in a BST."** Inorder with a counter, stopping at k:
+   O(h + k). If the query is repeated, augment each node with its subtree size
+   for O(h) per query.
+6. **"Why doesn't comparing each node with its children validate a BST?"** Local
+   comparisons miss violations against a distant ancestor. Carry bounds down, or
+   check that the inorder sequence is strictly increasing.
+7. **"How do you compute the diameter in one pass?"** Return the height and
+   record the best bent path in a field; the two quantities are different, which
+   is why one is returned and the other is recorded.
+8. **"What's the naive complexity of the balanced-tree check, and why?"** O(n²),
+   because calling `height()` at every node recomputes the same subtrees. Fold
+   the check into a single postorder pass for O(n).
+9. **"LCA in a BST versus a general tree."** O(h) by navigation using the
+   values, versus O(n) by postorder search for the split point.
+10. **"Serialize and deserialize."** Preorder with null markers; the markers are
+    what make the encoding unambiguous.
+11. **"Can you reconstruct a tree from preorder and postorder?"** Not uniquely —
+    a node with a single child is ambiguous. Preorder plus inorder, or postorder
+    plus inorder, both work.
+12. **"What if the tree is too deep for recursion?"** Convert to an explicit
+    stack, or use Morris traversal for O(1) space, which threads temporary links
+    to the inorder predecessor and removes them on the way back.
+13. **"What if the tree doesn't fit in memory?"** Store it as a B-tree on disk,
+    where the branching factor is chosen to match the page size, and traverse by
+    page. That is how database indexes work.
+14. **"How do you do this iteratively?"** A stack for DFS, pushing the right
+    child first so the left pops first; inorder needs the explicit "descend left,
+    pop, visit, go right" loop. With parent pointers, LCA also becomes iterative
+    — it is the linked-list intersection problem on the paths to the root.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Missing the null base case**, which is a `NullPointerException` on the first
+  leaf.
+- **Validating a BST with parent-child comparisons only.**
+- **`Integer.MIN_VALUE` or `MAX_VALUE` as BST sentinels** instead of `long`
+  bounds.
+- **Calling `height()` inside another traversal**, turning an O(n) problem into
+  O(n²).
+- **Reporting minimum depth as 1** for a root with exactly one child.
+- **Forgetting to freeze `queue.size()`** before the level loop, so levels bleed
+  into each other.
+- **Not clamping negative subtree sums** in Maximum Path Sum.
+- **A mutable result field that is never reset** between invocations.
+- **`LinkedList` as the BFS queue** where `ArrayDeque` is faster.
+- **Assuming both nodes exist** in the general LCA problem.
+</Callout>
+
+### Problems to drill
+
+**Easy** — build the recursive reflex.
+
+- **Maximum Depth of Binary Tree** — the postorder shape in its simplest form.
+- **Binary Tree Level Order Traversal** — the level-size trick.
+- **Balanced Binary Tree** — the O(n²) trap and its one-pass fix.
+
+**Medium** — where the pattern is genuinely tested.
+
+- **Validate Binary Search Tree** — bounds, and why local checks fail.
+- **Kth Smallest Element in a BST** — the inorder property, applied.
+- **Binary Tree Right Side View** — BFS with a per-level selection.
+- **Construct Binary Tree from Preorder and Inorder Traversal** — the index map
+  that keeps it O(n).
+- **Lowest Common Ancestor of a Binary Tree** — the postorder split point.
+- **Diameter of Binary Tree** — the return-versus-record decision.
+
+**Hard**
+
+- **Binary Tree Maximum Path Sum** — return-versus-record with negative
+  clamping.
+- **Serialize and Deserialize Binary Tree** — null markers and unambiguous
+  encoding.
+- **Recover Binary Search Tree** — finding the two inversions in the inorder
+  sequence, in O(1) space with Morris traversal.
+
+### Where this connects
+
+- [Binary search](/dsa/pattern-4-binary-search) — a BST is binary search made
+  structural, and validation uses the same bounds reasoning.
+- [Graphs, BFS, DFS and union-find](/dsa/pattern-11-graphs-bfs-dfs-union-find) —
+  the general case, where a visited set replaces the tree's guarantee of no
+  cycles.
+- [Tries](/dsa/pattern-8-tries-prefix-trees) — a tree specialised for prefixes.
+- [Stacks](/dsa/pattern-5-stack) — iterative traversal, and the call stack made
+  explicit.
+- [Backtracking](/dsa/pattern-10-backtracking) — the recursion tree is a tree,
+  and path problems already are backtracking.
+- [Collections framework deep dive](/java/2-collections-framework-deep-dive) —
+  `TreeMap` is a red-black tree, which is where BST balancing shows up in real
+  Java.

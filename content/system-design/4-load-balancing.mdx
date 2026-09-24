@@ -1,0 +1,281 @@
+---
+title: "4. Load balancing"
+topic: "system-design"
+order: 204
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 18
+tags: [load-balancing, l4, l7, health-checks, dns, failover]
+format: "mdx"
+summary: "L4 vs L7 and why the choice is about what you can see, the algorithms and when each one is wrong, health checks that lie, and how a load balancer turns a small failure into an outage."
+---
+
+## Layer 1 — The mental model
+
+A load balancer looks like a traffic splitter. It's more useful to think of it
+as the thing that decides **which failures your users experience**:
+
+> A load balancer is a health-aware router. Spreading traffic is the easy half;
+> the valuable half is knowing which servers are actually able to serve it — and
+> that half is where the interesting failures live.
+
+That reframe is what separates the two-minute answer from the twenty-minute one,
+because every hard question here is really about health:
+
+- A health check that only pings TCP will happily route traffic to a server
+  whose database connection pool is exhausted.
+- A health check that's too aggressive will evict a server that had one slow
+  second, moving its load onto the others and making *them* slow — which evicts
+  them too. That's a **cascading failure**, and the load balancer caused it.
+
+Two other framings worth holding:
+
+**The load balancer is your failure domain boundary.** Everything behind it can
+be treated as fungible, which is why "make your servers stateless" is really
+advice about making load balancing possible.
+
+**And it must not be a single point of failure**, which is a small puzzle: you
+can't load balance the load balancer with a load balancer. The answer is a layer
+below — DNS, anycast, or a floating IP.
+
+---
+
+## Layer 2 — The mechanism
+
+### L4 vs L7 — the difference is what it can see
+
+This is the question that gets asked, so know it as a mechanism, not a
+definition.
+
+**Layer 4 (transport)** operates on TCP/UDP. It sees IP addresses and ports,
+**not** the content. It picks a backend when the connection opens and forwards
+packets for the life of that connection.
+
+```
+Client ──TCP──► L4 LB ──TCP──► Server
+        (one connection, rewritten and forwarded; payload never inspected)
+```
+
+**Layer 7 (application)** terminates the connection, parses the HTTP request,
+and makes a decision using the URL, headers, cookies or method — then opens its
+own connection to the backend.
+
+```
+Client ──TLS/HTTP──► L7 LB ──HTTP──► Server
+                      (reads the request; /api/* → service A)
+```
+
+| | L4 | L7 |
+|---|---|---|
+| Sees | IP, port | URL, headers, cookies, body |
+| Routing | By connection | By content |
+| Performance | Very high, low latency | More CPU (parse + TLS terminate) |
+| TLS | Passes through | **Terminates** — can inspect, needs the cert |
+| Retries a failed request | No — the connection is already established | **Yes** — it holds the request and can resend it |
+| AWS | NLB | ALB |
+
+The two consequences that matter most in a design discussion:
+
+**Only L7 can retry.** Because it holds the parsed request, an L7 balancer can
+send it to a different backend when one fails. An L4 balancer has already handed
+the packets over. That makes L7 meaningfully better for availability on
+idempotent requests.
+
+**L7 terminates TLS**, which is where you centralise certificates, and also the
+only way it can read a header to route on. If you need true end-to-end
+encryption to the backend, you want L4 pass-through and you give up
+content-based routing. Naming that trade-off is a strong signal.
+
+For [the chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger),
+note the wrinkle: WebSocket starts as HTTP (so L7 can route the upgrade) but
+then becomes a long-lived connection that mostly behaves like L4. That's why
+connection-aware balancing matters there.
+
+### Algorithms, and when each is wrong
+
+| Algorithm | How | Right when | Wrong when |
+|---|---|---|---|
+| **Round robin** | Next server in order | Uniform requests, uniform servers | Requests vary in cost — a server gets three expensive ones in a row |
+| **Weighted round robin** | Proportional to capacity | Mixed instance sizes | Same cost-variance problem |
+| **Least connections** | Fewest in-flight | **Variable request duration** — the good default | A just-restarted server has zero connections and gets flooded |
+| **Least response time** | Fewest connections × latency | Latency-sensitive services | A server failing *fast* looks like a server that's fast |
+| **IP hash** | `hash(client IP)` → server | Sticky sessions without cookies | Corporate NATs put thousands of users on one server |
+| **Consistent hashing** | Hash onto a ring | Cache locality behind the LB | Still can't fix a single hot key |
+| **Random (two choices)** | Pick 2 at random, take the less loaded | Huge fleets — near-optimal, no global state | — |
+
+Two of these are worth extra attention because they're the ones with the
+counter-intuitive failure.
+
+**Least response time can select for failure.** A server that returns HTTP 500
+in 2 ms has the best response time in the fleet, so the algorithm sends it more
+traffic. This is the classic argument for combining latency-based routing with
+error-rate-aware health checks.
+
+**"Power of two random choices"** is the genuinely interesting one and a good
+thing to know by name. Pick two backends at random and send to the less loaded
+of the two. It performs almost as well as querying every server, needs no global
+state, and scales to any fleet size — which is why large systems use it instead
+of true least-connections.
+
+### Sticky sessions, and why you probably don't want them
+
+Stickiness pins a client to one backend, via a cookie (L7) or source-IP hash
+(L4). It's how you cope with servers that hold per-user state in memory.
+
+The costs are real: load becomes uneven because sessions are long-lived and
+unevenly active; losing a server loses those users' sessions outright; and
+autoscaling is blunted because new servers only receive *new* sessions, so a
+scale-up doesn't relieve the existing load.
+
+**The better answer is almost always to externalise the state** — put sessions
+in Redis and let any server handle any request. When an interviewer asks about
+sticky sessions, saying "I'd avoid needing them" is usually the answer they're
+looking for. The legitimate exceptions are genuinely stateful connections
+(WebSocket) and cache-locality optimisations.
+
+### Health checks — the part that's actually hard
+
+**Passive** health checking observes real traffic (errors, timeouts) and needs
+no extra requests, but only notices a problem after real users have hit it.
+**Active** health checking polls an endpoint on a schedule and catches problems
+before users do, at the cost of load and a detection delay.
+
+Production systems do both. The depth is in *what the check tests*:
+
+```
+/health        → "the process is running"        (shallow — often useless)
+/health/ready  → "I can reach my DB, cache, and
+                  critical dependencies"         (deep — what you want)
+```
+
+<Callout type="pitfall" title="The deep health check that takes down your whole fleet">
+Make `/health` check the database, and now a brief database blip fails the
+health check on **every** instance simultaneously. The load balancer dutifully
+removes all of them and you have a total outage — caused by a problem that would
+otherwise have degraded a fraction of requests.
+
+The mitigations are worth knowing because this is a real and common outage:
+
+- **Separate liveness from readiness.** Liveness answers "should I be
+  restarted?" and must not depend on anything external. Readiness answers
+  "should I get traffic?" and may. Kubernetes splits these for exactly this
+  reason.
+- **Fail open below a threshold.** If more than ~50% of the fleet is
+  unhealthy, assume the *check* is wrong and keep routing. AWS ELB does this and
+  calls it "fail open"; Envoy calls it panic mode.
+- **Require N consecutive failures** before eviction, and fewer successes to
+  return, so one slow second doesn't evict a healthy server.
+</Callout>
+
+The other parameter to get right is **timing**. Check every 5–10 seconds,
+require 2–3 consecutive failures, and your detection window is 15–30 seconds —
+during which users hit a dead server. Tightening it detects faster but makes
+false positives more likely, and false positives shift load onto the survivors.
+That's the trade: **detection speed versus stability**, and there's no setting
+that wins both.
+
+**Connection draining** (or "deregistration delay") is the other half.
+When you remove a server deliberately — a deploy, a scale-in — stop sending it
+new requests but let the in-flight ones finish, typically for 30 seconds. Skip
+this and every deploy returns errors to whoever was mid-request.
+
+### Making the balancer itself redundant
+
+You can't put a load balancer in front of your load balancer, so the redundancy
+comes from a layer below:
+
+- **DNS round robin** — return multiple A records. Cheap, but DNS caching means
+  clients keep using a dead IP well past its TTL, so it's a coarse tool.
+- **Floating / virtual IP** — two balancers, one active; on failure the standby
+  claims the IP (VRRP, keepalived). Fast failover, classic on-prem answer.
+- **Anycast** — the same IP announced from many locations; BGP routes each
+  client to the nearest healthy one. How CDNs and global load balancers work.
+- **Managed** — ALB/NLB are already distributed and redundant internally. Say
+  this, but be able to explain what they're doing for you.
+
+**Global server load balancing** is the layer above: DNS or anycast sends users
+to the nearest *region*, and a regional balancer distributes within it. That
+two-tier structure — geographic first, then local — is the standard answer for
+"how do you serve users worldwide?"
+
+### B — What breaks
+
+- **Cascading eviction.** One server slows, gets evicted, its load lands on the
+  rest, they slow, they get evicted. Fail-open thresholds exist for this.
+- **Thundering herd on recovery.** A backend returns and least-connections
+  immediately sends it everything, because it has zero connections. **Slow
+  start** (ramp traffic over ~30 s) is the fix, and it's a great detail to
+  volunteer.
+- **The balancer becomes the bottleneck** — L7 with TLS termination is CPU-bound
+  on handshakes. Scale out, or offload TLS.
+- **Uneven load despite even request counts**, because requests aren't equally
+  expensive. Least-connections helps; least-outstanding-cost helps more.
+- **Losing the client IP.** The backend sees the balancer's IP, which quietly
+  breaks rate limiting and audit logs — the exact bug in your url-shortener's
+  `getRemoteAddr()`. Fix with `X-Forwarded-For` (and only trust it from your own
+  proxies).
+- **Idle connection timeouts** silently killing long-lived connections;
+  60 seconds is a common default that breaks WebSockets and slow uploads.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"L4 or L7?"** What do you need to see? L7 to route on URL, header or
+   cookie, and to retry failed requests. L4 for raw throughput and TLS
+   pass-through.
+2. **"Why can L7 retry but L4 can't?"** L7 holds the parsed request and can
+   resend it; L4 already forwarded the packets on an established connection.
+3. **"Which algorithm?"** Least connections as a default, because request
+   duration varies. Round robin only when requests are uniform.
+4. **"What's wrong with least response time?"** A server erroring in 2 ms looks
+   like the fastest server, so you route more traffic to the broken one.
+5. **"What's power-of-two-choices?"** Sample two backends at random, pick the
+   less loaded. Near-optimal balancing with no global state.
+6. **"Sticky sessions?"** Avoid needing them — externalise session state to
+   Redis. They cause uneven load, session loss on failure, and blunt
+   autoscaling.
+7. **"Should the health check hit the database?"** Careful: a DB blip then fails
+   every instance at once and the LB removes your whole fleet. Split liveness
+   from readiness and fail open past a threshold.
+8. **"How fast should health checks be?"** Detection speed versus false
+   positives, and a false positive shifts load onto the survivors. 5–10 s
+   interval, 2–3 consecutive failures is typical.
+9. **"What happens on deploy?"** Connection draining — stop new requests, let
+   in-flight ones finish, then remove.
+10. **"A recovered server gets hammered."** Zero connections looks least-loaded.
+    Use slow start to ramp it up.
+11. **"How do you make the load balancer redundant?"** A layer below it: DNS
+    round robin, a floating IP with VRRP, or anycast. Managed balancers do this
+    internally.
+12. **"How do you serve users in three continents?"** Two tiers — DNS/anycast
+    geographic routing to a region, then a regional balancer within it.
+13. **"Why does the backend see the wrong client IP?"** The balancer terminated
+    the connection. Use `X-Forwarded-For`, trusted only from your own proxies.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **A health check that only tests that the process is alive.**
+- **A health check so deep that one shared dependency fails the whole fleet.**
+- **No fail-open threshold**, turning a monitoring problem into an outage.
+- **No connection draining**, so every deploy drops in-flight requests.
+- **No slow start**, so every recovery immediately re-breaks the server.
+- **`getRemoteAddr()` behind a proxy** — rate limits and audit logs now key on
+  the load balancer.
+- **Needing sticky sessions**, which usually means state is in the wrong place.
+</Callout>
+
+### Where this connects
+
+- [3. Scaling: vertical vs horizontal](/system-design/3-scaling-vertical-vs-horizontal)
+  — load balancing is what makes horizontal scaling possible.
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — routing with
+  cache locality, and its limits.
+- [Case 4: chat system](/system-design/case-4-design-a-chat-system-whatsapp-messenger)
+  — balancing persistent connections, where connection count is a poor proxy for
+  load.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — retries, health and cascading failure, one layer in.
+- [Networking](/cs-fundamentals/1-networking) — TCP, TLS termination and what
+  "layer 4" and "layer 7" refer to.

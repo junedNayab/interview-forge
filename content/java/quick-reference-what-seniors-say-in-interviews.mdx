@@ -1,0 +1,107 @@
+---
+title: "Quick Reference: Junior vs Senior Answers"
+topic: "java"
+order: 508
+group: "Core Java"
+difficulty: "medium"
+estimatedMinutes: 14
+tags: [reference, java, interview-answers, collections, concurrency, spring]
+format: "mdx"
+summary: "A junior-answer versus senior-answer comparison across 24 of the most common Java questions, showing which answers end the conversation and which ones open it."
+---
+
+## How this page differs from the other one
+
+There are two quick-reference sheets in this track and they do different jobs.
+
+**This page is a diagnostic.** It puts the shallow answer and the deeper answer to the
+same question side by side, so you can find out which one you would have given. Read it
+after the core Java lessons: the point is to notice a gap, and you can only notice one you
+have the material to close. The companion page,
+[Quick Reference: Sentences That Signal Seniority](/java/quick-reference-what-seniors-say), is a phrasing
+sheet — specific sentences worth having ready, with the reason each one lands. Use this
+page to find out what you do not know, and that one to sharpen how you say what you do.
+
+The junior answers below are not wrong, and that is what makes them dangerous: they are
+correct, they sound complete, and the interviewer has nothing to follow up on, so the round
+moves on without you having demonstrated anything. **A senior answer is not a longer
+answer; it names a mechanism, a boundary condition or a trade-off, and therefore invites
+the next question.**
+
+## Language and the JVM
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| Why is `String` immutable? | "So it's thread-safe and can be cached." | "Two real reasons. The string pool can only share instances safely if they cannot change, and `String` caches its hash code, which is why it is the ideal `HashMap` key. There is also a security argument: a path or SQL fragment validated and handed to an API cannot be mutated afterwards by the caller." |
+| `==` versus `equals()` | "`==` compares references, `equals()` compares values." | "`==` is reference identity, `equals()` is whatever the class defines. The interesting case is that `equals()` is meaningless without `hashCode()` agreeing with it, and that autoboxing makes `==` on `Integer` work up to 127 and fail above it because of the integer cache — which is a real bug I look for in code review." |
+| How does garbage collection work? | "The JVM frees objects that are no longer referenced." | "Generational: most objects die young, so the young generation is collected with a cheap copying collector and survivors are promoted. What I care about in production is pause time — I run G1 by default, read GC logs before tuning anything, and treat rising old-generation occupancy across full GCs as a leak rather than a tuning problem." |
+| Checked versus unchecked exceptions | "Checked must be caught, unchecked don't have to be." | "Checked exceptions are a compile-time contract for recoverable conditions. In practice I use unchecked for programming errors and wrap checked exceptions at layer boundaries, because a `SQLException` leaking into a controller is a design failure. The detail that matters in Spring: only unchecked exceptions trigger rollback by default." |
+| What is type erasure? | "Generics are removed at compile time." | "The compiler checks types then erases them to raw types with casts inserted, so generics are a compile-time guarantee with no runtime representation. The consequences are what get asked: you cannot write `new T[]`, you cannot overload on `List<String>` and `List<Integer>`, and `instanceof` on a parameterised type does not compile. Wildcards exist because erasure makes generics invariant." |
+
+## Collections
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| How does `HashMap` work? | "An array of buckets with chaining; Java 8 converts long chains to red-black trees at 8." | "Same mechanics, but the reason for treeification is the part worth saying: under a decent hash function a bucket reaching 8 entries is about a one-in-ten-million event, so treeification is not a performance optimisation, it is a defence against an attacker submitting deliberately colliding keys. That is also why it requires a table of at least 64 — below that, a long chain means the table is too small, and resizing is the cheaper fix." |
+| `ArrayList` versus `LinkedList` | "`ArrayList` is O(1) random access, `LinkedList` is O(1) insertion." | "Big-O says `LinkedList` wins on insertion, and in practice it almost never does. `ArrayList` is one contiguous allocation and prefetch-friendly; `LinkedList` is a node per element with a pointer chase and roughly three times the memory. I default to `ArrayList` and would only reach for `LinkedList` if I genuinely needed a deque, and then I would use `ArrayDeque` instead." |
+| The `equals`/`hashCode` contract | "If two objects are equal their hash codes must be equal." | "Yes, and the reason is that lookup goes to the bucket first, so two equal objects with different hash codes land in different buckets and the map never compares them — your key is present and `get()` returns null. The nastier version happens after insertion: mutate a field used by `hashCode` and the entry is in the wrong bucket and permanently unreachable. That is the real argument for immutable keys and for `record` types." |
+| `HashMap` versus `ConcurrentHashMap` | "`ConcurrentHashMap` is thread-safe." | "It locks per bin rather than the whole table, so reads are lock-free and writes contend only on collision. The important boundary is what it does not give you: each operation is atomic but a `get` followed by a `put` is not, which is why `computeIfAbsent` and `merge` exist. Its `size()` is also an estimate under concurrent modification." |
+| What is `ConcurrentModificationException`? | "You modified a collection while iterating it." | "It is a fail-fast check on a modification counter, and it is a best-effort bug detector rather than a guarantee — it can miss. The fix depends on intent: `Iterator.remove()` or `removeIf` if I want to mutate, or a concurrent collection if the modification is coming from another thread. Catching it is never the fix." |
+
+## Concurrency
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| What does `volatile` do? | "It makes sure threads see the latest value." | "It gives visibility and ordering, not atomicity. A write establishes happens-before with subsequent reads, so a reader cannot see a stale value or reordered writes that preceded it. What it does not do is make `count++` safe, because that is a read, an add and a write. If I need both I use `AtomicInteger` or a lock." |
+| `synchronized` versus `ReentrantLock` | "`ReentrantLock` is more flexible." | "`synchronized` is simpler and cannot leak — the monitor is released even on exception. `ReentrantLock` buys `tryLock` with a timeout, interruptible acquisition, fairness, and multiple `Condition` objects so I can signal only waiting producers rather than everybody. The cost is that forgetting `unlock()` in a `finally` is a permanent deadlock, so I only take it when I need one of those features." |
+| How do you size a thread pool? | "Around the number of CPU cores." | "Cores plus one for CPU-bound work, because there is nothing to overlap with. For IO-bound work the pool can be much larger, since threads are blocked rather than running, and I size it from the target throughput and the measured wait time rather than from a formula. The queue matters as much as the pool: an unbounded queue turns backpressure into a heap problem." |
+| What causes a deadlock and how do you avoid it? | "Two threads waiting on each other's locks." | "Four conditions have to hold together, and the practical lever is circular wait: I impose a global ordering on lock acquisition, so every code path takes locks in the same sequence. Failing that, `tryLock` with a timeout converts a deadlock into a detectable failure. In production I would confirm it from a thread dump rather than guess." |
+| Why must `wait()` be inside a `while` loop? | "Because of spurious wakeups." | "Two independent reasons, and only naming one is the common half-answer. Spurious wakeups are permitted by the specification, so a thread can return from `wait()` with nothing having changed. Separately, with several waiters, `notifyAll` wakes them all and the first to reacquire the monitor consumes the item — so everybody else must re-test the condition. An `if` would let them proceed on a state that is no longer true." |
+| What is `CompletableFuture` for? | "Asynchronous programming without blocking." | "Composition. A plain `Future` only lets you block on `get()`, so combining two async calls means blocking on the first. `CompletableFuture` lets me chain with `thenApply`, fan out and join with `allOf`, and handle failure in the pipeline with `exceptionally`. The trap is that the default pool is the common `ForkJoinPool`, so any blocking call needs its own executor passed explicitly." |
+
+## Streams and Java 8
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| Why use streams? | "They're more readable and declarative." | "They separate what from how, which means the pipeline can fuse operations into one pass and short-circuit. That is also the mental model worth stating: nothing runs until the terminal operation, so `filter` then `map` does not build an intermediate list. Where I do not use them is when the loop is clearer — a stream with three nested lambdas and a side effect is worse than a `for`." |
+| Should you use parallel streams? | "Only for large datasets." | "Rarely, and never without measuring. They run on the shared common pool, so one slow blocking task starves everything else in the process. They also need a splittable source and an associative, stateless operation — `ArrayList` splits well, `LinkedList` does not. For IO-bound work the answer is an executor, not a parallel stream." |
+| When do you use `Optional`? | "To avoid null pointer exceptions." | "As a return type where absence is a normal outcome. Not as a field, not as a parameter, and not with `isPresent()` followed by `get()`, which is just a null check with extra ceremony. The value is in `map` and `flatMap` composing without intermediate checks, and in `orElseThrow` making the absent case explicit at the call site." |
+| `map` versus `flatMap` | "`flatMap` flattens nested collections." | "`map` is one-to-one and `flatMap` is one-to-many followed by a flatten, so the function returns a stream rather than a value. The version that shows I have used it: `flatMap` on `Optional` is how you avoid `Optional<Optional<T>>` when chaining accessors, and it is the same shape of operation in both cases." |
+
+## Spring and persistence
+
+| Question | The answer that closes the conversation | The answer that opens it |
+|---|---|---|
+| What does `@Transactional` do? | "It wraps the method in a transaction and rolls back on exception." | "It tells the proxy to open a transaction before the method and commit or roll back after. Two boundary conditions I always state: rollback happens on unchecked exceptions only unless I set `rollbackFor`, and catching an exception inside the method means no rollback happens at all — which is the most common transaction bug I see." |
+| Why did `@Transactional` not take effect? | "Maybe the annotation was missing." | "Almost always self-invocation. The annotation is implemented by a proxy that wraps the bean, so calling the method from inside the same class goes straight to `this` and bypasses the proxy entirely. Same reason it does nothing on `private` or `final` methods. The fix is to move the method to another bean, or inject a self-reference if I have no choice." |
+| What is the N+1 problem? | "One query for the list and one per item, so you use `JOIN FETCH`." | "One query for the parents and one per parent for a lazy association. I would detect it rather than guess — Hibernate statistics or query logging in a test that asserts the query count. Then the fix depends on the shape: `JOIN FETCH` or an entity graph for a single association, batch fetching when there are several and a join would multiply rows, and a DTO projection for a read-only endpoint, which avoids loading entities at all." |
+| Is a Spring singleton bean thread-safe? | "Spring beans are singletons by default." | "Spring guarantees one instance, not that the instance is safe — that is on me. So singleton beans hold no mutable state, and if they must, I use a concurrent structure or request scope. This is also why field injection into a singleton of a request-scoped bean needs a proxy, otherwise you capture one request's object for the lifetime of the application." |
+| `@Value` versus `@ConfigurationProperties` | "Both read properties from the config file." | "`@Value` injects one property with no validation and no grouping, so a typo in the key fails at startup at best and silently uses a default at worst. `@ConfigurationProperties` binds a whole prefix to a typed object, supports relaxed binding and JSR-380 validation, and gives one place to see the shape of a subsystem's configuration. I use `@Value` only for genuinely isolated single values." |
+
+## How to use this page
+
+Cover the right-hand column and answer each question out loud first. Anywhere your
+answer matches the middle column, the lesson to revisit is one of
+[collections](/java/2-collections-framework-deep-dive),
+[concurrency](/java/3-concurrency-senior-must-have),
+[Java 8 features](/java/4-java-8-features),
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) or
+[transactions](/java/5-transaction-management-transactional).
+
+Do not memorise the right-hand column verbatim. A recited paragraph is detectable — too
+fluent, too even — and it collapses the moment the question arrives slightly off the axis
+you rehearsed. What you want from each row is the *mechanism* it names, because a mechanism
+you understand generates the answer under any phrasing.
+
+<Callout type="tip" title="The pattern in every right-hand column">
+The senior answers share a shape: state the mechanism, name one boundary condition or
+trade-off, then say what you do about it in practice. Three sentences. That template works
+on questions this page does not cover, which is the transferable skill here.
+</Callout>
+
+### Where this connects
+
+- [Quick Reference: Sentences That Signal Seniority](/java/quick-reference-what-seniors-say) — the companion phrasing sheet, with the specific sentences worth having ready.
+- [SQL — Quick Reference: What Seniors Say](/sql/quick-reference-what-seniors-say) — the same junior-versus-senior treatment for indexes, joins, isolation and query plans.
+- [3. Concurrency — Senior Must-Have](/java/3-concurrency-senior-must-have) — the source material for the `volatile`, deadlock and thread-pool rows.
+- [Practice: Producer / Consumer](/java/practice-producer-consumer) — the `while` loop and `notifyAll` rows, worked through in code.

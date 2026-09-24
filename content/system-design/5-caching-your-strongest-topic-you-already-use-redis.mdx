@@ -1,0 +1,338 @@
+---
+title: "5. Caching (your strongest topic — you already use Redis)"
+topic: "system-design"
+order: 205
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 22
+tags: [caching, redis, invalidation, stampede, hot-keys, consistency]
+format: "mdx"
+summary: "Why caching is really a consistency problem in disguise — write strategies, eviction, the three failure modes (stampede, penetration, avalanche), and a line-by-line critique of the cache in your own url-shortener."
+---
+
+## Layer 1 — The mental model
+
+The obvious framing is "caching makes things fast." That's true and it's the
+shallow answer. The useful framing:
+
+> **A cache is a second copy of your data that is allowed to be wrong.**
+
+Every hard question about caching is a question about *how* wrong, *for how
+long*, and *what happens when it's wrong at the worst moment*. Once you see it
+that way, the topics stop being a list to memorise and become one question asked
+repeatedly:
+
+| The question | The caching topic it becomes |
+|---|---|
+| How does the copy get created? | Cache-aside, read-through |
+| How does it get updated? | Write-through, write-back, write-around |
+| How does it stop being wrong? | TTL, invalidation |
+| What if it's missing when everyone wants it? | Stampede, penetration, avalanche |
+| What if one copy is too popular? | Hot keys |
+| What if we run out of room? | Eviction policies |
+
+The numbers that justify all of it:
+
+```
+L1 cache reference                     1 ns
+Main memory reference                100 ns
+Redis GET (same datacenter)      ~ 500,000 ns   (0.5 ms — dominated by network)
+SSD random read                  ~ 100,000 ns
+Postgres query (indexed, warm)   ~ 1,000,000 ns (1 ms, often much worse)
+Cross-region round trip          ~ 150,000,000 ns (150 ms)
+```
+
+Notice what that table actually says. Redis isn't faster than Postgres because
+RAM is faster than disk — Postgres caches in RAM too. **Redis is faster because
+it does less**: no query parsing, no planner, no MVCC visibility check, no join,
+no lock. You are replacing a computation with a lookup. Saying that instead of
+"RAM is 1000× faster than disk" is an immediate depth signal, because the
+disk-speed answer is what everyone says and it's mostly wrong for a warm
+database.
+
+---
+
+## Layer 2 — The mechanism
+
+### Where caches live
+
+A request passes through many caches before it reaches your code, and knowing
+the layers lets you answer "where would you cache this?" with a choice rather
+than a reflex:
+
+```
+Browser cache      → free, per-user, you control it with Cache-Control headers
+CDN / edge         → static assets and cacheable GETs, close to the user
+API gateway        → whole-response caching
+Application memory → Caffeine/Guava: nanoseconds, but per-instance and
+                     inconsistent across your fleet
+Distributed cache  → Redis/Memcached: shared, consistent-ish, ~0.5 ms
+Database           → buffer pool, query plan cache (already caching for you)
+```
+
+The trade-off between the last three is worth stating: **a local in-process
+cache is 1000× faster than Redis but every instance has a different copy.** For
+data that changes rarely (feature flags, config, reference data), local is
+correct. For data that must be consistent across instances (sessions, counters,
+rate-limit state), Redis is correct. The hybrid — local cache in front of Redis
+— is how you handle hot keys, at the cost of two layers of staleness.
+
+### Read strategies
+
+**Cache-aside (lazy loading)** — the default, and what your url-shortener does:
+
+```java
+String value = cache.get(key);
+if (value == null) {          // miss
+    value = db.load(key);
+    cache.set(key, value, TTL);
+}
+return value;
+```
+
+Only requested data is cached, and a cache failure degrades to a slow system
+rather than a broken one. The costs: every cache miss pays both lookups, and
+data is stale until the TTL expires. The application owns the caching logic.
+
+**Read-through** — the cache library owns the load. Same behaviour, cleaner
+code, less control. Spring's `@Cacheable` is this.
+
+### Write strategies
+
+This is where candidates get separated, because the naive choice creates a
+correctness bug:
+
+| Strategy | What happens on write | Cost | Use when |
+|---|---|---|---|
+| **Write-through** | Write cache **and** DB synchronously | Write latency = both | Read-heavy, staleness unacceptable |
+| **Write-around** | Write DB only; invalidate the cache entry | Next read is a miss | Write-heavy, written data rarely re-read |
+| **Write-back** | Write cache, flush to DB asynchronously | **Data loss if the cache dies** | Counters, metrics, high write volume |
+
+<Callout type="pitfall" title="Update the cache on write, or delete it?">
+**Delete it.** Writing the new value into the cache looks more efficient but
+introduces a race that is very hard to debug:
+
+```
+Thread A (writer):  writes DB = 10 ................ then sets cache = 10
+Thread B (writer):  writes DB = 20 ... sets cache = 20 ...
+Final: DB = 20, cache = 10.   Permanently wrong until the TTL saves you.
+```
+
+Two concurrent writers can interleave so the cache ends up holding the *older*
+value while the database holds the newer one. Deleting is idempotent and
+order-independent, so it doesn't have this failure. The standard pattern is
+**write DB, then delete the cache key** — in that order, because deleting first
+lets a concurrent reader repopulate the stale value from the not-yet-updated
+database.
+
+This ordering question — "cache-aside: do you delete before or after the DB
+write?" — is a common senior-level follow-up. The answer is *after*, and the
+reason is the concurrent reader.
+</Callout>
+
+Even "write DB, then delete" has a residual race (a reader that missed can
+write its stale value back after your delete). The industry answer is to accept
+it, keep TTLs as a backstop, and if you truly can't tolerate it, use **delayed
+double delete** or drive invalidation from the database's replication log via
+[CDC](/system-design/15-microservice-reliability-patterns). Knowing that the
+common pattern is *imperfect* rather than *correct* is the depth here.
+
+### Eviction
+
+A cache has bounded memory. When it fills, something must go.
+
+| Policy | Evicts | Good for | Weakness |
+|---|---|---|---|
+| **LRU** | Least recently used | General purpose — the default | A big scan evicts everything useful |
+| **LFU** | Least frequently used | Stable hot sets | Slow to adapt; old hits count forever |
+| **FIFO** | Oldest inserted | Rarely the right answer | Ignores access entirely |
+| **TTL** | Expired entries | Time-sensitive data | Not really an eviction policy |
+| **Random** | Anything | Surprisingly decent, very cheap | Unpredictable |
+
+Redis implements `allkeys-lru`, `allkeys-lfu`, `volatile-lru` (only keys with a
+TTL), `volatile-ttl`, `allkeys-random` and `noeviction`. Two operational notes
+worth knowing:
+
+- Redis's LRU is **approximate** — it samples a handful of keys and evicts the
+  oldest of the sample, rather than maintaining a global LRU list, because exact
+  LRU would cost memory and a lock on every access.
+- **`noeviction` is the default**, which means a full Redis starts returning
+  errors on writes instead of making room. For a cache that's usually wrong; for
+  a datastore it's usually right. Knowing the default is a genuine
+  production detail.
+
+The metric that matters is **hit rate**. A cache at 50% barely helps and may hurt
+(you pay the lookup and then the query anyway); above ~90% it's doing real work.
+If your hit rate is low, the answer is usually that the working set doesn't fit,
+or your TTLs are too short, or you're caching things nobody re-reads.
+
+### The three failure modes
+
+These have specific names and interviewers use them as shibboleths.
+
+**1. Cache stampede (thundering herd).** A hot key expires. Ten thousand
+concurrent requests all miss and all hit the database simultaneously. The
+database falls over, so nothing repopulates the cache, so the next ten thousand
+also miss. Fixes:
+
+- **Locking / request coalescing** — the first miss takes a lock (`SET NX`) and
+  loads; the others wait briefly and retry the cache. One database query instead
+  of ten thousand.
+- **Probabilistic early expiry** — as a key nears its TTL, each reader has a
+  small, increasing chance of refreshing it early, so the refresh happens
+  *before* the cliff and while the old value is still being served.
+- **Never expire hot keys**; refresh them in the background instead.
+
+**2. Cache penetration.** Requests for keys that **don't exist anywhere** —
+random short codes hitting your url-shortener, or a scraper enumerating IDs.
+Every request misses the cache, misses the database, and caches nothing, so the
+cache provides zero protection. Fixes: **cache the negative result** (store a
+tombstone with a short TTL), or put a **Bloom filter** in front — a probabilistic
+structure that answers "definitely not present" cheaply, which is exactly the
+question you need answered.
+
+**3. Cache avalanche.** A large number of keys expire at the same instant —
+typically because they were all written together with an identical TTL (a batch
+warm-up, or a restart) — and the database takes the full load at once. Fix:
+**jitter the TTLs**, `TTL + random(0, 10%)`. It's a one-line change and a common
+"how would you fix this?" question.
+
+### Hot keys
+
+One viral short code gets 40% of your traffic. Consistent hashing spreads keys
+across nodes, but a *single* key lives on a *single* node, so
+[consistent hashing doesn't help here](/system-design/13-consistent-hashing) —
+that node saturates while the rest idle. Options:
+
+- **Local in-process cache in front of Redis.** The hot key is served from the
+  application's own memory with a 1-second TTL. Hugely effective, slightly
+  stale.
+- **Key splitting.** Store `hot_key:1 … hot_key:N` and have clients pick one at
+  random, spreading the read across N slots. Standard for hot counters.
+- **Replicate reads** to Redis replicas.
+
+### Redis, specifically
+
+You already use it, so be ready for the "you said Redis — tell me about Redis"
+turn:
+
+- **Single-threaded** for command execution (networking is threaded in 6.0+).
+  This is *why* operations are atomic and why `INCR` is safe without a lock —
+  and also why one `KEYS *` on a large database blocks every other client.
+  Never run `KEYS` in production; use `SCAN`.
+- **Data structures, not just strings.** Sorted sets for leaderboards and sliding
+  windows, hashes for objects, sets for uniqueness, streams for logs. Reaching
+  for the right structure is what makes Redis more than a hash map.
+- **Persistence:** RDB snapshots (compact, loses recent writes) and AOF
+  (append-only log, durable, larger). A cache often needs neither — but *do not*
+  assume Redis is durable when you're using it as a datastore.
+- **Lua scripts run atomically**, which is how you make multi-step operations
+  like a [token bucket](/system-design/case-2-design-a-distributed-rate-limiter)
+  race-free.
+- **Redis vs Memcached:** Memcached is multithreaded and does one thing (string
+  key/value) well; Redis has data structures, persistence, replication, pub/sub
+  and scripting. Pick Memcached for a pure LRU string cache at huge scale, Redis
+  for essentially everything else.
+
+<Callout type="interview" title="Your own cache, reviewed line by line">
+`UrlService.resolve()` in your url-shortener is textbook cache-aside — and it
+has three real problems. Volunteering these is far stronger than having them
+found for you.
+
+**1. The cache hit saves nothing.** On a hit you return early, but you first
+call `recordClick(shortCode, ...)`, and the first thing `recordClick` does is
+`urlRepository.findByShortCode(shortCode)` — to get the entity for the foreign
+key. **Every cache hit still performs the exact database query the cache exists
+to avoid.** The fix is to cache the URL's ID alongside the original URL (or
+store the click with just the short code and resolve it asynchronously), so the
+hot path touches the database zero times.
+
+**2. Expired links keep redirecting for up to 24 hours.** The expiry check lives
+only in the database-fallback branch. A cached entry has a 24-hour TTL and is
+returned without any expiry check, so a link that expired an hour ago keeps
+working until the cache entry ages out. The fix: cache the expiry alongside the
+URL and check it on the hit path, or set the Redis TTL to
+`min(24h, timeUntilExpiry)` so the cache can't outlive the link.
+
+**3. `resolve()` is `@Transactional`**, so even a pure cache hit opens a
+database transaction and borrows a pooled connection. Under load you're
+serialising your fastest path against your connection pool — the thing you were
+trying to protect. See
+[@Transactional](/java/5-transaction-management-transactional) for why the
+proxy makes this easy to miss.
+
+**Two things it gets right**, and you should say so: `deleteUrl` invalidates the
+cache key before deleting the row, and `cacheUrl` wraps the Redis call in
+try/catch and only logs on failure — so **a Redis outage degrades the service to
+"slow" rather than "down."** Failing open is the correct choice for a cache, and
+plenty of production systems get it wrong.
+</Callout>
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why is Redis faster than Postgres?"** Not because RAM beats disk —
+   Postgres caches in RAM too. Redis does less work: no parsing, planning, MVCC
+   or joins. A lookup instead of a computation.
+2. **"Cache-aside vs read-through?"** Who owns the load. Cache-aside is
+   application logic and degrades gracefully; read-through hides it in the
+   library.
+3. **"On a write, do you update the cache or delete the key?"** Delete. Updating
+   lets two concurrent writers interleave and leave the older value cached.
+4. **"Delete before or after the DB write?"** After. Deleting first lets a
+   concurrent reader repopulate from the stale database.
+5. **"Is 'write DB then delete cache' correct?"** No — a reader that missed can
+   write a stale value back after your delete. TTLs are the backstop; CDC-driven
+   invalidation is the rigorous fix.
+6. **"A hot key expires and the DB melts. What is that and how do you fix it?"**
+   Cache stampede. Lock/coalesce the first miss, probabilistic early refresh, or
+   never expire hot keys.
+7. **"Someone requests a million IDs that don't exist."** Cache penetration.
+   Cache negative results with a short TTL, or front it with a Bloom filter.
+8. **"Everything expires at once after a restart."** Cache avalanche. Jitter the
+   TTLs.
+9. **"One key gets 40% of traffic."** Hot key — consistent hashing can't help a
+   single key. Local cache in front, or split into N replicas of the key.
+10. **"Which eviction policy?"** LRU by default; LFU for a stable hot set. Note
+    that Redis's LRU is sampled, not exact, and that `noeviction` is the default.
+11. **"What hit rate is good?"** Above ~90% is real work; ~50% may be worse than
+    no cache, since you pay both lookups.
+12. **"What happens when Redis goes down?"** Ideally the system gets slow, not
+    broken — catch the exception and fall through to the database. Then worry
+    about the stampede that the empty cache causes on recovery.
+13. **"Why is Redis single-threaded and why does that matter?"** Commands are
+    atomic for free; one slow command (`KEYS *`) blocks everyone. Use `SCAN`.
+14. **"Local cache or distributed?"** Local for rarely-changing data, Redis when
+    instances must agree, both when you have a hot key.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Caching the read but still querying on the hit path** — exactly the bug in
+  your url-shortener. Measure that the fast path really is fast.
+- **Identical TTLs everywhere**, which schedules your own avalanche.
+- **No expiry check on cached data that can expire.**
+- **Treating Redis as durable.** It's a cache unless you have deliberately
+  configured it not to be.
+- **Caching before measuring.** A cache adds a consistency problem; make sure
+  you're buying something with it.
+- **Unbounded cache with `noeviction`** — writes start failing instead of
+  evicting.
+- **A cache your system can't survive losing.** If Redis going down takes you
+  down, it isn't a cache, it's an undeclared database.
+</Callout>
+
+### Where this connects
+
+- [13. Consistent hashing](/system-design/13-consistent-hashing) — how a
+  multi-node cache distributes keys, and why it can't save you from a hot one.
+- [Case 1: URL shortener](/system-design/case-1-design-a-url-shortener-your-project-master-this-one)
+  — the cache reviewed above, in its full design context.
+- [Case 2: distributed rate limiter](/system-design/case-2-design-a-distributed-rate-limiter)
+  — Redis atomicity and Lua, applied.
+- [7. CAP and consistency models](/system-design/7-cap-theorem-consistency-models)
+  — a cache is a replica, so cache staleness is just eventual consistency you
+  built on purpose.
+- [@Transactional](/java/5-transaction-management-transactional) — why a cache
+  hit inside a transaction still costs you a connection.

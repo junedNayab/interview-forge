@@ -1,0 +1,304 @@
+---
+title: "5. Transaction Management (@Transactional)"
+topic: "java"
+order: 605
+group: "Java + SQL"
+difficulty: "hard"
+estimatedMinutes: 19
+tags: [spring, transactions, jpa, propagation, isolation, osiv]
+prerequisites: [8-spring-internals-ioc-beans-and-aop-proxies]
+format: "mdx"
+summary: "What the proxy actually does with your connection, why propagation and rollback rules behave surprisingly, and the traps — UnexpectedRollbackException, OSIV, @Async, swallowed exceptions."
+---
+
+## Layer 1 — The mental model
+
+`@Transactional` looks declarative, but underneath it is mechanical and worth
+seeing literally. The proxy from
+[Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) wraps your
+method in roughly this:
+
+```java
+// What TransactionInterceptor does, conceptually.
+TransactionStatus tx = txManager.getTransaction(definition);   // get connection,
+                                                               // setAutoCommit(false),
+                                                               // bind to THIS thread
+try {
+    Object result = method.invoke(target, args);               // your code
+    txManager.commit(tx);
+    return result;
+} catch (RuntimeException | Error e) {
+    txManager.rollback(tx);        // unchecked → rollback
+    throw e;
+} catch (Exception checked) {
+    txManager.commit(tx);          // checked → COMMIT. Surprising, but correct.
+    throw checked;
+}
+```
+
+Three facts fall out of that, and nearly every surprising behaviour traces to
+one of them:
+
+1. **It's a proxy**, so it only applies to calls that cross the proxy boundary.
+2. **The connection is bound to the current thread** — in
+   `TransactionSynchronizationManager`, a `ThreadLocal`. "Being in a transaction"
+   is a property of the *thread*, not of your object or your call stack.
+3. **Checked exceptions commit by default.** Not a bug — inherited from EJB
+   semantics, where checked exceptions modelled expected business outcomes.
+
+Hold on to #2 especially. It explains why a new thread has no transaction, why
+`@Async` and `@Transactional` interact badly, and why lazy loading fails after
+the method returns.
+
+---
+
+## Layer 2 — The mechanism
+
+### Propagation, and what actually happens
+
+`REQUIRED` (the default) joins an existing transaction or starts one. The part
+people get wrong: **joining means there is still only one physical transaction**.
+An inner `REQUIRED` method has no independent commit — the outer one decides.
+
+```java
+@Transactional                          // outer: starts tx
+public void placeOrder(Order o) {
+    orders.save(o);
+    audit.log("order placed");          // inner @Transactional REQUIRED → joins
+}                                       // ONE commit, at the end of placeOrder
+```
+
+`REQUIRES_NEW` **suspends** the current transaction and starts a genuinely
+separate one, on a **second database connection**. Two consequences that matter:
+
+- The outer transaction can roll back while the inner one stays committed. That's
+  the point — audit logs that must survive a failed business operation.
+- You're now holding two connections from the pool for one request. **A pool of
+  10 with heavy `REQUIRES_NEW` use can deadlock**: every thread holds one
+  connection and waits for a second that will never be free. This is a real
+  production failure and a great thing to mention.
+- The suspended outer transaction's uncommitted changes are **invisible** to the
+  inner one. Passing an unsaved entity into a `REQUIRES_NEW` method and querying
+  for it returns nothing.
+
+`NESTED` uses a JDBC **savepoint** inside the same transaction and connection.
+The inner work can roll back to the savepoint while the outer continues.
+Requires `DataSourceTransactionManager` — **JPA does not support it**, which
+makes it much rarer than its presence in tables suggests.
+
+| Propagation | New physical tx? | Use for |
+|---|---|---|
+| `REQUIRED` (default) | Only if none exists | Almost everything |
+| `REQUIRES_NEW` | Yes, second connection | Audit/logging that must survive a rollback |
+| `NESTED` | No — savepoint | Partial rollback, JDBC only |
+| `MANDATORY` | No — throws if none | Enforce the caller owns the transaction |
+| `SUPPORTS` | No | Works either way; rarely useful |
+| `NOT_SUPPORTED` | Suspends | Long non-transactional work inside a tx |
+| `NEVER` | Throws if one exists | Assert no transaction |
+
+### Rollback rules
+
+Default: **rollback on `RuntimeException` and `Error`; commit on checked
+exceptions.** Almost nobody wants the second half, so be deliberate:
+
+```java
+@Transactional(rollbackFor = Exception.class)          // roll back on everything
+@Transactional(noRollbackFor = InsufficientStock.class) // ...except this one
+```
+
+<Callout type="pitfall" title="UnexpectedRollbackException — the classic">
+This one comes up constantly, and it looks like Spring malfunctioning:
+
+```java
+@Transactional                       // OUTER
+public void process() {
+    try {
+        inner.doWork();              // inner @Transactional(REQUIRED) throws
+    } catch (Exception e) {
+        log.warn("continuing anyway", e);   // you decide to carry on
+    }
+    orders.save(...);                // more work
+}                                    // 💥 UnexpectedRollbackException
+```
+
+Because `REQUIRED` *joins*, the inner method shares your physical transaction.
+When it throws, the interceptor can't roll back just that part — so it sets the
+shared transaction **`rollbackOnly`**. You catch the exception and continue
+happily, and then at commit time Spring finds the rollback-only flag, rolls
+everything back, and throws `UnexpectedRollbackException` at you.
+
+The lesson: **you cannot catch your way out of a failed inner `REQUIRED`
+transaction.** The fixes, and which to use:
+
+- Make the inner method `REQUIRES_NEW`, so its failure is genuinely isolated.
+- Don't annotate the inner method — let it be plain code that participates in
+  your transaction.
+- Move the call outside the transaction entirely.
+</Callout>
+
+And the related trap: catching an exception inside a transactional method
+prevents the rollback you probably wanted, because the interceptor never sees it.
+If you catch and still need a rollback, say so explicitly:
+
+```java
+TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+```
+
+### `readOnly = true` — what it actually does
+
+More than a hint, and worth being precise about:
+
+- **Hibernate sets `FlushMode.MANUAL`**, so it skips dirty checking at flush
+  time. On a query returning thousands of entities, that's a real saving — no
+  snapshot comparison per object.
+- It sets the **JDBC connection read-only**, which some drivers and databases use
+  to optimise, and which makes an accidental write fail loudly.
+- With a routing `DataSource`, it's commonly the signal used to **send the query
+  to a read replica**.
+
+It does *not* make your code correct on its own, and on the primary it won't
+prevent a write in every configuration. Treat it as an optimisation plus a
+statement of intent.
+
+### The thread-bound connection, and what breaks because of it
+
+```java
+@Transactional
+public void process() {
+    executor.submit(() -> repo.save(entity));   // ← different thread.
+}                                               //   NO transaction. Silently.
+```
+
+The transaction lives in a `ThreadLocal`, so work handed to another thread runs
+outside it entirely. Same root cause for `@Async`: an `@Async` method runs on a
+pool thread, so combining `@Async` and `@Transactional` on one method gives you a
+*new* transaction on that thread — never the caller's. It will not join, and
+there is no error.
+
+This is also why **`@Transactional` and `@Async` on the same method is almost
+always a mistake**, and why passing entities between threads produces
+`LazyInitializationException`.
+
+<Callout type="pitfall" title="Open Session In View — on by default, and you should probably turn it off">
+`spring.jpa.open-in-view` defaults to **`true`** in Spring Boot. It keeps the
+Hibernate session open for the entire HTTP request, including view rendering and
+JSON serialisation.
+
+It exists to stop `LazyInitializationException` when Jackson touches a lazy
+collection after your service method returned. What it costs:
+
+- **A database connection is held for the whole request**, including time spent
+  serialising and writing to a slow client. Under load this exhausts the pool
+  long before the database is the bottleneck, and the symptom — connection
+  timeouts — points at the wrong component.
+- Lazy loads fire *during serialisation*, outside any transaction, producing
+  scattered N+1 queries that no amount of reading your service layer will reveal.
+
+Spring Boot logs a warning about this on startup, and most teams ignore it. The
+right fix is `open-in-view: false` plus explicit fetching — join fetch, an entity
+graph, or mapping to a DTO inside the transaction. Being able to explain *why*
+the default is wrong is a strong signal; see
+[the N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question).
+</Callout>
+
+### Isolation
+
+`@Transactional(isolation = ...)` maps straight to the database's isolation
+levels, with the caveat that the **database decides what it supports** — Postgres
+has no true `READ_UNCOMMITTED`, and Oracle doesn't offer `REPEATABLE_READ`.
+Defaults differ too: Postgres uses `READ_COMMITTED`, MySQL/InnoDB uses
+`REPEATABLE_READ`. Full treatment in
+[transactions & isolation levels](/sql/4-transactions-isolation-levels).
+
+For most application-level conflicts, optimistic locking is the better tool than
+raising isolation:
+
+```java
+@Entity
+public class Account {
+    @Version private long version;   // UPDATE ... WHERE version = ?
+}                                    // throws OptimisticLockException on conflict
+```
+
+It costs nothing when there's no contention, and it converts a lost update into a
+retryable exception instead of a silently wrong balance.
+
+### Timeouts and the connection pool
+
+```java
+@Transactional(timeout = 5)   // seconds
+```
+
+Worth setting on anything that touches an external system, because **a
+transaction holds its connection for its entire duration**. A method that opens a
+transaction and then makes a slow HTTP call is holding a database connection
+while waiting on the network — the classic way to exhaust a pool of 10 with only
+10 concurrent users. **Do the remote call outside the transaction**, then open a
+short one to persist the result.
+
+### Testing
+
+`@Transactional` on a test method rolls back automatically at the end, which
+keeps tests isolated. Two things to know: it means your test never exercises a
+real commit (so deferred constraints and commit-time triggers go untested), and
+combined with `open-in-view` semantics it can make lazy loading *work in tests
+and fail in production*. `@Commit` opts out for a specific test.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How does `@Transactional` actually work?"** A proxy wraps the bean; the
+   interceptor gets a connection, binds it to the thread, calls your method,
+   commits or rolls back.
+2. **"Why doesn't it work on a self-call?"** `this.method()` doesn't cross the
+   proxy boundary. Same reason private and `final` methods are unadvised.
+3. **"Does it roll back on every exception?"** No — unchecked and `Error` only.
+   Checked exceptions commit. Use `rollbackFor`.
+4. **"I caught the exception and now I get `UnexpectedRollbackException`."** The
+   inner `REQUIRED` transaction joined yours and marked it rollback-only. Use
+   `REQUIRES_NEW` or don't annotate the inner method.
+5. **"`REQUIRED` vs `REQUIRES_NEW`?"** Join vs suspend-and-start-new. The latter
+   uses a second connection — watch the pool, and note the outer's uncommitted
+   data is invisible to it.
+6. **"When would you use `NESTED`?"** Savepoint-based partial rollback — and note
+   JPA doesn't support it.
+7. **"What does `readOnly` do?"** Skips Hibernate dirty checking, sets the JDBC
+   connection read-only, and commonly routes to a read replica.
+8. **"Why is my `@Async` method not in the caller's transaction?"** The
+   transaction is bound to the caller's thread via `ThreadLocal`.
+9. **"What is Open Session In View and why turn it off?"** Holds a connection for
+   the whole request and hides N+1 queries in serialisation. On by default.
+10. **"`LazyInitializationException` — cause and fix?"** Touching a lazy
+    association after the session closed. Fetch join, entity graph, or map to a
+    DTO inside the transaction — not by re-enabling OSIV.
+11. **"Two users update the same row concurrently."** `@Version` optimistic
+    locking; retry on `OptimisticLockException`. Prefer it to raising isolation.
+12. **"Why shouldn't a transaction span an HTTP call?"** It pins a database
+    connection for the duration of the network wait and exhausts the pool.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`@Transactional` on a `private` method** — silently does nothing.
+- **Catching exceptions and continuing** — no rollback, or
+  `UnexpectedRollbackException` if an inner transaction already flagged it.
+- **Long transactions** holding connections and database locks across slow I/O.
+- **`REQUIRES_NEW` in a loop** — one extra connection per iteration.
+- **Relying on OSIV**, then removing it and discovering half the codebase depends
+  on lazy loading during serialisation.
+- **Assuming the test rollback proves durability.** It proves the opposite: the
+  commit path was never exercised.
+</Callout>
+
+### Where this connects
+
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — the
+  proxy mechanism this entirely depends on.
+- [The N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) —
+  what OSIV hides.
+- [Transactions & isolation levels](/sql/4-transactions-isolation-levels) — the
+  database-side semantics.
+- [15. Microservice reliability patterns](/system-design/15-microservice-reliability-patterns)
+  — the local transaction the outbox pattern needs, and what to do once one
+  transaction can't span your services.

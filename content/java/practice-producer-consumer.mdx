@@ -1,0 +1,429 @@
+---
+title: "Practice: Producer / Consumer"
+topic: "java"
+order: 901
+group: "Practice Problems"
+difficulty: "hard"
+estimatedMinutes: 19
+tags: [practice, concurrency, wait-notify, blockingqueue, backpressure, virtual-threads]
+format: "mdx"
+summary: "Three producer-consumer implementations with the reasoning behind every while loop and notifyAll, plus the follow-ups: spurious versus lost wakeups, why the queue must be bounded, poison-pill shutdown, and what virtual threads change."
+---
+
+## Why this problem is asked
+
+Producer-consumer is the canonical concurrency question because it is the smallest
+problem that needs every primitive at once: mutual exclusion over shared state,
+coordination between threads that must wait for each other, and a bounded resource that
+creates backpressure in both directions.
+
+**What is really being tested is whether you understand that a lock is not enough.**
+Plenty of candidates make the buffer safe with `synchronized` and then busy-wait or,
+worse, spin inside the lock and deadlock everything. Getting from "no data races" to
+"threads block and are woken correctly" is the step that separates having read about
+`synchronized` from having written concurrent code, and every follow-up below has a
+precise mechanical answer.
+
+## The problem
+
+Multiple producers add items to a shared buffer of fixed capacity; multiple consumers
+take them. Producers block when the buffer is full, consumers block when it is empty,
+and there are no race conditions.
+
+## The naive attempt, and why it fails
+
+The first version people write guards the buffer and spins when it cannot proceed.
+
+```java
+// Broken two ways
+void produce(int item) {
+    while (true) {
+        synchronized (lock) {
+            if (count < buffer.length) {     // room available
+                buffer[putIndex++] = item;
+                count++;
+                return;
+            }
+        }
+        // busy-wait: burns a core doing nothing
+    }
+}
+```
+
+This is correct and unusable: a full buffer means a producer burning a whole core
+checking a condition only a consumer can change, so with as many producers as cores the
+consumers are starved of CPU.
+
+The version that looks like a fix is worse:
+
+```java
+synchronized (lock) {
+    while (count == buffer.length) {
+        Thread.sleep(10);   // sleeping while holding the monitor
+    }
+    ...
+}
+```
+
+`Thread.sleep` does not release the monitor, so the producer holds the lock the consumer
+needs to drain the buffer and nothing can ever change the condition. That is a permanent
+deadlock, and a genuinely common bug.
+
+**The primitive that resolves this is `wait()`, whose defining property is that it
+atomically releases the monitor and suspends the thread.** No spinning, and the lock
+goes to whoever can make progress. That atomicity is also what makes the pattern safe,
+for reasons the follow-ups make precise.
+
+## Solution 1: `BlockingQueue` (production)
+
+```java
+static class BlockingQueueSolution {
+    private final BlockingQueue<Integer> queue;
+    private final AtomicInteger counter = new AtomicInteger(0);
+
+    BlockingQueueSolution(int capacity) {
+        this.queue = new ArrayBlockingQueue<>(capacity);
+    }
+
+    void startProducer(String name) {
+        new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    int item = counter.incrementAndGet();
+                    queue.put(item); // blocks if queue is full
+                    System.out.printf("[%s] Produced: %d (queue size: %d)%n",
+                            name, item, queue.size());
+                    Thread.sleep(100);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, name).start();
+    }
+
+    void startConsumer(String name) {
+        new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    int item = queue.take(); // blocks if queue is empty
+                    System.out.printf("  [%s] Consumed: %d (queue size: %d)%n",
+                            name, item, queue.size());
+                    Thread.sleep(200);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, name).start();
+    }
+}
+```
+
+Note `Thread.currentThread().interrupt()` in the catch block. `InterruptedException`
+clears the interrupt flag, so a handler that swallows it destroys the shutdown signal for
+every layer above. Restoring it is the correct default, and interviewers notice when it
+is missing.
+
+## Solution 2: `wait`/`notify` (the interview classic)
+
+```java
+static class WaitNotifySolution {
+    private final int[] buffer;
+    private int count = 0;
+    private int putIndex = 0;
+    private int takeIndex = 0;
+    private final Object lock = new Object();
+
+    WaitNotifySolution(int capacity) {
+        this.buffer = new int[capacity];
+    }
+
+    void produce(int item) throws InterruptedException {
+        synchronized (lock) {
+            while (count == buffer.length) {
+                lock.wait(); // buffer full, wait for consumer
+            }
+            buffer[putIndex] = item;
+            putIndex = (putIndex + 1) % buffer.length; // circular buffer
+            count++;
+            lock.notifyAll(); // wake up waiting consumers
+        }
+    }
+
+    int consume() throws InterruptedException {
+        synchronized (lock) {
+            while (count == 0) {
+                lock.wait(); // buffer empty, wait for producer
+            }
+            int item = buffer[takeIndex];
+            takeIndex = (takeIndex + 1) % buffer.length;
+            count--;
+            lock.notifyAll(); // wake up waiting producers
+            return item;
+        }
+    }
+}
+```
+
+### The parts that are not obvious
+
+**`wait()` must be called while holding the monitor it belongs to.** Calling
+`lock.wait()` outside `synchronized (lock)` throws `IllegalMonitorStateException`. That
+is not an arbitrary rule — it is the mechanism that makes the test and the wait atomic.
+
+**`count` is a separate field rather than derived from the indices.** In a circular
+buffer `putIndex == takeIndex` is ambiguous, meaning both empty and full, so both
+conditions are expressed against an explicit count instead.
+
+**Both `notifyAll` calls are unconditional.** A notification with no waiters is simply
+discarded, and trying to notify only on the empty-to-non-empty transition is a classic
+source of lost wakeups that saves nothing measurable.
+
+**`produce` and `consume` share one monitor, so both roles wait in the same queue.**
+That is the weakness Solution 3 fixes, and the reason `notifyAll` is mandatory here
+rather than merely safer.
+
+## Solution 3: `ReentrantLock` with two conditions
+
+```java
+static class LockConditionSolution {
+    private final int[] buffer;
+    private int count = 0;
+    private int putIndex = 0;
+    private int takeIndex = 0;
+
+    private final java.util.concurrent.locks.ReentrantLock lock =
+            new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition notFull = lock.newCondition();
+    private final java.util.concurrent.locks.Condition notEmpty = lock.newCondition();
+
+    LockConditionSolution(int capacity) {
+        this.buffer = new int[capacity];
+    }
+
+    void produce(int item) throws InterruptedException {
+        lock.lock();
+        try {
+            while (count == buffer.length) {
+                notFull.await(); // only producers wait here
+            }
+            buffer[putIndex] = item;
+            putIndex = (putIndex + 1) % buffer.length;
+            count++;
+            notEmpty.signal(); // wake ONE consumer (more efficient than notifyAll)
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    int consume() throws InterruptedException {
+        lock.lock();
+        try {
+            while (count == 0) {
+                notEmpty.await(); // only consumers wait here
+            }
+            int item = buffer[takeIndex];
+            takeIndex = (takeIndex + 1) % buffer.length;
+            count--;
+            notFull.signal(); // wake ONE producer
+            return item;
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+Two `Condition` objects on one lock give each role its own wait set, so
+`notEmpty.signal()` cannot wake a producer. That is what makes `signal` safe here where
+`notify` was not in Solution 2 — the correctness argument is about who is in the wait
+set, not about the method name. Note also that `lock.lock()` goes *outside* the `try`
+with `unlock()` in the `finally`: acquiring inside the `try` would mean unlocking a lock
+you never obtained. The `while` loop is still required, because `Condition.await` may
+return spuriously exactly as `wait` may.
+
+## Complexity
+
+Each `produce` and `consume` is O(1) — a bounds check, an array write, an index
+increment — and space is O(capacity) with no per-item allocation. That is the reason to
+prefer `ArrayBlockingQueue` in a latency-sensitive path: `LinkedBlockingQueue` allocates
+a node per item and gives the collector steady work.
+
+The cost that matters is not asymptotic. It is the context switch on every block and
+wake, on the order of microseconds — thousands of times the cost of the array write it
+protects. Hence high-throughput designs batch with `drainTo`, taking many items under one
+acquisition, or avoid blocking entirely as the LMAX Disruptor does.
+
+## The follow-up questions
+
+### Why must `wait()` be in a `while` loop and not an `if`?
+
+There are **two independent reasons**, and naming only one is the common half-answer.
+
+*Spurious wakeups.* The specification permits `wait()` to return with no corresponding
+`notify`, because the underlying OS condition variables allow it and the JVM does not
+paper over it. With an `if`, the thread falls through to `buffer[putIndex] = item` on a
+full buffer and overwrites live data.
+
+*A stolen item.* This needs no spurious wakeup and is the more practical reason. Two
+consumers wait on an empty buffer; a producer adds one item and calls `notifyAll`, waking
+both. Only one can hold the monitor, so consumer A enters, takes the item and leaves
+`count` at zero. Consumer B then acquires the monitor and, with an `if`, reads from an
+empty buffer. **`notifyAll` is a hint that the condition may have changed, not a
+guarantee that it holds when you get the lock**, so it must be re-tested after every
+wake, which is exactly what `while` does.
+
+### What is the lost-wakeup problem, and what prevents it?
+
+A notification is not a stored permit. Unlike a semaphore, a `notify` delivered when
+nobody is waiting simply vanishes. The danger is a notification arriving in the window
+between testing the condition and beginning to wait: the thread then waits forever for a
+signal already sent.
+
+```java
+// BROKEN: the window between the test and the wait
+if (count == 0) {                  // consumer sees empty, is preempted here
+    synchronized (lock) {          // producer meanwhile adds an item and notifies
+        lock.wait();               // consumer waits for a notification already gone
+    }
+}
+```
+
+**The fix is structural rather than something you add: `wait()` atomically releases the
+monitor as it suspends, so as long as you test the condition and call `wait()` while
+continuously holding the same monitor, nothing can slip into the window.** A producer
+cannot enter `synchronized (lock)` to change `count` until the consumer has already
+joined the wait set. That is why `wait` must be called under the monitor, and why the
+test belongs inside the `synchronized` block rather than before it.
+
+### Why `notifyAll` rather than `notify`?
+
+Because in Solution 2 both roles share one wait set, so `notify` picks an arbitrary
+waiting thread and can pick the wrong role. With the buffer full, two producers waiting
+and one consumer waiting, a consumer takes an item and calls `notify`, which wakes the
+*other consumer*; that consumer re-tests, finds the buffer non-empty, takes an item and
+notifies again. A sequence like that leaves every producer parked while the buffer drains.
+
+`notifyAll` wakes everybody, and the wrong-role threads re-test, find nothing changed and
+go back to waiting. The cost is a thundering herd of useless wakeups, which is why
+Solution 3 exists: **with a separate `Condition` per role, `signal` is safe, because the
+wait set contains only threads that can make progress.** `notify` is not banned; it is
+unsafe when the wait set is heterogeneous.
+
+### How does `BlockingQueue` make this disappear?
+
+`ArrayBlockingQueue` *is* Solution 3, written by the people who wrote the memory model:
+one `ReentrantLock`, `notFull` and `notEmpty` conditions, a circular array. `put` and
+`take` do the blocking, so the coordination problem reduces to two method calls.
+
+Which implementation you name matters. `ArrayBlockingQueue` is bounded and pre-allocated.
+`LinkedBlockingQueue` is optionally bounded with separate put and take locks, so higher
+throughput under contention but an allocation per item. `SynchronousQueue` has no
+capacity and hands directly from producer to consumer, which is what
+`newCachedThreadPool` uses. The deployed version of this answer is that you rarely write
+either: you submit to an `ExecutorService`, whose work queue *is* a `BlockingQueue`, and
+that queue's bound is what you have to get right.
+
+### Why must the queue be bounded?
+
+Because the bound *is* the backpressure, and without it there is no way to tell a fast
+producer to slow down.
+
+With `new LinkedBlockingQueue<>()` — the unbounded default — `put` never blocks, so a
+producer outrunning its consumers enqueues until the process dies of an
+`OutOfMemoryError`. **An unbounded queue does not remove the backpressure problem, it
+defers it and converts a slow consumer into heap exhaustion, which is strictly worse**:
+it happens later, so the correlation with the cause is lost; it takes down the whole JVM
+rather than slowing one path; and every queued item is destroyed rather than delayed.
+
+The subtler cost is latency. In a deep queue each item waits behind everything ahead of
+it, so a throughput problem silently becomes a latency problem, and by the time an item is
+dequeued its result may be worthless. A bounded queue makes the constraint visible
+immediately: producers block, backpressure propagates to their callers, and you see it in
+metrics rather than in a heap dump.
+
+This is the same argument as `ThreadPoolExecutor` with an unbounded work queue, which is
+why `Executors.newFixedThreadPool` is a trap. Construct `ThreadPoolExecutor` directly with
+a bounded queue and an explicit `RejectedExecutionHandler`, deciding deliberately whether
+rejection means dropping the work, failing the caller, or running it on the calling thread
+so the caller is throttled.
+
+### How do you shut it down cleanly?
+
+Interrupting consumers works but is blunt: a consumer blocked in `take()` throws
+`InterruptedException` and abandons whatever is still queued. When the remaining items
+must be processed, use a **poison pill** — a sentinel meaning "no more work".
+
+```java
+private static final Integer POISON = Integer.MIN_VALUE;   // or a dedicated sentinel type
+
+// consumer
+while (true) {
+    Integer item = queue.take();
+    if (item.equals(POISON)) {
+        queue.put(POISON);   // pass it on so the next consumer also stops
+        break;
+    }
+    process(item);
+}
+```
+
+Two details the follow-up probes. With N consumers you must either enqueue N pills or have
+each consumer re-enqueue the one it received, as above, or the others block forever. And
+the pill must be a value that cannot occur in the data, which is why a dedicated sentinel
+type beats a magic number. State the shutdown order too: stop producers, send pills,
+`join` consumers with a timeout, then interrupt whatever is left.
+
+### What changes with virtual threads?
+
+Nothing about correctness. The memory model, `wait`/`notify` semantics and the need for the
+`while` loop are identical, because a virtual thread is still a `Thread`.
+
+What changes is the economics of blocking. A blocked platform thread costs an OS thread and
+roughly a megabyte of stack, which is why bounded pools exist. A virtual thread blocking on
+`queue.take()` unmounts from its carrier for almost nothing, so thread-per-task becomes
+viable and a hundred thousand consumers need no pool.
+
+Two consequences. **You still need explicit backpressure — a `Semaphore` or a bounded
+queue — because virtual threads remove the accidental concurrency limit a fixed pool was
+providing**, and unbounded concurrency against a database with fifty connections is not an
+improvement. And there is a pinning caveat: in Java 21 a virtual thread blocking inside a
+`synchronized` block pinned its carrier, so `ReentrantLock` was preferred in hot paths,
+while JEP 491 in JDK 24 removed that limitation.
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **Why `while` and not `if`?** Spurious wakeups are permitted, and with several
+   waiters `notifyAll` wakes them all while only one can take the item.
+2. **What is a lost wakeup and what prevents it?** A notification sent with nobody
+   waiting is discarded; holding the monitor across both the test and the `wait()` closes
+   the window, because `wait` releases it atomically as it suspends.
+3. **Why `notifyAll` in Solution 2?** One shared wait set holds both roles, so `notify`
+   can wake a thread that cannot proceed and leave the ones that can still parked.
+4. **Then why is `signal` safe in Solution 3?** Separate `Condition` objects give each
+   role its own wait set.
+5. **Why does `Thread.sleep` inside `synchronized` deadlock?** It keeps the monitor;
+   `wait` releases it.
+6. **Why must the queue be bounded?** The bound is the backpressure. Unbounded turns a
+   slow consumer into a delayed `OutOfMemoryError` that kills the JVM and destroys the
+   queued work, inflating latency in the meantime.
+7. **What is wrong with `Executors.newFixedThreadPool`?** Its work queue is unbounded, so
+   a saturated pool accumulates tasks until the heap is gone.
+8. **`ArrayBlockingQueue` or `LinkedBlockingQueue`?** Array-backed is allocation-free
+   with one lock; linked has separate put and take locks but allocates per item.
+9. **How do you shut down without losing queued work?** A poison pill, re-enqueued by
+   each consumer. Stop producers, send pills, join with a timeout, then interrupt.
+10. **Why restore the interrupt flag?** `InterruptedException` clears it, and swallowing
+    it destroys the shutdown signal for every caller above.
+11. **What do virtual threads change?** Nothing about correctness; blocking becomes
+    cheap, so thread-per-task works — but you must add explicit backpressure.
+12. **Where does this appear in system design?** As a queue between services, which is
+    why you alert on consumer lag rather than error rate: falling behind is the failure
+    mode, not throwing.
+</Callout>
+
+### Where this connects
+
+- [3. Concurrency — Senior Must-Have](/java/3-concurrency-senior-must-have) — the memory model and happens-before rules that make `wait`/`notify` correct rather than conventional.
+- [2. Operating Systems & Concurrency](/cs-fundamentals/2-operating-systems-concurrency) — what the OS does when a thread blocks, what a context switch costs, and the condition variables `wait` is built on.
+- [8. Asynchronous processing & message queues](/system-design/8-asynchronous-processing-message-queues) — the same bounded-buffer argument between services rather than threads.
+- [14. Kafka & event streaming](/system-design/14-kafka-and-event-streaming) — consumer lag and backpressure where the queue is durable.
+- [Practice: Thread-Safe Singleton](/java/practice-thread-safe-singleton) — the other half of the concurrency set, focused on safe publication.

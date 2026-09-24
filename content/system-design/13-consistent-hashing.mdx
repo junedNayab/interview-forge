@@ -1,0 +1,240 @@
+---
+title: "13. Consistent hashing"
+topic: "system-design"
+order: 210.1
+group: "Fundamentals"
+difficulty: "medium"
+estimatedMinutes: 13
+tags: [sharding, partitioning, hashing, rebalancing]
+prerequisites: [6-databases]
+format: "mdx"
+summary: "Why modulo sharding collapses when you add a machine, how the hash ring and virtual nodes fix it, and the failure modes consistent hashing does not solve."
+---
+
+## Layer 1 — The mental model
+
+You have 4 cache servers and want each key on exactly one of them. The obvious
+answer:
+
+```java
+int server = Math.abs(key.hashCode()) % 4;
+```
+
+This works perfectly until you add a fifth server. Now every key is hashed
+`% 5`, and **almost every key maps somewhere new**. Your cache hit rate drops to
+near zero at the exact moment you were adding capacity because you were
+overloaded. If it's a database rather than a cache, you aren't missing data —
+you're *losing* it, because the data is still sitting on the old shard.
+
+Concretely, moving from `N` to `N+1` servers under modulo hashing remaps
+`N / (N+1)` of all keys:
+
+| Change | Keys that move |
+|---|---|
+| 4 → 5 servers | 80% |
+| 9 → 10 servers | 90% |
+| 99 → 100 servers | 99% |
+
+The ideal is obvious: adding one server out of `N` should move about `1/(N+1)`
+of the keys — only the ones that server is taking over — and nothing else.
+
+**Consistent hashing achieves exactly that.** Hash servers and keys into the
+same circular space, and each key belongs to the first server clockwise from it.
+Adding a server captures only the arc behind it; every other key stays put.
+
+```
+            0 / 2^32
+                │
+        K1 ●    │    ○ S1
+             ╲  │  ╱
+    S3 ○ ─────  ●  ───── ● K2      ● keys   ○ servers
+             ╱  │  ╲
+        K3 ●    │    ○ S2          each key → first server clockwise
+                │
+```
+
+---
+
+## Layer 2 — The mechanism
+
+### The ring
+
+Pick a hash function with good uniform distribution and a large output space —
+MD5 or SHA-1 truncated to 32 bits historically, **MurmurHash3 or xxHash in
+practice today**, because they're 5–10× faster and you need no cryptographic
+property here. Treat the output range as a circle: `2^32 - 1` wraps to `0`.
+
+1. Hash each server's identity (`"10.0.1.7:6379"`) to a point on the ring.
+2. Hash each key to a point on the ring.
+3. Walk clockwise from the key; the first server you meet owns it.
+
+Lookup is a binary search over the sorted array of server positions —
+`O(log S)` in the number of servers, which is irrelevant at any real scale.
+
+```java
+// Ring lookup: ceiling entry, wrapping to first if past the end.
+private final NavigableMap<Long, String> ring = new TreeMap<>();
+
+public String serverFor(String key) {
+    if (ring.isEmpty()) throw new IllegalStateException("empty ring");
+    long h = hash(key);
+    Map.Entry<Long, String> e = ring.ceilingEntry(h);
+    return e != null ? e.getValue() : ring.firstEntry().getValue();  // wrap
+}
+```
+
+When a server dies, its arc merges into the next server clockwise. When one
+joins, it claims the arc behind it from its clockwise neighbour. **Nothing else
+is touched** — that is the entire benefit.
+
+### Virtual nodes: the part that makes it actually work
+
+Plain consistent hashing has a serious flaw that gets skipped in summaries: with
+few servers, random placement on the ring is *badly* uneven. Three random points
+on a circle do not produce three 33% arcs — one server routinely owns 55% of the
+keyspace. The variance is large, and it's worse after a failure, because the
+dead server's entire load lands on exactly one neighbour, which then falls over.
+That's a cascading failure.
+
+The fix: each physical server is hashed onto the ring **many times** under
+derived keys.
+
+```java
+// 150 virtual nodes per server — Ketama's long-standing default.
+for (int i = 0; i < 150; i++) {
+    ring.put(hash(server.id() + "#" + i), server.id());
+}
+```
+
+With 100–200 virtual nodes per server, the law of large numbers takes over and
+the load spread tightens to a few percent. Two consequences beyond balance:
+
+- **Failure load is spread.** A dead server's 150 arcs have 150 different
+  clockwise neighbours, so its traffic is distributed across the whole fleet
+  rather than dumped on one machine.
+- **Heterogeneous hardware works.** A machine with twice the RAM gets 300
+  virtual nodes instead of 150 and receives proportionally more keys. Weighting
+  is free.
+
+The cost is memory (`servers × vnodes` ring entries — trivial) and that range
+scans no longer map to contiguous nodes.
+
+### Replication on the ring
+
+For a datastore rather than a cache, you don't want one owner. The standard
+extension: a key's `N` replicas are the next `N` **distinct physical** servers
+clockwise. "Distinct physical" matters — without that check, virtual nodes
+happily place all 3 replicas on the same machine and your replication factor is
+secretly 1.
+
+Production systems then add topology awareness: walk clockwise but skip
+candidates already represented in the chosen set's rack or availability zone, so
+`N=3` means three failure domains, not three machines in one rack.
+
+<Callout type="pitfall" title="Consistent hashing does not solve hot keys">
+It distributes *keys* uniformly. It says nothing about *traffic* per key.
+
+If one celebrity account is 40% of your reads, that key hashes to one node, and
+that node is on fire. No amount of ring tuning helps — the unit of placement is
+the key, and the load is inside one key.
+
+The real fixes are different tools: replicate hot keys to every node and read
+locally; add a per-key suffix to fan one logical key across several physical ones
+(`user:123:shard0..9`, then aggregate); or put a small local cache in front so
+hot reads never reach the ring at all. Naming this distinction unprompted is a
+strong signal, because it shows you know what the technique is *for*.
+</Callout>
+
+### Bounded-load consistent hashing
+
+Even with virtual nodes, distribution is statistical, not guaranteed. Google's
+"consistent hashing with bounded loads" (2016, used in HAProxy and Envoy) adds
+one rule: a node may not exceed `c × average_load` for some `c` slightly above 1
+(say 1.25). If the clockwise target is at capacity, keep walking. You lose a
+little locality and gain a hard ceiling on imbalance — usually the right trade
+for request routing, where a single overloaded node means visible latency.
+
+### The alternatives worth naming
+
+**Rendezvous hashing (highest random weight).** For each key, compute
+`hash(key, server)` for every server and pick the maximum. No ring, no virtual
+nodes, provably uniform, and trivially supports weights. Cost is `O(S)` per
+lookup instead of `O(log S)`, which is fine below a few hundred nodes. Often the
+better choice, and rarely mentioned — bringing it up lands well.
+
+**Jump consistent hash (Google, 2014).** Ten lines, no memory, perfectly
+balanced, faster than both. The catch that decides it: it maps to bucket
+*numbers* `0..N-1` and can only add or remove buckets **at the end**. Great for
+sharding across a numbered pool you scale up and down; useless when arbitrary
+named servers come and go.
+
+**Range partitioning.** Not hashing at all — assign contiguous key ranges and
+split a range when it gets hot. This is what HBase, Bigtable, CockroachDB and
+DynamoDB's internals do. It preserves range-scan locality (hashing destroys it)
+and adapts to skew automatically, at the cost of needing a metadata service to
+track split points. If an interviewer asks for range queries, hashing is the
+wrong answer and you should say so.
+
+### Where it's actually used
+
+- **Cassandra / DynamoDB / Riak** — ring-based partitioning, replicas as the next
+  distinct nodes clockwise. Cassandra defaults to 256 vnodes per host.
+- **memcached clients** — Ketama, the original 1997 Akamai-lineage use case.
+- **Envoy / HAProxy / NGINX** — `ring_hash` and `maglev` load balancers for
+  session affinity without sticky-session storage.
+- **CDNs** — mapping content to edge cache nodes.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Why not just `hash % N`?"** Adding one node remaps `N/(N+1)` of keys — 80%
+   at 4→5. Cache stampede, or data stranded on the wrong shard.
+2. **"How many keys move when a node joins the ring?"** Roughly `1/(N+1)`, and
+   only from the nodes whose arcs it split.
+3. **"Why virtual nodes?"** Few random points on a circle give badly uneven arcs,
+   and a failure dumps the whole dead arc on one neighbour. Vnodes even out both
+   and let you weight heterogeneous hardware.
+4. **"How many virtual nodes?"** 100–200 is the standard range (Ketama uses 150,
+   Cassandra 256). More is smoother and costs ring memory.
+5. **"Where do replicas go?"** Next `N` distinct *physical* nodes clockwise,
+   skipping to satisfy rack and AZ diversity.
+6. **"A single key is 40% of your traffic. Does the ring help?"** No — see the
+   pitfall above. Different problem, different fix.
+7. **"What breaks with range queries?"** Hashing deliberately destroys key
+   locality, so a range scan hits every shard. Use range partitioning if scans
+   matter.
+8. **"How do clients learn the ring?"** Either gossip between nodes (Cassandra)
+   with clients caching the token map, or a coordination service holding it
+   (ZooKeeper/etcd). Stale ring state means misrouted requests, so nodes must
+   forward rather than error.
+9. **"Which hash function and why?"** MurmurHash3/xxHash — fast and uniform.
+   Cryptographic hashes are pure overhead here. Never `String.hashCode()`: it is
+   poorly distributed and its collisions are trivially constructible.
+10. **"Alternatives?"** Rendezvous hashing (simpler, weights naturally),
+    jump hash (tiny and fast, but numbered buckets only), range partitioning
+    (keeps locality, needs metadata).
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Rebalancing is still an I/O event.** Only `1/(N+1)` of keys move, but that
+  can be terabytes streaming between nodes while serving live traffic. Throttle
+  it, or adding capacity during an incident makes the incident worse.
+- **`String.hashCode()` on the ring.** Java's is weak and clusters badly for
+  similar keys; sequential IDs land in adjacent buckets. Use a real hash.
+- **Forgetting distinct-physical when picking replicas.** Silent replication
+  factor of 1. Discovered during an outage.
+- **Ring disagreement during a deploy.** Two clients with different membership
+  views route the same key to different nodes. Servers must forward misrouted
+  requests, not fail them.
+</Callout>
+
+### Where this connects
+
+- [6. Databases](/system-design/6-databases) — sharding strategies generally.
+- [5. Caching](/system-design/5-caching-your-strongest-topic-you-already-use-redis)
+  — Redis Cluster uses 16,384 fixed hash slots, a close cousin: a fixed slot
+  count decouples key placement from node count, and only slots move.
+- [7. CAP theorem](/system-design/7-cap-theorem-consistency-models) — the ring
+  decides *where* replicas live; quorums decide *what you read* from them.

@@ -1,0 +1,421 @@
+---
+title: "4. Spring Data Repository"
+topic: "java"
+order: 604
+group: "Java + SQL"
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [spring-data, repository, derived-queries, projections, pagination, keyset, specifications]
+format: "mdx"
+summary: "The repository as a query compiler that runs at startup — how PartTree turns a method name into JPQL, why @Modifying needs clearAutomatically, what Page costs that Slice does not, and why deep offset pagination is the wrong shape."
+---
+
+## Layer 1 — The mental model
+
+"Spring Data writes the implementation for you" is true and unhelpful, because
+it makes the whole thing sound like magic you are not expected to reason about.
+Here is the version that predicts behaviour:
+
+> A Spring Data repository is not a class you did not have to write. It is a
+> **query compiler that runs at application startup.** Your interface is the
+> source language. The `PartTree` parser, the JPQL parser and the projection
+> machinery are the compiler. A dynamic proxy is the compiled output.
+
+Seen as a compiler, the surprising parts become obvious. A typo in a method name
+fails at startup rather than at call time, because compilers report errors at
+compile time. Every method is resolved once and cached, so there is no per-call
+parsing cost. And things the compiler cannot express — dynamic predicates,
+keyset pagination, bulk updates — need a different input language, which is what
+`@Query`, `Specification` and custom fragments are for.
+
+```
+  startup:
+    scan interfaces annotated/extending Repository
+        |
+    for each method, pick a QueryLookupStrategy:
+        1. is there a @Query?          -> parse the JPQL or native SQL
+        2. is there a named query?     -> use it
+        3. otherwise                   -> PartTree-parse the METHOD NAME
+        |
+    build a JDK dynamic proxy; register each method -> RepositoryQuery
+        |
+    any method that cannot be resolved  ->  the context fails to start
+
+  runtime:
+    proxy.invoke(method) -> look up the prepared RepositoryQuery -> execute
+```
+
+**The fail-fast property is the best thing about this design and worth naming.**
+`findByEmial(String e)` is not a runtime failure at three in the morning; it is
+a startup error saying `No property 'emial' found for type 'User'`, in CI,
+before anything deploys.
+
+---
+
+## Layer 2 — The mechanism
+
+### The hierarchy, and why `JpaRepository` is usually the wrong choice
+
+```
+Repository<T, ID>                      marker only, no methods
+   |
+CrudRepository                         save, findById, findAll, delete, count
+   |
+ListCrudRepository                     same, but returns List rather than Iterable
+   |
+PagingAndSortingRepository             findAll(Pageable), findAll(Sort)
+   |
+JpaRepository                          + flush(), saveAndFlush(), deleteAllInBatch(),
+                                         getReferenceById(), findAll returning List
+```
+
+Nearly every tutorial extends `JpaRepository` reflexively. Two real arguments
+against it, and stating them is a design-maturity signal.
+
+The first is **surface area**. `JpaRepository` inherits `deleteAll()` — a method
+that empties the table, exposed on every repository, available to any caller,
+one autocomplete away from a production incident. Most domain repositories need
+four or five operations, and extending `Repository<Url, Long>` with exactly the
+methods you want gives you the generated implementations without the rest of the
+catalogue.
+
+The second is **leakage**. `flush()`, `getReferenceById()` and
+`deleteAllInBatch()` are JPA concepts. If they appear on the interface your
+service layer depends on, that layer is coupled to JPA and the repository has
+stopped being an abstraction over persistence.
+
+This is a preference, not a rule, and plenty of good codebases extend
+`JpaRepository` everywhere. The point is being able to say *why* you would not.
+
+<Callout type="note" title="Verified from your url-shortener">
+`src/main/java/com/urlshortener/repository/UrlRepository.java` declares
+`public interface UrlRepository extends JpaRepository<Url, Long>` with three
+derived methods: `Optional<Url> findByShortCode(String)`,
+`boolean existsByShortCode(String)`, and
+`List<Url> findByUserIdOrderByCreatedAtDesc(Long)`.
+
+That third one shows the parser doing real work. `UserId` traverses the
+`@ManyToOne` association from `Url` to `User` and reads its `id`, which becomes
+a predicate on the `user_id` foreign key column with no join needed, and
+`OrderByCreatedAtDesc` becomes the `ORDER BY`. Three methods, no JPQL, no
+implementation, and a startup failure if any property name is wrong.
+
+The interface also inherits `deleteAll()`, which nothing in the project calls.
+That is the surface-area argument in one line: narrowing to `Repository<Url, Long>`
+plus the three methods and the `save`/`delete` pair `UrlService` actually uses
+would lose nothing.
+</Callout>
+
+### How derived query methods actually work
+
+At startup, `PartTree` splits the method name into a **subject** and a
+**predicate** at the first `By`. The subject decides the operation — `find`,
+`get`, `exists`, `count`, `delete` and friends — plus modifiers like `Distinct`
+and a limit expression such as `First10` or `Top20`. The predicate is tokenised
+into `Part` objects split on `And` and `Or`, each carrying a keyword:
+`GreaterThan`, `Between`, `Like`, `StartingWith`, `In`, `IsNull`, `IgnoreCase`.
+Finally `OrderBy` introduces the sort.
+
+Each property token is resolved against the entity's metamodel greedily: it
+tries the longest matching property first, then backtracks to split on camel
+case, which is why `findByUserId` can mean either a `userId` property or a
+traversal into `user.id`. When both exist the greedy match wins, and you
+disambiguate with an underscore — `findByUser_Id`.
+
+Three consequences that matter in practice:
+
+**It fails fast.** An unresolvable property aborts the application context, and
+that is the single best property of the whole mechanism.
+
+**It has a complexity ceiling.** `findByDepartmentNameAndSalaryGreaterThanAndActiveTrueOrderByHireDateDesc`
+is a legal method name and an unreadable one. Past two or three predicates,
+switch to `@Query` or a `Specification` — the method name is a DSL, and like any
+DSL it stops paying for itself once the expression gets complicated.
+
+**The return type is part of the contract.** `Optional<T>` for at most one
+result, `List<T>` for many, `Stream<T>` for a cursor you must close,
+`Page<T>`/`Slice<T>` for pagination, a projection to control columns. Returning
+a bare `T` from a query that can match multiple rows throws
+`IncorrectResultSizeDataAccessException` rather than picking one.
+
+### `@Query`: JPQL, native, and the parts people get wrong
+
+```java
+@Query("SELECT e FROM Employee e WHERE e.salary > :min AND e.department.name = :dept")
+List<Employee> findHighEarners(@Param("min") BigDecimal min, @Param("dept") String dept);
+```
+
+JPQL operates on **entities and their fields**, not tables and columns, which is
+why it survives a column rename that only touches an `@Column` annotation and
+why it navigates associations with a dot. It is parsed and validated at startup,
+so a typo in JPQL is another startup failure.
+
+Native SQL is the escape hatch for window functions, CTEs, database-specific
+operators, and anything JPQL cannot express:
+
+```java
+@Query(value = "SELECT * FROM employees WHERE EXTRACT(YEAR FROM hire_date) = :year",
+       nativeQuery = true)
+List<Employee> findHiredInYear(@Param("year") int year);
+```
+
+Three costs come with it. It is not portable. It is **not validated at startup**,
+so the error moves to first execution. And paginating a native query needs an
+explicit `countQuery`, because Spring Data cannot derive a count from arbitrary
+SQL the way it can from JPQL.
+
+Prefer `:named` parameters over positional `?1`, which go silently wrong the
+moment somebody reorders the signature. Either way both forms bind parameters —
+this is a `PreparedStatement` underneath, with all the injection properties from
+[JDBC fundamentals](/java/1-jdbc-fundamentals). The remaining injection vectors
+are concatenating into a native query string and accepting an unvalidated sort
+column name.
+
+### `@Modifying`, and the stale persistence context
+
+```java
+@Modifying(clearAutomatically = true, flushAutomatically = true)
+@Transactional
+@Query("UPDATE Employee e SET e.salary = e.salary * :factor WHERE e.department.id = :id")
+int applyRaise(@Param("factor") BigDecimal factor, @Param("id") Long id);
+```
+
+`@Modifying` tells Spring Data to call `executeUpdate()` instead of
+`getResultList()`. Without it you get an exception, because a `SELECT`-shaped
+execution path cannot run a `DELETE`.
+
+What makes the two flags necessary follows directly from the persistence context
+in [the JPA lesson](/java/2-spring-data-jpa-hibernate). **A bulk JPQL update is
+translated straight to SQL and executed by the database, completely bypassing
+the persistence context.** Hibernate does not know which rows it touched and
+cannot update its managed copies. That produces two bugs.
+
+If the context holds unflushed changes, your bulk `UPDATE` runs against a
+database that does not contain them yet and operates on stale rows.
+`flushAutomatically = true` flushes first.
+
+If affected entities are already managed, they now hold values that no longer
+match the database. The next read returns the stale in-memory object — the
+identity map doing its job, and its job is now wrong — and dirty checking at
+commit may write those stale values back over your bulk update.
+`clearAutomatically = true` clears the context so later reads hit the database.
+
+**"Why does `@Modifying` need `clearAutomatically`?" sounds like configuration
+trivia and is actually a test of whether you understand the persistence
+context.** A bulk query goes around it, leaving it holding a lie.
+
+The consequence to own: clearing detaches *everything*, including unrelated
+entities the caller was holding, which is why bulk updates belong in their own
+narrow transaction rather than inside a larger business method.
+
+### Projections
+
+**Interface-based, closed.** Declare an interface with getters matching entity
+properties; Spring Data generates a proxy and **a query that selects only those
+columns.** The cheap, safe default.
+
+```java
+interface EmployeeNameOnly {
+    String getName();
+    String getEmail();
+}
+List<EmployeeNameOnly> findByActiveTrue();   // SELECT name, email FROM ...
+```
+
+**Interface-based, open.** Add a `@Value` SpEL expression and the projection
+becomes "open":
+
+```java
+interface EmployeeSummary {
+    @Value("#{target.firstName + ' ' + target.lastName}")
+    String getFullName();
+}
+```
+
+The critical difference is that **an open projection cannot be optimised**. The
+expression can reference anything on the target, so Spring Data must load the
+entire entity and evaluate SpEL against it. You keep the convenient shape and
+lose the column reduction, which was usually the point. This is a favourite
+follow-up.
+
+**Class-based (DTO).** A `record` whose constructor parameters match the
+selected properties. Column selection is optimised like a closed interface, and
+you get a real immutable type rather than a proxy.
+
+**Dynamic.** Declare the method generically and let the caller choose:
+
+```java
+<T> List<T> findByActiveTrue(Class<T> type);
+```
+
+One query definition, many shapes — a full entity for the edit screen, a slim
+projection for the list screen.
+
+### Pagination: `Page`, `Slice`, and why offset is the wrong shape
+
+`Page<T>` gives you `getTotalElements()` and `getTotalPages()`. It gets them by
+executing **a second query**:
+
+```sql
+select * from employees where dept_id = ? order by id limit 20 offset 0;
+select count(*) from employees where dept_id = ?;          -- the extra query
+```
+
+`Slice<T>` does not run the count. It fetches `pageSize + 1` rows and reports
+`hasNext()` based on whether the extra row materialised. One query instead of
+two.
+
+That sounds minor and is not. On a large filtered table the `COUNT` can cost more
+than the page itself, because the page reads twenty rows through an index while
+the count visits every matching row. **If your UI shows "load more" rather than
+numbered pages, `Slice` is free performance.**
+
+The deeper problem is offset itself:
+
+```sql
+select * from events order by created_at desc limit 20 offset 100000;
+```
+
+The database cannot jump to row 100,000. It must produce and discard the first
+100,000 rows, so **offset pagination is `O(offset)` and page 5,000 is five
+thousand times more expensive than page 1.** It is also incorrect under
+concurrent writes: a row inserted between requests shifts everything, so the
+reader sees an item twice or misses one entirely.
+
+Keyset (or "seek") pagination fixes both:
+
+```sql
+-- instead of OFFSET, remember where you stopped
+select * from events
+where (created_at, id) < (:lastCreatedAt, :lastId)
+order by created_at desc, id desc
+limit 20;
+```
+
+With an index on `(created_at, id)` the database seeks directly to the position
+and reads twenty rows: constant cost per page, stable under inserts. The
+tie-breaker column is not optional — without a unique second key, rows sharing a
+timestamp are skipped or repeated. The cost is losing random page access, which
+is exactly the feature nobody uses on an infinite scroll. See
+[indexing and performance](/sql/3-indexing-performance) for the index that makes
+the seek work.
+
+### Dynamic queries: `Specification` and QueryDSL
+
+When a search screen has eight optional filters you cannot write a method name,
+and you should not write 256 `@Query` methods. Extending
+`JpaSpecificationExecutor` lets you compose predicates:
+
+```java
+Specification<Employee> spec = Specification.where(null);
+if (dept != null)   spec = spec.and((r, q, cb) -> cb.equal(r.get("department").get("name"), dept));
+if (minSalary != null) spec = spec.and((r, q, cb) -> cb.ge(r.get("salary"), minSalary));
+return repo.findAll(spec, pageable);
+```
+
+This is the Criteria API underneath, so it is type-safe in structure but
+stringly-typed in property names unless you generate the JPA metamodel. QueryDSL
+solves that with generated `Q` classes and a more readable fluent syntax, at the
+cost of an annotation processor. Query By Example is the third option and only
+suits simple equality matching.
+
+### `@Transactional(readOnly = true)`
+
+`SimpleJpaRepository` is already annotated `@Transactional(readOnly = true)` at
+class level, with write methods overriding it, so each repository call runs in
+its own read-only transaction **if the caller has not started one**.
+
+That "if" is the whole point. A service method calling three repository methods
+without its own `@Transactional` runs three separate transactions on three
+connections with three persistence contexts, and has no atomicity between them.
+**The transaction boundary belongs in the service layer, not the repository**;
+the repository annotations exist only so a bare call is not accidentally
+non-transactional. What `readOnly` does to Hibernate is covered in
+[transaction management](/java/5-transaction-management-transactional).
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"How does Spring Data implement my interface?"** At startup it resolves each
+   method to a query — from `@Query`, a named query, or by parsing the method
+   name — and builds a dynamic proxy that dispatches to the prepared query.
+2. **"What happens if I misspell a property in a method name?"** The application
+   context fails to start with `No property 'x' found for type 'Y'`. Fail-fast is
+   the main benefit of the design.
+3. **"How is the method name parsed?"** `PartTree` splits at the first `By` into
+   subject and predicate, tokenises the predicate on `And`/`Or` with keywords like
+   `GreaterThan` and `Between`, and resolves each property greedily against the
+   metamodel.
+4. **"`findByUserId` — property or traversal?"** Ambiguous. The greedy match
+   prefers a `userId` property; use `findByUser_Id` to force the association
+   traversal.
+5. **"When do you stop using derived queries?"** Past two or three predicates.
+   Beyond that the name is unreadable and `@Query` or a `Specification` is
+   clearer.
+6. **"Should you extend `JpaRepository`?"** Often not. It exposes `deleteAll()`
+   and `flush()` on every repository and leaks JPA into the domain. Extending
+   `Repository` and declaring only what you need is tighter.
+7. **"JPQL versus native?"** JPQL is over entities, portable, and validated at
+   startup. Native is for database-specific SQL, is not validated until
+   execution, and needs an explicit `countQuery` for pagination.
+8. **"Why does `@Modifying` exist?"** It switches execution to `executeUpdate()`.
+   The query is sent straight to the database and bypasses the persistence
+   context entirely.
+9. **"Why `clearAutomatically` and `flushAutomatically`?"** Because of that
+   bypass. Flush first so the update sees your pending changes; clear afterwards
+   so managed entities do not serve stale values or write them back at commit.
+10. **"Closed versus open projections?"** A closed interface projection lets
+    Spring Data select only the needed columns. An open one with `@Value` must
+    load the whole entity to evaluate SpEL, so you lose the optimisation.
+11. **"`Page` versus `Slice`?"** `Page` runs an extra `COUNT` query for the
+    total; `Slice` fetches one extra row and only reports whether a next page
+    exists. On a large table the count is often the more expensive of the two
+    queries.
+12. **"Why is deep offset pagination slow?"** The database must generate and
+    discard every row before the offset, so cost grows linearly with page number.
+    It is also unstable under concurrent inserts.
+13. **"What is keyset pagination?"** Remember the last row's sort key and use a
+    `WHERE` comparison instead of `OFFSET`. Constant cost per page with the right
+    index, at the price of losing random page access.
+14. **"How do you build a query with eight optional filters?"** `Specification`
+    or QueryDSL, composed conditionally. Not a method name, and not a
+    combinatorial explosion of `@Query` methods.
+15. **"Where does `@Transactional` belong?"** The service layer. Repository
+    methods are individually transactional, so without a service boundary a
+    multi-call method is several independent transactions with no atomicity
+    between them.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **`@Modifying` without `clearAutomatically`**, leaving managed entities holding
+  pre-update values that dirty checking may write back.
+- **`@Transactional` only on repositories**, so a service method spanning three
+  calls has no atomicity.
+- **Returning `Page` everywhere** and paying for a `COUNT` that no screen
+  displays.
+- **Offset pagination over a large table**, where the last page times out and the
+  first one is instant.
+- **Keyset pagination without a unique tie-breaker**, which silently skips rows
+  that share a timestamp.
+- **Passing a user-supplied string as a sort property**, the one injection vector
+  left in a parameterised world.
+- **Positional `?1` parameters**, which break silently when the signature is
+  reordered.
+- **Open projections used for performance**, which load the whole entity anyway.
+- **`Stream` return types** used outside a try-with-resources, leaking a cursor.
+</Callout>
+
+### Where this connects
+
+- [Spring Data JPA and Hibernate](/java/2-spring-data-jpa-hibernate) — the
+  persistence context that `@Modifying` bypasses and projections avoid.
+- [The N+1 problem](/java/3-the-n-1-problem-most-asked-jpa-interview-question) —
+  `@EntityGraph` and DTO projections in their primary role.
+- [Transaction management](/java/5-transaction-management-transactional) — where
+  the transaction boundary belongs and what `readOnly` costs and saves.
+- [Spring internals](/java/8-spring-internals-ioc-beans-and-aop-proxies) — the
+  dynamic proxy mechanism this whole feature is built on.
+- [Indexing and performance](/sql/3-indexing-performance) — the composite index
+  that makes keyset pagination constant-time.

@@ -1,0 +1,235 @@
+---
+title: "Story 3: \"How do you approach code reviews?\""
+topic: "behavioral"
+order: 903
+difficulty: "medium"
+estimatedMinutes: 18
+tags: [behavioral, code-review, collaboration, security, url-shortener]
+format: "mdx"
+summary: "A stated review philosophy with a severity ladder, worked from real findings in the url-shortener config and rate limiter, plus how to phrase blocking feedback and what interviewers score in your answer."
+---
+
+## What this question is really probing
+
+This one is different from the other three. It is not primarily a story question —
+it is asking for a **philosophy**, and then checking whether you have examples
+that prove you actually hold it.
+
+What the interviewer is collecting:
+
+- **Do you know what a review is for?** Reviews catch bugs, but their larger
+  function is spreading context and keeping the codebase coherent. Candidates who
+  only talk about catching bugs are describing a linter.
+- **Can you separate what matters from what does not?** An engineer who blocks a
+  pull request over variable naming while missing a race condition is a net
+  negative on a team.
+- **How do you say difficult things?** This is the real content of the question.
+  Reviews are where most engineering disagreement happens in writing, permanently,
+  in front of an audience.
+- **How do you receive them?** Almost always asked as a follow-up, and answered
+  badly more often than the first half.
+
+There is a specific failure mode to avoid: answering entirely in the abstract.
+"I look for correctness, readability and maintainability" is true, generic, and
+gives the interviewer nothing. **The structure that works is a short philosophy
+followed immediately by two concrete things you have actually flagged.**
+
+## The structure that works
+
+```
+1. What you think a review is for        two sentences, a real opinion
+2. Your ordering — what you check first  a severity ladder, not a checklist
+3. How you phrase feedback               blocking vs non-blocking, question vs assertion
+4. Two concrete examples                 something you caught; something you were wrong about
+5. How you receive reviews               the follow-up, answered before it is asked
+6. Speed and volume                      the practical constraint everybody has
+```
+
+## A review philosophy worth stating
+
+Something close to this, in your own words:
+
+> "The main thing I'm doing in a review is trying to understand the change well
+> enough to have caught it if it were wrong — which means the first thing I need
+> is why it exists, not what it does. After that I go in severity order, because
+> the expensive mistake in reviewing is spending attention on the cheap stuff."
+
+Then the ladder. Reviewing in a fixed order is what stops you from anchoring on
+whatever you noticed first:
+
+1. **Correctness and data integrity.** Does it do the thing? What happens on
+   the error path, at the boundary, at zero, on a retry? Is anything that
+   modifies data non-idempotent when it will be retried?
+2. **Security.** Anything touching authentication, authorization, user input,
+   or credentials. This tier is always blocking.
+3. **Concurrency and failure modes.** What happens under two simultaneous
+   requests, a partial failure, a slow dependency, a restart mid-operation?
+4. **Data access and performance.** N+1 queries, missing indexes on new query
+   paths, unbounded result sets, work on a hot path that could be deferred.
+5. **Interface design.** Is the public shape of this thing something we will be
+   able to change later?
+6. **Tests.** Not coverage percentage — whether the tests would fail if the
+   logic were wrong.
+7. **Readability and naming.** Real, but last, and usually non-blocking.
+
+**Saying the ladder out loud is worth more than any single item on it,** because
+it demonstrates that you triage rather than react.
+
+## Worked examples from the url-shortener
+
+Use your own findings. These are real issues in the `url-shortener` project and
+they illustrate what "specific enough" looks like in this answer.
+
+**A blocking security finding.** The `application.yml` in that project contains a
+hardcoded JWT signing secret and hardcoded database credentials. In a review this
+is a stop-the-line comment, and the useful thing is explaining *why* rather than
+citing a rule: a signing secret in version control is held forever by everyone
+with repository access, including anyone who had access and left, and rotating it
+becomes a coordinated deploy rather than a config change. The fix is to read both
+from the environment or a secrets manager, fail fast at startup when they are
+absent, and rotate the committed value as already compromised.
+
+> "The comment I'd leave is: *this needs to move to an environment variable or a
+> secrets manager before this merges, and the current value should be rotated
+> since it's in git history. Happy to pair on the config change if it's easier.*
+> Blocking, brief, with a reason and an offer."
+
+**A correctness finding that is easy to miss.** The `RateLimitInterceptor` is
+Redis-backed and keys its counters on `request.getRemoteAddr()`. Behind a load
+balancer or reverse proxy, that returns the proxy's address, so every user in the
+world shares a single bucket and the rate limiter either blocks everyone or
+protects nobody. Code that is completely correct on a laptop and wrong the moment
+it is deployed behind infrastructure is exactly the category reviews exist to
+catch, because the tests pass either way.
+
+**A non-blocking observation.** The same interceptor fails open — if Redis is
+unavailable, requests pass through unlimited. That is very likely the right
+choice for this service, since availability matters more than perfect limiting on
+a redirect endpoint. But it is a decision, and a decision should be visible:
+
+> "Worth a comment in the code saying this is deliberate. Non-blocking, but the
+> next person to read it will otherwise wonder whether the empty catch block is a
+> bug."
+
+That third example is the most useful one to include in your answer, because
+**it shows you distinguish between "this is wrong" and "this is a choice that
+should be written down".** Reviewers who cannot make that distinction are the
+ones everybody dreads.
+
+## How to phrase feedback
+
+Two mechanics are worth stating explicitly in your answer, because they are
+concrete and most candidates do not mention them.
+
+**Label severity.** Prefix comments so the author knows what to do with them:
+blocking, non-blocking, or a question. A review with eleven comments and no
+labels is intimidating and slow; the same eleven comments where two are blocking
+and nine are marked optional is a five-minute conversation.
+
+**Ask rather than assert when you are not certain.** "What happens if two
+requests hit this at the same time?" is better than "this has a race condition"
+for two reasons: it is not wrong if you have misread the code, and it gives the
+author the chance to find it themselves, which is how the context actually
+transfers. Save assertions for when you are certain and the stakes are high — the
+hardcoded secret above does not need to be phrased as a question.
+
+**Say it the way you would in person.** Tone does not survive writing, and a
+terse comment reads as hostile when it was only brief. "Nit:" and "I might be
+missing something, but…" are not weakness; they are the written equivalent of
+tone of voice.
+
+## How you receive reviews
+
+This is asked as a follow-up in most interviews, and it is where the answer either
+becomes credible or does not. The strongest thing you can include is a specific
+time a reviewer was right and you were initially annoyed.
+
+> "The one I remember is someone pushing back on a change where I'd widened a
+> transaction boundary to make a test easier to write. My first reaction was that
+> it was a small thing and the test mattered. They were right — it meant a
+> connection was held across an external HTTP call, which is exactly how you
+> exhaust a pool under load. I've been suspicious of `@Transactional` scope ever
+> since."
+
+Being able to name a time you were wrong in review is worth more than any amount
+of describing how open to feedback you are.
+
+If a review comment is wrong or you disagree, say the rule you follow: respond
+once in writing with the reasoning, and if there are two round trips without
+convergence, move it to a call. Comment threads past three replies are a signal
+that the disagreement is not about the code. That connects directly to
+[Story 4 on disagreements](/behavioral/story-4-how-do-you-handle-disagreements-with-your-team).
+
+## Speed, and the honest constraint
+
+Mention throughput, because everyone who has reviewed code knows it is the
+binding constraint. Reviews that sit for two days block people, and a reviewer
+who is thorough but slow can be worse for a team than one who is fast and good
+enough.
+
+A defensible position: small changes within a few hours, a real pass on large
+ones the same day, and say so when you cannot — "I won't get to this properly
+until tomorrow morning" beats silence. And if a pull request is too large to
+review well, say that instead of rubber-stamping it. **A large change reviewed
+superficially is worse than an unreviewed one, because it carries a signature.**
+
+## Draft your own
+
+1. **Your one-sentence view of what a review is for.** In your words, and it
+   should be arguable — a view nobody could disagree with is not a view.
+2. **Your ordering.** What you look at first, second, third, and why that order.
+3. **A real thing you caught,** with enough detail to be asked about: what the
+   code did, what was wrong, how you phrased it, what happened next.
+4. **A real thing you got wrong or missed,** and what changed as a result.
+5. **A time a reviewer was right and you resisted.** Name the technical point.
+6. **Your phrasing conventions.** Severity labels, questions over assertions,
+   when you move to a call.
+7. **Your turnaround expectation,** and what you do when you cannot meet it.
+8. **The thing you will not compromise on.** Most engineers have one — security,
+   or tests on anything that touches money, or no unexplained magic numbers.
+   Naming it makes the rest of the answer sound like it comes from a person.
+
+<Callout type="tip" title="If you have not reviewed much code">
+Say so directly and pivot to what you do have. "My current team does lightweight
+review, so most of what I've done is on my own code" is honest, and you can
+follow it with what you look for when re-reading your own work before pushing,
+plus what you would want from a reviewer. Interviewers respond well to that.
+Claiming a review culture you do not have gets you a follow-up about your team's
+process that you cannot answer.
+</Callout>
+
+## Follow-ups you will get
+
+| Follow-up | What they are checking |
+|---|---|
+| "Tell me about a time you had to reject a pull request." | Whether you can hold a line. |
+| "What do you do when the author disagrees with you?" | Conflict handling in writing. |
+| "How do you review code in a part of the system you don't know?" | Honesty — the answer is you ask, or you review narrowly and say so. |
+| "How do you handle reviewing someone more senior than you?" | Whether hierarchy stops you raising real issues. |
+| "What's the last review comment you received that changed your mind?" | Coachability, and whether your answer was rehearsed. |
+| "How do you keep reviews from blocking the team?" | Pragmatism. |
+| "Do you approve with comments, or wait?" | Team-fit; either answer is fine with a reason. |
+
+## Weak versus strong
+
+<Callout type="pitfall" title="What a weak answer sounds like">
+"I review PRs carefully and look for correctness, readability, and adherence to
+best practices. I try to give constructive feedback and I'm always open to
+feedback myself. I think code reviews are important for knowledge sharing."
+
+Nothing here is false and nothing here is evidence. There is no ordering, no
+example, no phrasing, no time you were wrong, and no acknowledgement that reviews
+have a cost. It is what someone who has read about code review says.
+</Callout>
+
+<Callout type="interview" title="What a strong answer sounds like">
+A one-sentence view with an actual opinion in it. A severity ladder, stated as an
+ordering rather than a list. One blocking thing you caught and how you worded it.
+One non-blocking thing you flagged as a decision rather than a defect. A time a
+reviewer was right and you resisted, named specifically. Your rule for escalating
+a comment thread to a call. And an honest word about turnaround.
+
+Around three to four minutes, and every part of it is checkable.
+</Callout>
+
+Next: [Story 4 — how do you handle disagreements](/behavioral/story-4-how-do-you-handle-disagreements-with-your-team).

@@ -1,0 +1,355 @@
+---
+title: "Part 4 — How to drive an LLD interview (the method)"
+topic: "lld"
+order: 405
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [lld, interview-technique, process, scoping, time-management]
+format: "mdx"
+summary: "A six-phase method with time boxes for a 45–60 minute round, the exact sentences to say in each phase, and how to recover when you run out of time or forget a pattern's name."
+---
+
+## Layer 1 — The mental model
+
+A beginner treats an LLD round as a design problem to solve. It is better
+understood as a *performance* to deliver, with a script you have rehearsed.
+
+> **The interviewer is not comparing your design to an ideal one. They are
+> deciding whether they would trust you to own an ambiguous feature.** The
+> design is the medium; the thing being recorded is whether you scoped before
+> designing, named what varies before choosing an abstraction, and could defend
+> a decision when pushed.
+
+That reframing has a practical consequence: the biggest scoring gains are
+available in the first ten minutes and the last ten, and those are precisely the
+parts beginners rush through on the way to writing code.
+
+Six phases, with times for a 45–60 minute round. Adjust proportionally for a
+90-minute machine-coding round — the phases are the same, the coding phase
+absorbs the extra time.
+
+```
+1. CLARIFY & SCOPE          5 min   requirements in, non-requirements out
+2. ENTITIES & RESPONSIBILITIES  5 min   the nouns, and one sentence of job each
+3. CLASS DIAGRAM & INTERFACES  10 min   the skeleton, interfaces on the axes of change
+4. CODE THE CORE            20 min   the 3–4 classes that carry the design
+5. WALK A SCENARIO           5 min   trace one request end to end, out loud
+6. EXTENSIONS, CONCURRENCY, TESTS  5 min   critique your own design first
+```
+
+The single habit that separates strong candidates: **you drive.** You announce
+each phase, you state its output, you move on. An interviewer who has to prompt
+you to start coding has already written something on the scorecard.
+
+---
+
+## Layer 2 — The mechanism
+
+### Phase 1 — Clarify and scope (5 minutes)
+
+The problem statement is deliberately underspecified. Your first job is to make
+it specific enough to design, and small enough to finish.
+
+Ask four or five questions, no more. The ones that always earn their keep:
+
+- **"What are the core use cases you want working?"** Get them to name two or
+  three. Everything else is out of scope by agreement.
+- **"What is likely to change or be extended later?"** This is the highest-value
+  question in the round and almost nobody asks it. The answer tells you where to
+  put interfaces.
+- **"Is this single-process and in-memory, or do I need persistence?"** In a
+  machine-coding round the answer is nearly always in-memory. Ask anyway, so it
+  is agreed rather than assumed.
+- **"Is this concurrent — multiple users or gates acting at once?"** The answer
+  determines whether you need synchronisation, and asking it signals you know it
+  matters.
+- **"How much of this should I actually code versus design?"** Legitimate and
+  useful. It tells you how to split your time.
+
+Then do the thing beginners skip: **say what you are not building.**
+
+> *"So: park and unpark a vehicle, compute a fee on exit, support multiple
+> floors and spot types. I'm going to treat payment processing, user accounts
+> and reservations as out of scope and assume they're handled elsewhere — is
+> that reasonable?"*
+
+This is not dodging work. It is the clearest available signal of someone who has
+shipped under a deadline, and it protects the forty minutes you have left. The
+equivalent move in system design is described in
+[the 45-minute framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview),
+and it scores for exactly the same reason.
+
+<Callout type="tip" title="Ask about the axes of change, explicitly">
+The question *"which of these rules is most likely to change — the pricing, the
+spot allocation, or the vehicle types?"* does three things at once. It gets you
+the information that selects your abstractions. It tells the interviewer you
+think about designs in terms of cost of change rather than aesthetics. And it
+pre-loads your answer to the follow-up they were already planning to ask, which
+is almost always "now add X".
+
+Whatever they name, that is where your interface goes. Whatever they do not
+name, keep concrete and say why: *"I'll keep the floor layout as a plain class —
+you mentioned it doesn't vary, so an abstraction there would be cost with no
+benefit."*
+</Callout>
+
+### Phase 2 — Entities and responsibilities (5 minutes)
+
+Pull the nouns out of the requirements. They are your candidate classes. Then do
+the part that matters: **give each one a one-sentence job description, out
+loud.**
+
+> *"`ParkingSpot` owns whether it's occupied and by what. `ParkingFloor` owns a
+> collection of spots and can find a free one. `Ticket` is an immutable record
+> of an entry. `ParkingLot` is the entry point that coordinates floors,
+> allocation and pricing."*
+
+If you cannot state a class's job in one sentence without using "and", it is
+doing too much. That is the cheapest Single Responsibility check available and
+it takes four seconds per class.
+
+Two habits that pay off here:
+
+- **Discard nouns that are not classes.** Not every noun earns a class. "Fee" is
+  a value; `Money` might be a class, `Fee` probably is not. Saying "I'll model
+  fee as a value on the ticket rather than its own type" shows discrimination.
+- **Name the verbs and place them.** Park, unpark, allocate, price. Each verb
+  belongs to the class that owns the data it touches. A verb whose data lives
+  somewhere else is a sign you have put the method on the wrong class.
+
+### Phase 3 — Class diagram and interfaces (10 minutes)
+
+Sketch boxes and arrows. Do not draw formal UML; nobody wants it. Do name the
+relationships as you draw — "the lot *composes* floors, so floors don't outlive
+the lot" — because that is the part being listened to.
+
+The rule for this phase: **write the interfaces before their implementations.**
+Say why as you do it.
+
+```java
+// Declared first, deliberately. These two are the axes of change the
+// interviewer named, so everything else will depend on these, not on classes.
+public interface SpotAllocationStrategy {
+    Optional<ParkingSpot> allocate(List<ParkingFloor> floors, Vehicle vehicle);
+}
+
+public interface PricingStrategy {
+    Money fee(Ticket ticket, Instant exitTime);
+}
+```
+
+Writing the interface first forces you to decide what a component *is* before
+you get lost in how it works, and it gives the interviewer something to react to
+early — which is good, because a correction at minute twelve is cheap and one at
+minute forty is not.
+
+Before leaving this phase, run the extensibility check on yourself, out loud:
+
+> *"If I had to add electric-vehicle charging spots tomorrow, I'd add an enum
+> constant and one allocation rule — `ParkingLot` doesn't change. If I had to
+> add weekend surge pricing, that's one new `PricingStrategy` implementation.
+> That's the property I was designing for."*
+
+You have just pre-answered the deep-dive question. Interviewers notice.
+
+### Phase 4 — Code the core (20 minutes)
+
+Write the three or four classes that carry the design. Not all of them — you do
+not have time, and completeness is not what is being measured.
+
+What to write, in priority order:
+
+1. The interfaces on the axes of change, with real signatures.
+2. The core entity that owns the tricky invariant — the one with the
+   `synchronized` block or the validation.
+3. The coordinator that ties them together, showing the dependencies arriving
+   through the constructor.
+4. One implementation of each interface, so the design is demonstrably real.
+
+What to stub, with a comment and a spoken note: everything else.
+
+```java
+final class ParkingLot {
+    private final List<ParkingFloor> floors;
+    private final SpotAllocationStrategy allocation;      // injected: DIP
+    private final PricingStrategy pricing;                // injected: swappable
+
+    ParkingLot(List<ParkingFloor> floors,
+               SpotAllocationStrategy allocation,
+               PricingStrategy pricing) {
+        this.floors = List.copyOf(floors);
+        this.allocation = allocation;
+        this.pricing = pricing;
+    }
+
+    Ticket park(Vehicle vehicle) {
+        ParkingSpot spot = allocation.allocate(floors, vehicle)
+                .orElseThrow(() -> new NoSpotAvailableException(vehicle.type()));
+        if (!spot.tryOccupy(vehicle)) return park(vehicle);   // lost the race, retry
+        return Ticket.issue(vehicle, spot, Instant.now());
+    }
+
+    // Deliberately stubbed — same shape as park(), releases the spot and
+    // delegates the fee to the pricing strategy. I'll say this rather than
+    // spend three minutes typing it.
+    Money unpark(Ticket ticket) { throw new UnsupportedOperationException("TODO"); }
+}
+```
+
+Two habits while typing:
+
+- **Narrate the non-obvious lines.** "`List.copyOf` because I don't want a
+  caller mutating my floors after construction." "The retry on a failed
+  `tryOccupy` is because allocation and occupation aren't atomic together — I'll
+  come back to that in the concurrency discussion." Silent typing is wasted
+  time; an interviewer cannot score code they do not understand the reason for.
+- **Keep the names boring and precise.** `tryOccupy` rather than `doIt`.
+  `NoSpotAvailableException` rather than `RuntimeException`. Naming is explicitly
+  on most scorecards and it is free.
+
+### Phase 5 — Walk a scenario (5 minutes)
+
+Take one concrete case and trace it through your code, out loud, naming each
+call.
+
+> *"A car arrives at gate 1. The gate calls `lot.park(car)`. The lot asks the
+> allocation strategy for a spot; the nearest-first strategy scans floors in
+> order and returns the first spot where `canFit` is true. The lot calls
+> `tryOccupy`, which is synchronized on the spot, so exactly one of two
+> competing gates wins. On success we issue a `Ticket` with the entry time. On
+> failure we retry allocation, because another gate took it."*
+
+This phase does three things. It proves the design actually works, which
+catches your own gaps — most missing methods are discovered here. It
+demonstrates you can reason about your code rather than just produce it. And it
+sets up the concurrency discussion naturally, because tracing two simultaneous
+cars is the obvious next sentence.
+
+Trace the happy path first, then one failure: the lot is full, or the ticket is
+already used.
+
+### Phase 6 — Extensions, concurrency and testing (5 minutes)
+
+Reserve this time. It is disproportionately valuable and it is the phase that
+gets eaten when you do not watch the clock.
+
+**Extensions.** Offer them before being asked: *"Three things I'd expect to be
+asked for next: electric-vehicle charging spots, which is an enum constant plus
+an allocation rule; monthly passes, which is a new `PricingStrategy` plus a
+lookup at entry; and multiple lots, which changes this from a single-process
+design to a distributed one and moves allocation to a shared store."* You have
+demonstrated the extensibility you designed for, in fifteen seconds.
+
+**Concurrency.** Name the race before they do. *"Two gates can call `park` at the
+same instant. Allocation is a read of free spots and occupation is a write, so
+between them another thread can take the spot. I handled it by making
+`tryOccupy` synchronized on the spot and retrying on failure, which keeps the
+lock narrow. The alternative is a single lock around the whole allocation, which
+is simpler to reason about but serialises every gate."* Two options, a choice, a
+reason.
+
+**Testing.** Answer in terms of seams: *"`ParkingLot` takes both strategies
+through the constructor, so I can test allocation with a fake pricing strategy
+that returns zero, and test pricing with no lot at all. The concurrency case I'd
+test with a `CountDownLatch` releasing two threads at the same spot and
+asserting exactly one succeeds."* That last sentence is specific enough that
+the interviewer knows you have actually written a concurrency test.
+
+### Recovering when things go wrong
+
+**You are running out of time.** Do not accelerate and produce garbage. Stub the
+method and state the intent: *"I'm going to leave `unpark` as a stub — it's the
+mirror of `park`: release the spot, then delegate to the pricing strategy. I'd
+rather spend the remaining five minutes on the concurrency discussion, which I
+think is more interesting. Does that work?"* Naming the trade and asking is a
+senior move, and it is far better than a half-written method you never explain.
+
+**You forget a pattern's name.** Describe the shape. *"I want something that
+sits in front of the real object with the same interface and does caching
+before delegating — I can't remember what it's called, but that's the
+structure."* Almost every interviewer will supply the word, and describing the
+mechanism correctly was the thing worth points. **Pattern names are vocabulary,
+not knowledge; being unable to recall a word is not the same as being unable to
+design.**
+
+**You realise your design is wrong halfway through.** Say so and fix it. *"I've
+put pricing inside `ParkingLot` and it's already awkward — adding weekend rates
+would mean editing this method. Let me pull it out behind an interface."*
+Catching your own mistake and correcting it scores higher than a design that was
+right by luck, because it is direct evidence of the review skill they are hiring
+for.
+
+**The interviewer pushes back twice on a decision.** They are telling you
+something. *"That's fair — if the allocation rule changes per floor rather than
+per lot, my design is wrong and the strategy should live on the floor. Let me
+move it."* Defending a choice past its expiry costs far more than changing it.
+
+**You go blank.** Return to the requirements. *"Let me re-read the
+requirements and make sure I've got the entities right"* is always a legal move
+and it buys you thinking time while looking deliberate.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Any questions before you start?"** Always yes. Core use cases, what will
+   change, in-memory or persisted, concurrent or not, code or design.
+2. **"Why did you put an interface there and not there?"** Because that is the
+   axis of change they named. Say it in those words.
+3. **"How would you add feature X?"** Walk the files you would touch, and count
+   them. One new file is the answer you designed for.
+4. **"What happens if two users do this simultaneously?"** Identify the
+   check-then-act window, name your fix, and state the alternative you rejected
+   and why.
+5. **"How would you test this?"** Answer in seams: which dependencies arrive
+   through constructors and can therefore be faked. Then name one specific test.
+6. **"Isn't this over-engineered?"** Possibly. Name the abstraction you would
+   drop first and the condition under which you would keep it.
+7. **"You're running low on time."** Stub, state the intent, and propose what to
+   spend the remaining minutes on.
+8. **"Why this class and not that one?"** Whichever owns the data the behaviour
+   touches. Behaviour follows data.
+9. **"What's the weakest part of your design?"** Have an answer ready. Naming
+   your own weak point unprompted is one of the highest-value things you can say.
+10. **"Would you use a database here?"** Not unless asked. A `Map` behind a
+    repository interface keeps the option open at zero cost.
+11. **"You used a pattern — why that one?"** Lead with the problem, not the
+    name. If you cannot state the problem, do not use the name.
+12. **"How long would this take you to build for real?"** They are checking
+    whether you have shipped. Be honest, and mention what you would add that the
+    interview version skipped: validation, logging, persistence, tests.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Coding in minute two.** Without scoping, you will design the wrong thing
+  well. Five minutes of questions saves twenty of rework.
+- **Designing every class.** Fifteen classes sketched and none written loses to
+  four classes written and the rest named. Depth beats breadth here.
+- **Silence while thinking.** An interviewer cannot score thoughts. If you need
+  twenty seconds, say "let me think about how to structure this" and take them.
+- **No time left for concurrency or testing.** Those last five minutes carry
+  more signal per minute than any other part. Watch the clock from minute
+  thirty.
+- **Arguing instead of adapting.** Two pushes on the same point is feedback.
+  Take it.
+- **Treating the stub as a failure.** A clearly stated stub with the intent
+  spoken aloud reads as prioritisation. An unexplained gap reads as running out
+  of ability.
+- **Forgetting the interviewer is a person.** Ask "does this direction make
+  sense before I code it?" at the end of phase three. A ten-second check-in can
+  save the whole round.
+</Callout>
+
+### Where this connects
+
+- [Part 5 — the parking lot worked end to end](/lld/part-5-worked-example-design-a-parking-lot-the-canonical)
+  — this method executed in full on the canonical problem.
+- [Part 8 — machine-coding survival tips](/lld/part-8-machine-coding-round-survival-tips)
+  — the same method adapted for a 90-minute round with a compiler.
+- [Part 2 — SOLID](/lld/part-2-solid-principles-the-heart-of-every-lld-interview)
+  — the vocabulary behind "axis of change", which every phase above relies on.
+- [The 45-minute design framework](/system-design/1-the-framework-how-to-drive-a-45-minute-design-interview)
+  — the HLD equivalent; the scoping and self-critique moves transfer directly.
+- [Java concurrency](/java/3-concurrency-senior-must-have) — so phase six is a
+  real discussion rather than the word "synchronized".

@@ -1,0 +1,346 @@
+---
+title: "Practice: flatMap on Nested Data"
+topic: "java"
+order: 904
+group: "Practice Problems"
+difficulty: "medium"
+estimatedMinutes: 17
+tags: [practice, flatmap, streams, optional, laziness, collectors]
+format: "mdx"
+summary: "Six flatMap patterns from flattening a nested list to Optional chaining, with the mechanics behind them: why map gives you a stream of streams, how flatMap interacts with laziness and short-circuiting, and where mapMulti and flatMapping fit."
+---
+
+## Why this problem is asked
+
+`flatMap` is the operation that separates people who use streams from people who
+understand them. `map`, `filter` and `collect` can be learned by pattern-matching from
+examples; `flatMap` cannot, because using it correctly requires knowing that a stream
+pipeline is a sequence of element transformations rather than a sequence of collection
+transformations.
+
+**The specific thing being tested is whether you recognise a one-to-many
+transformation and know that `map` cannot express it.** Every candidate who reaches for
+`map` on a nested structure and ends up holding a `Stream<Stream<Integer>>` has
+demonstrated the gap. Every candidate who says "each element produces a stream of
+results, so I need `flatMap` to merge them" has demonstrated the understanding — and
+that same shape recurs in `Optional`, in reactive types, and in every language with a
+monadic bind.
+
+It is also asked because the real-world instances are so common. Collecting all skills
+across all employees, all line items across all orders, all words across all sentences:
+every one of those is a `flatMap`, and interviewers like questions whose answer you will
+use the same week.
+
+## The problem
+
+Flatten nested data into a single stream. The variations asked are a list of lists, an
+arbitrarily deep structure, a collection accessed through an object graph, and
+`Optional` chaining.
+
+## The naive attempt, and why it fails
+
+The instinct is nested loops, which works and does not compose:
+
+```java
+List<Integer> flat = new ArrayList<>();
+for (List<Integer> inner : nested) {
+    for (Integer value : inner) {
+        flat.add(value);
+    }
+}
+```
+
+Correct, and the problem is what happens next: add a filter and a sort and the loop
+accumulates conditionals and temporary lists, while the equivalent pipeline stays one
+expression.
+
+The instructive failure is the stream version people write first:
+
+```java
+// Does not compile as intended — the type is wrong
+Stream<Stream<Integer>> wrong = nested.stream().map(Collection::stream);
+```
+
+`map` is one-to-one, so a mapper returning a `Stream<Integer>` produces a stream *of
+streams*. The structure is unchanged; you have simply moved the nesting into the type.
+**`flatMap` is the same operation plus the merge: it takes the stream each mapper
+returns and splices its elements into the output.** One function, one difference, and
+that difference is the whole answer to the question.
+
+## Flattening a list of lists
+
+```java
+static List<Integer> flattenNestedList(List<List<Integer>> nested) {
+    return nested.stream()
+            .flatMap(Collection::stream) // List<Integer> → Stream<Integer> for each
+            .collect(Collectors.toList());
+}
+```
+
+`Collection::stream` is the mapper, and it is a method reference to an instance method
+of the element type, which is worth being able to read: each inner list becomes a stream
+and `flatMap` concatenates them in encounter order.
+
+## Arbitrary depth, recursively
+
+```java
+@SuppressWarnings("unchecked")
+static Stream<Object> deepFlatten(List<?> nested) {
+    return nested.stream()
+            .flatMap(item -> {
+                if (item instanceof List) {
+                    return deepFlatten((List<?>) item); // recursive flatMap
+                }
+                return Stream.of(item);
+            });
+}
+```
+
+Two details are worth noticing. The mapper returns a stream in both branches — a
+recursive call for a nested list, and `Stream.of(item)` for a leaf — because `flatMap`
+requires a stream, and wrapping a single element is how you say "this contributes
+exactly one". And the return type is `Stream<Object>` rather than a list, so nothing is
+materialised until the caller collects, which means a `findFirst` on a deep structure
+stops descending as soon as it has an answer.
+
+The honest caveat, which is a good thing to volunteer: recursion depth here is the
+nesting depth of the data, so a pathologically deep structure will overflow the stack.
+The type is also `Object`, because Java's type system cannot express "arbitrarily nested
+list of T" — which is why a real API would define a recursive type rather than accept
+`List<?>`.
+
+## The realistic case: a collection behind an object
+
+```java
+record Employee(String name, List<String> skills) {}
+
+static List<String> getAllUniqueSkills(List<Employee> employees) {
+    return employees.stream()
+            .flatMap(emp -> emp.skills().stream())
+            .distinct()
+            .sorted()
+            .collect(Collectors.toList());
+}
+
+static Map<String, Long> skillFrequency(List<Employee> employees) {
+    return employees.stream()
+            .flatMap(emp -> emp.skills().stream())
+            .collect(Collectors.groupingBy(
+                    skill -> skill,
+                    Collectors.counting()
+            ));
+}
+```
+
+This is the shape that actually appears in production code, and the second method shows
+why `flatMap` matters beyond flattening: once the nested collection is a flat stream of
+skills, every ordinary collector applies to it. The nesting was the only obstacle.
+
+## `Optional.flatMap` — the same operation, different container
+
+```java
+record Address(Optional<String> city) {}
+record User(String name, Optional<Address> address) {}
+
+static Optional<String> getUserCity(User user) {
+    return user.address()               // Optional<Address>
+            .flatMap(Address::city);     // Optional<String> (not Optional<Optional<String>>)
+}
+// Without flatMap: user.address().map(Address::city) → Optional<Optional<String>> (ugly!)
+// With flatMap:    user.address().flatMap(Address::city) → Optional<String> (clean!)
+```
+
+Point this out explicitly in an interview, because it demonstrates that you see
+`flatMap` as a general operation rather than a stream trick. **The rule transfers
+exactly: use `map` when the function returns a plain value, and `flatMap` when the
+function itself returns a wrapped value.** `Optional` is a container of at most one
+element, so `map` nests and `flatMap` collapses — the same reason as for streams.
+
+This is also the answer to "how do you avoid null checks on a chain of accessors?"
+Three nested `if (x != null)` checks become one chain of `flatMap` calls terminating in
+`orElse`, and the absent case is handled once at the end instead of three times on the
+way down.
+
+## Cartesian products and text
+
+```java
+static List<String> cartesianProduct(List<String> colors, List<String> sizes) {
+    return colors.stream()
+            .flatMap(color -> sizes.stream()
+                    .map(size -> color + "-" + size))
+            .collect(Collectors.toList());
+}
+
+static List<String> extractWords(List<String> sentences) {
+    return sentences.stream()
+            .flatMap(sentence -> Arrays.stream(sentence.split("\\s+")))
+            .map(String::toLowerCase)
+            .distinct()
+            .sorted()
+            .collect(Collectors.toList());
+}
+```
+
+The cartesian product is the pattern to remember, because it is the one people find
+surprising: the outer `flatMap` iterates colours, and for each colour the inner stream
+produces every size, mapped to a combined value. It is a nested loop expressed as
+nesting inside the mapper, and it generalises to any number of dimensions by nesting
+further. Note that the inner operation is `map`, not `flatMap` — the inner mapper
+returns a `String`, one result per size, so it is one-to-one.
+
+`extractWords` is the everyday version: `String.split` returns an array, and
+`Arrays.stream` turns it into the stream `flatMap` needs.
+
+## Complexity
+
+Flattening is O(n) in the *total* number of leaf elements, not in the number of
+containers, and space is O(n) only because of the `collect` at the end — the `flatMap`
+itself streams. The cartesian product is O(a × b) by construction, and `distinct`
+followed by `sorted` adds O(n) space for the seen set plus O(n log n) for the sort.
+
+Two costs specific to `flatMap` are worth naming. It allocates a stream object per
+element, which on a hot path with many small collections is measurable overhead, and
+`mapMulti` exists to avoid exactly that. And `deepFlatten` uses stack depth proportional
+to nesting depth, so its space complexity is not O(1) in the way a flat traversal would
+be.
+
+## The follow-up questions
+
+### Is the pipeline lazy, and is `flatMap` fully lazy?
+
+Intermediate operations build a description and execute nothing until a terminal
+operation pulls elements, and the stages are *fused*: each element is pushed through the
+whole chain before the next is read, so `flatMap` then `map` is one traversal rather than
+two with an intermediate list. Add a `println` to each stage and the output interleaves
+by element rather than grouping by stage.
+
+The `flatMap`-specific caveat is a good follow-up to know. Historically `flatMap` was
+not fully lazy with respect to short-circuiting: once it began consuming an inner
+stream it drained that stream even if the downstream operation had already stopped
+caring, so `flatMap` followed by `findFirst` could consume an entire inner collection
+unnecessarily — and with an infinite inner stream it would not terminate at all. JDK 10
+fixed the short-circuiting case. It is still true that laziness is per inner stream
+rather than per element, so a `flatMap` over expensive inner streams is worth measuring
+rather than assuming.
+
+### Why is `sorted` before `filter` wrong?
+
+Because `sorted` is a stateful barrier that must see everything before emitting
+anything, so it does work proportional to whatever you hand it, and **the pipeline
+executes in the order you wrote it — unlike a SQL planner, the stream API does not
+reorder your operations.** So `flatMap` then `sorted` then `filter` sorts every leaf
+element and then discards most of them, while filtering first sorts only the survivors.
+Push filters as early as the logic allows, exactly as you would in a query. `distinct`
+buffers for the same reason; `limit` is a short-circuit and is cheap anywhere after a
+stateless stage.
+
+### What is the `Collectors.toMap` duplicate-key trap?
+
+The two-argument `toMap` throws `IllegalStateException` on a duplicate key, and
+`flatMap` makes it much more likely, because flattening usually produces repeated
+values — the whole point of `skillFrequency` above is that skills recur across
+employees. Keying a flattened stream with the two-argument form is a bug waiting for the
+right data.
+
+```java
+// Throws on the second employee who knows Java
+employees.stream().flatMap(e -> e.skills().stream())
+         .collect(Collectors.toMap(s -> s, String::length));
+```
+
+The three-argument form takes a merge function and makes the choice explicit — keep the
+first, keep the last, or combine. `toMap` also throws `NullPointerException` if the
+value function returns null, where `groupingBy` tolerates it.
+
+### What can `groupingBy` do with a downstream collector, and what is `flatMapping`?
+
+The downstream collector is applied per group instead of collecting members into a
+list, which is what makes `groupingBy` powerful: `counting()` for sizes,
+`mapping(Employee::name, toList())` to keep one field, `summingInt` to total,
+`maxBy(comparing(...))` for the best per group, and `groupingBy` nested inside itself for
+two-level grouping.
+
+`Collectors.flatMapping` is the `flatMap` of that family, and knowing it is a genuine
+differentiator:
+
+```java
+// Every skill per department, flattened inside each group
+groupingBy(Employee::department, flatMapping(e -> e.skills().stream(), toSet()))
+```
+
+Without it you would have to flatten before grouping, which loses the grouping key —
+so `flatMapping` is the answer whenever the one-to-many expansion has to happen *after*
+the classifier has been applied.
+
+### Is there a cheaper alternative to `flatMap`?
+
+`Stream.mapMulti`, added in Java 16, is the allocation-free version. Instead of
+returning a stream per element, the mapper receives a consumer and pushes zero or more
+results into it:
+
+```java
+nested.stream().mapMulti((List<Integer> inner, Consumer<Integer> out) -> inner.forEach(out));
+```
+
+No intermediate `Stream` object per element, which matters when most elements expand to
+zero or one result and the stream allocation dominates. It is also more natural for
+recursive expansion. `flatMap` remains the default because it is clearer; `mapMulti` is
+the answer to "and if this were on a hot path?"
+
+### When is a plain loop clearer?
+
+When the body has side effects, since a stream advertises a pure transformation and a
+`forEach` that writes to a database is a lie about what the code does. When you need an
+index, or to walk two collections together, since streams have no `zip`. When you need
+`try`/`catch` inside the body, because checked exceptions do not pass through lambdas
+without a wrapper that obscures everything. And when the nesting is shallow and fixed —
+two levels with a filter in between is often more readable as a loop.
+
+For nested data specifically there is one more case: when you need the outer element
+alongside each inner one. `flatMap` discards the container, so if the output needs both
+the employee and the skill you must map to a pair inside the mapper, and at that point a
+loop, or `flatMap` producing a record, is clearer than either.
+
+```java
+// Keeping both sides: map to a pair inside the mapper
+employees.stream()
+         .flatMap(e -> e.skills().stream().map(s -> Map.entry(e.name(), s)))
+```
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **`map` versus `flatMap`?** `map` is one-to-one; `flatMap` is one-to-many followed by
+   a merge, so its mapper returns a stream rather than a value.
+2. **What happens if you use `map` where `flatMap` is needed?** You get
+   `Stream<Stream<T>>` — the nesting moves into the type instead of being removed.
+3. **Why does the recursive flattener wrap leaves in `Stream.of`?** `flatMap` requires a
+   stream from every branch; wrapping one element says "this contributes exactly one".
+4. **What is the risk in the recursive version?** Stack depth equal to nesting depth,
+   and an `Object` element type, because Java cannot express an arbitrarily nested
+   generic list.
+5. **Why does `Optional.flatMap` exist?** Same rule: `map` with a function returning
+   `Optional` gives `Optional<Optional<T>>`; `flatMap` collapses it.
+6. **How do you build a cartesian product?** `flatMap` the outer collection and `map` the
+   inner one inside the mapper — a nested loop expressed as nesting.
+7. **Is `flatMap` fully lazy?** Fused and lazy overall, but laziness is per inner stream;
+   short-circuiting through `flatMap` was only fixed in JDK 10.
+8. **Why is `sorted` before `filter` wrong?** `sorted` is a barrier that processes
+   everything it is given, and the pipeline runs in written order, so filtering first can
+   save an order of magnitude.
+9. **What is the `toMap` trap, and why is it worse after a `flatMap`?** The two-argument
+   form throws on duplicate keys, and flattening usually produces repeats. Use the
+   three-argument form with a merge function.
+10. **What is `Collectors.flatMapping` for?** Expanding one-to-many *inside* each group,
+    which flattening before `groupingBy` cannot do because it loses the key.
+11. **Is there a cheaper alternative?** `mapMulti`, which pushes results into a consumer
+    instead of allocating a stream per element.
+12. **When would you write a loop instead?** Side effects, indices, two collections in
+    step, checked exceptions, or when you need the container alongside each inner
+    element.
+</Callout>
+
+### Where this connects
+
+- [4. Java 8+ Features](/java/4-java-8-features) — the full stream and collector surface, `Optional` idioms, and functional interfaces.
+- [Practice: Streams & Duplicates](/java/practice-streams-duplicates) — the grouping and counting half of the stream question set, with the laziness and `toMap` mechanics worked through from the other direction.
+- [2. Collections Framework — Deep Dive](/java/2-collections-framework-deep-dive) — what `distinct` and `groupingBy` rest on, and the `equals`/`hashCode` contract they depend on.
+- [4. Spring Data Repository](/java/4-spring-data-repository) — where projections replace flattening entity graphs in application code, and why that is usually the better fix.

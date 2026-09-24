@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 :root {
   --background: #ffffff;
@@ -22,5 +23,35 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Shiki emits both theme colours as CSS variables per token; pick the dark set
+   when the OS asks for dark mode. */
+@media (prefers-color-scheme: dark) {
+  .shiki,
+  .shiki span {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+}
+
+.prose pre.shiki {
+  @apply overflow-x-auto rounded-lg border border-foreground/10 p-4 text-[13px] leading-relaxed;
+}
+
+/* Headings are wrapped in anchors by rehype-autolink-headings. */
+.prose :where(h1, h2, h3, h4) a {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+}
+
+/* GFM task lists carry their own bullets. */
+.prose ul:has(> li > input[type="checkbox"]) {
+  @apply list-none pl-0;
+}
+
+.prose li:has(> input[type="checkbox"]) {
+  @apply pl-0;
 }

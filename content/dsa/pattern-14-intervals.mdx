@@ -1,0 +1,383 @@
+---
+title: "Pattern 14 — Intervals"
+topic: "dsa"
+order: 116
+difficulty: "medium"
+estimatedMinutes: 24
+tags: [intervals, sorting, sweep-line, merge-intervals, meeting-rooms, scheduling]
+format: "mdx"
+summary: "Why sorting by start and sorting by end solve different interval problems, the overlap condition and how sorting simplifies it, merge and insert and meeting rooms, and the sweep line that generalises to any maximum-concurrency question."
+---
+
+## Layer 1 — When you reach for this
+
+> Nearly every interval problem is **sort, then one linear pass**. The algorithm
+> is rarely more than fifteen lines. The insight — the only real decision — is
+> **whether you sort by start or by end**, and that choice is determined by the
+> question, not by habit.
+
+The pattern announces itself whenever the data is a collection of ranges: pairs
+of numbers where the first is a beginning and the second is an end. Times,
+dates, positions on a line, version ranges, IP blocks, booked seats.
+
+Signals:
+
+- **"Merge overlapping"**, **"combine"**, **"consolidate"** ranges. Sort by
+  start.
+- **"How many can I fit without overlap"**, **"minimum removals"**, **"maximum
+  non-conflicting"**. Sort by end — this is interval scheduling, and the proof
+  lives in [Pattern 13 — Greedy](/dsa/pattern-13-greedy).
+- **"How many rooms / servers / lanes / platforms do I need"**, **"maximum
+  concurrent"**. This is the peak-overlap question, solved by a heap or a sweep
+  line.
+- **"Insert a new range into a sorted set of ranges"**, **"is this slot free"**,
+  **"find the free gaps"**.
+- **Calendar and booking** problems of any kind.
+
+A quick way to fix the two main families in your head:
+
+| Question | Sort by | Why |
+|---|---|---|
+| Merge overlapping ranges | **start** | You must meet ranges in timeline order to know what adjoins what |
+| Maximum non-overlapping count | **end** | Finishing earliest leaves the most room for what follows |
+| Minimum removals to make disjoint | **end** | Same problem, reported as total minus the maximum kept |
+| Maximum concurrency / rooms needed | **start**, with a heap of ends, or sweep the events | You need to know what is still running when each new one begins |
+| Insert into an already sorted list | already sorted by start | Three phases: before, overlapping, after |
+
+Anti-signals worth knowing. If the "intervals" are actually **points with a
+radius** — "balloons at these positions", "sensors covering this distance" —
+convert them to intervals first and the pattern applies; the conversion is the
+step people skip. If ranges are being **inserted and queried dynamically** with
+interleaved operations, a single sort will not do, and you want a `TreeMap` of
+boundaries, which is the My Calendar family. And if the question is about
+**overlap between two already-sorted lists** rather than within one list, that is
+a two-pointer merge and not this pattern; see
+[Pattern 2 — Two Pointers](/dsa/pattern-2-two-pointers).
+
+---
+
+## Layer 2 — The mechanism
+
+### The overlap condition
+
+Two intervals `a` and `b` overlap if and only if:
+
+`a.start <= b.end && b.start <= a.end`
+
+It is worth deriving this rather than memorising it, because the derivation is
+short and it tells you where the boundary cases hide. Two intervals fail to
+overlap in exactly two ways: `a` ends entirely before `b` begins
+(`a.end < b.start`), or `b` ends entirely before `a` begins
+(`b.end < a.start`). Overlap is the negation of that disjunction, and by De
+Morgan the negation is `a.end >= b.start && b.end >= a.start`, which is the
+condition above rewritten.
+
+**Now the simplification that makes the pattern cheap.** Once the list is sorted
+by start time, and you are comparing the current interval `cur` against the
+previous one `prev`, you already know `prev.start <= cur.start`. That makes one
+half of the condition automatically true, and the test collapses to a single
+comparison:
+
+`cur.start <= prev.end`
+
+**That one-sided test is the whole reason sorting comes first.** It turns a
+two-sided relational question into a single scalar comparison against a running
+value, which is what makes the linear pass possible.
+
+### The boundary question, and why asking it is a signal
+
+Do `[1, 2]` and `[2, 3]` overlap?
+
+There is no universally right answer. If these are meeting times, a meeting
+ending at 2 and another starting at 2 do not conflict — you can walk out as the
+next person walks in — so they are *touching*, not overlapping, and a room count
+of 1 is correct. If these are closed numeric intervals in a merge problem, the
+point 2 belongs to both and most such problems expect `[1, 3]` as the merged
+result. If they are byte ranges or array index ranges, half-open convention
+usually means no overlap.
+
+In code, the difference is one character: `cur.start <= prev.end` treats touching
+as overlapping, `cur.start < prev.end` does not.
+
+**Asking the interviewer this question is itself a strong signal**, because it
+shows you have identified the one place the specification is genuinely ambiguous
+before writing code that silently picks a side. It takes eight seconds and it is
+the cheapest credibility in the pattern. Say it as: "Before I start — if one
+interval ends exactly where the next begins, do you want those treated as
+overlapping?"
+
+### Merge Intervals
+
+```java
+int[][] merge(int[][] iv) {
+    Arrays.sort(iv, (a, b) -> Integer.compare(a[0], b[0]));   // by START
+    List<int[]> out = new ArrayList<>();
+    for (int[] cur : iv) {
+        int[] last = out.isEmpty() ? null : out.get(out.size() - 1);
+        if (last == null || cur[0] > last[1]) {
+            out.add(new int[]{cur[0], cur[1]});     // disjoint — start a new block
+        } else {
+            last[1] = Math.max(last[1], cur[1]);    // overlap — extend in place
+        }
+    }
+    return out.toArray(new int[0][]);
+}
+```
+
+Two details carry the correctness. **Sorting by start is what guarantees that
+any interval overlapping the current block must be the very next one you see** —
+if it started earlier it would have been processed already, and anything starting
+later than the block's end cannot reach back. That is why one backward comparison
+suffices instead of comparing against every block.
+
+And `Math.max` on the extension is not defensive coding; it is required.
+Consider `[1, 10]` followed by `[2, 3]`. The second is fully contained in the
+first, and assigning `last[1] = cur[1]` would shrink the block to `[1, 3]` and
+lose coverage. Sorting by start says nothing at all about the order of ends, so
+containment is always possible.
+
+Cost: `O(n log n)` for the sort, `O(n)` for the pass, so **`O(n log n)` time and
+`O(n)` output space** — `O(1)` auxiliary if you merge in place into the front of
+the array.
+
+### Insert Interval
+
+Here the input is already sorted and disjoint, so no sort is needed and the whole
+thing is `O(n)`. The structure is three sequential phases, and writing them as
+three separate loops is clearer than one loop with branches:
+
+```java
+List<int[]> out = new ArrayList<>();
+int i = 0, n = iv.length;
+while (i < n && iv[i][1] < nw[0]) out.add(iv[i++]);        // 1. entirely before
+while (i < n && iv[i][0] <= nw[1]) {                       // 2. overlapping — absorb
+    nw[0] = Math.min(nw[0], iv[i][0]);
+    nw[1] = Math.max(nw[1], iv[i][1]);
+    i++;
+}
+out.add(nw);
+while (i < n) out.add(iv[i++]);                            // 3. entirely after
+```
+
+The insight to state: **because the input is sorted and disjoint, the intervals
+that overlap the new one form a contiguous run.** You can therefore collapse them
+into a single interval by taking the minimum start and the maximum end of the
+run, and everything outside the run is copied untouched. If the interviewer asks
+for repeated insertions, this is the moment to say that a `TreeMap` keyed on
+start, with `floorEntry` and `ceilingEntry` to find the run's boundaries, gives
+`O(log n)` per insertion instead of `O(n)`.
+
+### Meeting Rooms I and II
+
+**Meeting Rooms I** — can one person attend all meetings? Sort by start and check
+whether any interval begins before the previous one ends. `O(n log n)`, one
+comparison per element.
+
+**Meeting Rooms II** — how many rooms are needed? This is the maximum number of
+simultaneously active intervals, and there are two good answers.
+
+**With a heap.** Sort by start. Keep a min-heap of the end times of meetings
+currently occupying a room. For each meeting, if the earliest-ending occupied
+room has already freed up, poll it and reuse it. Push the new end time. The
+answer is the maximum heap size reached.
+
+```java
+Arrays.sort(iv, (a, b) -> Integer.compare(a[0], b[0]));
+PriorityQueue<Integer> ends = new PriorityQueue<>();      // end times in use
+for (int[] m : iv) {
+    if (!ends.isEmpty() && ends.peek() <= m[0]) ends.poll();   // a room freed up
+    ends.offer(m[1]);
+}
+return ends.size();          // O(n log n) time, O(n) space
+```
+
+Only the earliest end time ever needs checking, because if the earliest-ending
+meeting has not finished, none of the others have either. That is why a heap and
+not a scan; see [Pattern 9 — Heaps](/dsa/pattern-9-heaps-priority-queue).
+
+### The sweep line, and why it generalises
+
+The heap solution is good. The sweep line is better, because it answers a whole
+family of questions rather than one.
+
+**Stop thinking about intervals and think about events.** An interval
+`[start, end]` is not an object; it is two events on a timeline — a `+1` at
+`start` and a `-1` at `end`. Sort all `2n` events by position and walk them,
+maintaining a running counter. **The counter at any moment is the number of
+intervals currently active, and the answer to "how many rooms" is simply the
+maximum value the counter ever reaches.**
+
+```java
+int[] starts = new int[n], ends = new int[n];
+for (int i = 0; i < n; i++) { starts[i] = iv[i][0]; ends[i] = iv[i][1]; }
+Arrays.sort(starts); Arrays.sort(ends);      // the two event streams, independently
+
+int rooms = 0, best = 0, s = 0, e = 0;
+while (s < n) {
+    if (starts[s] < ends[e]) { rooms++; s++; best = Math.max(best, rooms); }
+    else                     { rooms--; e++; }   // a meeting ended first
+}
+return best;                                     // O(n log n), O(n)
+```
+
+Sorting the two boundary arrays separately is legitimate precisely because we no
+longer care which start pairs with which end — only how many of each have
+occurred by a given moment. That decoupling is the trick.
+
+The tie-break deserves attention, because it is where the touching question
+returns. Using `starts[s] < ends[e]` means that when a start and an end coincide,
+the end is processed first, so the room is released and reused. Using `<=` would
+process the start first and demand an extra room. **Which one is right is the
+same clarification you asked for at the beginning**, now expressed as a
+comparison operator.
+
+Why this generalises: nothing in the argument mentions meetings. Any question of
+the form "what is the maximum number of X active at once", or "at which moments
+is the count above a threshold", or "what is the total time during which at least
+two things overlap", is the same sweep with a different thing done inside the
+loop. Car pooling with capacities is a sweep with weights instead of `+1`.
+Skyline is a sweep with a multiset of heights instead of a counter. The
+difference-array trick — add `+1` at `start` and `-1` at `end` in an array, then
+take a prefix sum — is the same idea when the coordinates are small integers, and
+it runs in `O(n + range)` with no sorting at all.
+
+### Edge cases and traps
+
+- **Containment.** `[1, 10]` then `[2, 3]`. Forgetting `Math.max` on the end
+  silently truncates coverage. This is the single most common interval bug.
+- **Touching boundaries.** Decide once, at the top, and keep the comparison
+  consistent everywhere in the solution.
+- **Empty input**, and a single interval, which must come back unchanged.
+- **Unsorted input assumed sorted.** Insert Interval's input is sorted; Merge
+  Intervals' is not. Read the statement.
+- **Comparator overflow.** `(a, b) -> a[0] - b[0]` with values near
+  `Integer.MAX_VALUE`. Use `Integer.compare`.
+- **Mutating the input.** Sorting the caller's array in place, or extending
+  `last[1]` when `last` is a reference into the original input rather than a
+  copy. The merge code above copies deliberately.
+- **Zero-length intervals** such as `[5, 5]`, which behave oddly under strict
+  comparisons and may or may not be valid input.
+- **Sorting by end when you needed start.** Merging by end time produces
+  plausible-looking nonsense on containment cases.
+- **Reversed intervals** where the end precedes the start. Usually invalid input,
+  but worth one clarifying question in a design-flavoured round.
+
+---
+
+## Layer 3 — Interview surface
+
+<Callout type="interview" title="Follow-ups to rehearse out loud">
+1. **"Sort by start or by end?"** By start for merging and for anything where I
+   process the timeline in order. By end when maximising the count of
+   non-overlapping intervals, because finishing earliest leaves the most room.
+2. **"What is the overlap condition?"** `a.start <= b.end && b.start <= a.end`.
+   After sorting by start, the first half is automatic and it reduces to
+   `cur.start <= prev.end`.
+3. **"Do touching intervals overlap?"** That depends on the domain, and I would
+   confirm it — it is one character in the comparison and it changes the answer
+   for meeting rooms.
+4. **"Complexity?"** `O(n log n)` dominated by the sort, `O(n)` for the pass.
+   `O(n)` output space, `O(1)` auxiliary. If the input is pre-sorted, the whole
+   thing is `O(n)`.
+5. **"Can you do better than `O(n log n)`?"** Not by comparison sorting. But if
+   the coordinates are bounded small integers you can counting-sort the events, or
+   use a difference array plus prefix sum, for `O(n + range)`.
+6. **"Meeting Rooms II without a heap?"** Sweep line: split into start and end
+   events, sort each, walk both with a counter, and take the maximum. Same
+   complexity, and it extends to any maximum-concurrency question.
+7. **"Why can you sort the start and end arrays independently?"** Because the
+   counter only needs to know how many of each boundary have passed, not which
+   start belongs to which end.
+8. **"Now each meeting needs `k` rooms."** Same sweep, but the counter changes by
+   `k` instead of 1. That is exactly the Car Pooling problem.
+9. **"What if intervals arrive one at a time and you must answer after each?"**
+   A `TreeMap` keyed on start, using `floorEntry` and `ceilingEntry` to find the
+   affected neighbours. `O(log n)` per insertion instead of re-sorting.
+10. **"What if the input does not fit in memory?"** Sort externally, then stream
+    the pass — merging and sweeping both need only constant state per step, so
+    the sort is the only memory pressure. For a sweep you can also stream the two
+    boundary files in lockstep.
+11. **"What if the intervals are being produced by many machines?"** Partition
+    the timeline into disjoint windows, sweep each window independently, and
+    combine — only intervals crossing a window boundary need special handling,
+    and you carry a counter across boundaries.
+12. **"Find the free gaps rather than the busy blocks."** Merge first, then the
+    gaps are the spaces between consecutive merged blocks. Employee Free Time is
+    this over several sorted lists, which adds a k-way merge.
+13. **"Minimum removals to make them disjoint?"** Maximum non-overlapping count
+    by end time, then subtract from the total. It is interval scheduling, not a
+    new algorithm.
+14. **"Does this need a special data structure?"** For one-shot batch questions,
+    no — sorting is enough. For repeated range queries over a static set, an
+    interval tree or a segment tree gives `O(log n + k)` per query, and that is
+    what a database uses for range indexes.
+</Callout>
+
+<Callout type="pitfall" title="Things that bite in practice">
+- **Assigning the end instead of taking the maximum**, which loses containment.
+- **Not asking about touching endpoints**, then discovering the off-by-one in the
+  failing test.
+- **Sorting by end for a merge problem**, which is wrong in a way that looks
+  right on non-nested inputs.
+- **Subtraction comparators** overflowing.
+- **Mutating the caller's array** by sorting it in place, or by writing through a
+  reference into the input.
+- **Writing Insert Interval as one loop with flags** instead of three phases; it
+  is where the off-by-ones breed.
+- **Reaching for a heap on Meeting Rooms II when a sweep is simpler** — the heap
+  is fine, but the sweep is the one that generalises and interviewers usually
+  want to see it.
+- **Treating "maximum overlap" and "maximum non-overlapping" as the same
+  question.** They sort by different keys and answer opposite things.
+</Callout>
+
+### Problems to drill
+
+**Easy**
+
+- **Meeting Rooms** — the minimal sorted pass, and the place to settle your
+  touching-boundary convention.
+- **Summary Ranges** — merging consecutive integers, which is the interval idea
+  with an implicit width of one.
+
+**Medium**
+
+- **Merge Intervals** — the canonical template, and the containment trap.
+- **Insert Interval** — the three-phase structure and why no sort is needed.
+- **Non-overlapping Intervals** — sort by end; interval scheduling restated.
+- **Meeting Rooms II** — do it with a heap and then again with a sweep line, and
+  be able to argue for the sweep.
+- **Minimum Number of Arrows to Burst Balloons** — the same greedy again, with
+  points-plus-radius converted into intervals.
+- **Car Pooling** — a weighted sweep, which shows the counter generalising.
+- **My Calendar I** — the dynamic version, with a `TreeMap` instead of a sort.
+- **Interval List Intersections** — two sorted lists and two pointers; the
+  intersection formula is max of starts against min of ends.
+- **Partition Labels** — intervals derived from last-occurrence positions, so you
+  have to build the intervals before you can merge them.
+
+**Hard**
+
+- **Employee Free Time** — merge across many sorted lists, then read the gaps.
+- **The Skyline Problem** — a sweep line where the state is a multiset of heights
+  rather than a counter. The hardest interval problem that is still fair game.
+- **Data Stream as Disjoint Intervals** — a `TreeMap` maintaining merged ranges
+  under continual insertion.
+- **Maximum Profit in Job Scheduling** — weighted interval scheduling, where
+  greedy fails and you need DP plus a binary search for the previous compatible
+  job. A good demonstration of the boundary between this pattern and DP.
+
+### Where this connects
+
+- [Pattern 13 — Greedy](/dsa/pattern-13-greedy) — the exchange argument that
+  proves sorting by end time is the right key for interval scheduling.
+- [Pattern 9 — Heaps](/dsa/pattern-9-heaps-priority-queue) — the heap solution to
+  Meeting Rooms II and why only the earliest end time matters.
+- [Pattern 2 — Two Pointers](/dsa/pattern-2-two-pointers) — intersecting two
+  sorted interval lists, and the lockstep walk the sweep line uses.
+- [Pattern 12 — Dynamic Programming](/dsa/pattern-12-dynamic-programming) —
+  weighted interval scheduling, where the greedy stops working.
+- [Complexity cheat sheet](/dsa/complexity-cheat-sheet-memorize-this) — why the
+  sort dominates, and when counting-sorting the events beats it.
+- [SQL indexing and performance](/sql/3-indexing-performance) — range indexes are
+  interval structures, and the sweep is how a database counts overlaps.
