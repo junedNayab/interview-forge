@@ -1,0 +1,42 @@
+src/app/(lessons)/[topic]/[slug]/page.tsx
+  s_71e165171dad8f::t_99ad51b218c8e7 6,9,33-38
+src/components/ThemeScript.tsx
+  s_71e165171dad8f::t_2edf15de3b6aa0 1-6
+src/app/layout.tsx
+  s_71e165171dad8f::t_8aa9541b96bb46 6,35,37-39
+src/components/Sidebar.tsx
+  s_71e165171dad8f::t_99ad51b218c8e7 5-6,9-14,21-25,33-35,47-52,61,68,74-81
+src/components/SiteHeader.tsx
+  s_71e165171dad8f::t_8aa9541b96bb46 4,9-12,17-20
+src/lib/progress.ts
+  s_71e165171dad8f::t_cdea11047cc607 1-72
+src/components/ThemeToggle.tsx
+  h_e0c30ce2baaad1 1-64
+src/components/LessonFocusBar.tsx
+  h_e0c30ce2baaad1 1-252
+src/app/globals.css
+  s_71e165171dad8f::t_41057595613fc7 4-16,19-27,33,45-49,71-89
+src/app/(lessons)/layout.tsx
+  s_71e165171dad8f::t_8aa9541b96bb46 9-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9347aeb838ac5bf02bc918219c3cb9e876b590be",
+  "prompts": {},
+  "humans": {
+    "h_e0c30ce2baaad1": {
+      "author": "junedNayab <mohammed32nayab@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_71e165171dad8f": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "49ab675f-c0aa-4b26-89be-743205beab60",
+        "model": "copilot/claude-opus-5"
+      },
+      "human_author": "junedNayab <mohammed32nayab@gmail.com>"
+    }
+  }
+}
