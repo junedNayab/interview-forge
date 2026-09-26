@@ -3,8 +3,10 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import type { Metadata } from "next";
 
+import { LessonFocusBar } from "@/components/LessonFocusBar";
 import { Mdx } from "@/components/Mdx";
 import { getAdjacentLessons, getAllLessons, getLesson } from "@/lib/content";
+import { lessonKey } from "@/lib/progress";
 import { getTopic } from "@/lib/topics";
 
 export function generateStaticParams() {
@@ -28,7 +30,12 @@ export default async function LessonPage({ params }: PageProps<"/[topic]/[slug]"
   const { previous, next } = getAdjacentLessons(topicId, slug);
 
   return (
-    <article className="max-w-3xl">
+    <article className="lesson-article max-w-3xl pb-24">
+      <LessonFocusBar
+        lessonKey={lessonKey(topicId, slug)}
+        estimatedMinutes={lesson.estimatedMinutes}
+      />
+
       <nav className="mb-6 flex items-center gap-1.5 text-sm text-foreground/50">
         <Link href={`/${topicId}`} className="hover:text-foreground">
           {topic?.title ?? topicId}

@@ -1,23 +1,38 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
-:root {
+/* Themes are driven by data-theme on <html>, not by the OS, so the reader can
+   switch between dark / light / sepia manually. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root,
+[data-theme="dark"] {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --accent: #7c9cff;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
   --background: #ffffff;
   --foreground: #171717;
+  --accent: #2f5bd7;
+  color-scheme: light;
+}
+
+[data-theme="sepia"] {
+  --background: #f4ecdb;
+  --foreground: #3b3228;
+  --accent: #9a5b2c;
+  color-scheme: light;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
@@ -27,13 +42,11 @@ body {
 }
 
 /* Shiki emits both theme colours as CSS variables per token; pick the dark set
-   when the OS asks for dark mode. */
-@media (prefers-color-scheme: dark) {
-  .shiki,
-  .shiki span {
-    color: var(--shiki-dark) !important;
-    background-color: var(--shiki-dark-bg) !important;
-  }
+   only for the dark theme. */
+[data-theme="dark"] .shiki,
+[data-theme="dark"] .shiki span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
 }
 
 .prose pre.shiki {
@@ -54,4 +67,23 @@ body {
 
 .prose li:has(> input[type="checkbox"]) {
   @apply pl-0;
+}
+
+/* Focus mode: strip the chrome and widen the reading rhythm. */
+[data-focus="on"] [data-chrome] {
+  display: none !important;
+}
+
+[data-focus="on"] .lesson-article {
+  margin-inline: auto;
+  max-width: 42rem;
+}
+
+[data-focus="on"] .lesson-article .prose {
+  font-size: 1.0625rem;
+  line-height: 1.9;
+}
+
+[data-focus="on"] .lesson-article .prose :where(p, li) {
+  margin-block: 1.1em;
 }
