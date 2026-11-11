@@ -24,6 +24,7 @@ If work resumes in a fresh session, read this first.
 | Syntax highlighting | Shiki (dual theme) | Build-time highlighting, zero client JS cost |
 | Code languages | Java + Python + C++ tabs | Java is the interview target; others are backfilled over time |
 | Progress tracking | `localStorage` | No backend needed; keeps the site deployable as static output |
+| AI chat assistant | OpenRouter free models via a Next route handler; in-process BM25 retrieval over `content/` | See §8 — keeps the key server-side and needs no vector store or new dependency |
 | Hosting | Vercel (free) | Zero-config for Next.js |
 | App location | `personal/dsa-academy/` | Sibling of `url-shortener/` and `SkillUpPlan/` |
 
@@ -147,9 +148,11 @@ dsa-academy/
 │   └── java/  sql/  cs-fundamentals/  behavioral/
 └── src/
     ├── app/
-    │   ├── layout.tsx                 # root shell: header + command palette
+    │   ├── layout.tsx                 # root shell: header + command palette + chat assistant
     │   ├── globals.css                # Tailwind v4 entry, Shiki dark mode, prose tweaks
     │   ├── page.tsx                   # home: topic grid
+    │   ├── api/chat/route.ts          # POST: grounded chat via OpenRouter (§8)
+    │   ├── api/chat/models/route.ts   # GET: current free OpenRouter models
     │   └── (lessons)/                 # route group: everything with a sidebar
     │       ├── layout.tsx
     │       ├── [topic]/page.tsx       # topic landing: grouped lesson list
@@ -157,6 +160,8 @@ dsa-academy/
     ├── components/
     │   ├── SiteHeader.tsx  TopicCard.tsx  Sidebar.tsx
     │   ├── CommandPalette.tsx         # Ctrl/Cmd+K — matters at 100+ lessons
+    │   ├── ChatAssistant.tsx          # floating "Ask" button + chat panel (client)
+    │   ├── ChatMarkdown.tsx           # safe markdown subset for replies (no innerHTML)
     │   ├── Mdx.tsx                    # MDXRemote + plugin pipeline
     │   ├── CodeTabs.tsx               # server: highlights Java / Python / C++
     │   ├── CodeTabsClient.tsx         # client: Radix tab shell
@@ -170,6 +175,7 @@ dsa-academy/
         ├── content.ts                 # server-only content index + frontmatter
         ├── nav.ts                     # serializable nav types for client components
         ├── shiki.ts                   # shared theme pair
+        ├── chat/                      # assistant: pure modules + two server-only ones (§8)
         └── viz/
             ├── types.ts               # the Step contract
             ├── registry.ts            # algo id -> builder
@@ -416,8 +422,12 @@ LLD.
 
 ## 6. Security notes
 
-No credentials, certificates or cryptographic algorithms are involved: this is a
-static content site with no secrets, no auth and no network calls. If the Spring
+No certificates, auth or cryptographic algorithms are involved. The one secret is
+`OPENROUTER_API_KEY` for the chat assistant (§8): it lives only in server
+environment variables (`.env.local`, git-ignored, or the host's settings), is read
+only by the `/api/chat` route handler, and must never get a `NEXT_PUBLIC_` prefix.
+`.env.example` documents it with an empty value. That route is also the site's only
+outbound network call. If the Spring
 Boot progress API is added later, its database credentials must come from
 environment variables or a secret manager — never committed to
 `application.properties`.
@@ -436,6 +446,12 @@ components need string props or server-side prop construction instead.
 HTML is produced by Shiki from first-party lesson code, and Shiki escapes the
 source it highlights. The same caveat applies: it must not be pointed at
 user-submitted code without sanitizing.
+
+Model output in the chat panel is untrusted. `ChatMarkdown` renders it from React
+elements only (no `dangerouslySetInnerHTML`), and only links to site paths or
+`https://` URLs are made clickable. The chat route also only accepts models that
+OpenRouter currently lists as free, so a crafted request can't spend credits on
+the owner's key.
 
 ---
 
@@ -462,6 +478,7 @@ npm run start       # serve the last build; ignores content edits until you rebu
 npm run lint
 npm run check:mdx   # parse every lesson through the MDX compiler — no build needed
 npm run check:links # every markdown link of the form ](/topic/slug) must exist
+npm test            # node:test suites in tests/ (chat assistant), incl. retrieval on real content
 npm run import      # re-import from ../SkillUpPlan (skips `format: mdx` lessons)
 ```
 
@@ -522,3 +539,86 @@ Stop-Process -Id <pid> -Force
   recursion tree root, and all four `ComplexityTable` rows
 - `node scripts/import-content.mjs` re-run — rewrites 101 lessons and reports the
   3 `format: mdx` lessons as preserved
+
+---
+
+## 8. AI chat assistant
+
+A floating **Ask** button (root layout, so it survives client navigation) opens a
+panel for quick questions about anything on the site. It answers **only from the
+lessons**, and says so when they don't cover a question.
+
+### Request flow
+
+1. `ChatAssistant.tsx` loads `/api/chat/models` the first time the panel opens.
+   The route fetches OpenRouter's public `GET /api/v1/models`, keeps models whose
+   **every** price is zero and whose output is text only, drops expired ones, and
+   caches the list for 10 minutes. If a refresh fails, the stale list is served
+   with a flag. With no list at all the panel says so.
+2. A question goes to `POST /api/chat` with the last 12 messages and the current
+   pathname. The route validates the request (`protocol.ts`), rate-limits per IP,
+   and re-checks that the model is free right now (the key is the site owner's).
+3. Retrieval (`retrieval.ts`) ranks heading-sized chunks of every lesson, every
+   topic landing page and a site overview, built by the server-only
+   `site-index.ts`. If nothing qualifies, the route returns a fixed "the site
+   doesn't cover that" reply **without calling a model**.
+4. Otherwise the top chunks go into a system prompt (`prompt.ts`). The prompt tells
+   the model to use only those excerpts, to say when they're insufficient, and to
+   cite lessons by their real URLs. The reply and its source pages come back as
+   JSON (non-streaming: simpler error handling for flaky free models).
+
+### Why BM25, not embeddings
+
+~100 first-party lessons, keyword-heavy interview vocabulary, and a static-first
+site. Lexical BM25 in process (~200 ms to index ~1,600 chunks, ~1–5 ms per query)
+needs no vector store, embedding API or dependency. It is cached in production and
+rebuilt per request in dev, matching `content.ts`, so lesson edits show up at once.
+
+Two gates decide whether anything is "on the site":
+
+- **Score** — the best chunk's BM25 score must clear `MIN_SCORE`.
+- **Coverage** — that chunk must contain at least half of the question's
+  informative terms, weighted by IDF, where terms the site never uses count as
+  maximally informative. The score gate alone failed in calibration: "what is the
+  weather in paris today" scored like a real match because one lesson title
+  contains "today".
+
+`tests/chat/site-content.test.ts` runs both gates against the real `content/`,
+with on-topic and off-topic questions, so they stay calibrated as lessons grow.
+The model prompt is the second line of defence for questions that pass retrieval
+but aren't really answered (e.g. "what is kubernetes" matches a passing mention).
+
+Follow-ups need the conversation. The previous question and the current page title
+are passed as **context**. They always add low-weight terms. For questions with
+follow-up cues (`it`/`its`/`that`/`this`/`more`/`example`, or a leading "what
+about"/"why"), the context becomes the main query and the results are merged
+half-and-half with the literal question's. Without that, "what about its time
+complexity?" ranks the lessons that say "complexity" most, not the one under
+discussion. If the question alone matches nothing, the context is a fallback,
+**except** when the question uses words the site never does ("capital of
+France"). Those are off-topic, and must not borrow the open lesson as a pretext to
+call the model. "Summarize this lesson" also pins the current lesson's opening
+chunks ahead of the ranked hits.
+
+### Module boundaries
+
+Everything in `src/lib/chat/` except `openrouter.ts` and `site-index.ts` is pure:
+no runtime imports, only `import type`, no Node APIs. That lets the client import
+`protocol.ts` and lets `npm test` run the modules directly via Node's type
+stripping (`node --test`, no test framework; `allowImportingTsExtensions` exists
+for the tests' `.ts` import paths). **Keep it that way**: a runtime import between
+pure modules needs an explicit `.ts` extension, or the tests can't load it.
+
+### Limits
+
+| Limit | Value | Where |
+|---|---|---|
+| Question length | 1,000 chars | `protocol.ts` (client and server) |
+| History sent | last 12 messages | `protocol.ts` |
+| Request body | 64 KB | `protocol.ts` |
+| Rate limit | 6/min and 60/hour per IP | `rate-limit.ts`, in memory, per server instance |
+| Upstream timeout / output | 55 s / 2,048 tokens | `openrouter.ts` |
+
+OpenRouter's own free-model caps (per-minute and per-day) apply on top. They are
+reported to the user as rate limits, never hidden. The UI never presents free
+models as unlimited or always available.
