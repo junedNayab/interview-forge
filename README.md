@@ -20,6 +20,7 @@ Open a terminal in this folder. Node is already on your PATH — just run npm.
 | `npm run start` | Serve whatever `build` already produced. Ignores file edits. |
 | `npm run check:mdx` | After an edit: did the lesson still parse? |
 | `npm run check:links` | After adding a link: does it point at a real page? |
+| `npm test` | After changing the chat assistant: unit tests + retrieval checks on real lessons. |
 
 Then open http://localhost:3000.
 
@@ -95,3 +96,44 @@ hand-authored interactive lessons are safe.
 
 All visualizations share one player, so a new algorithm needs no new UI unless it
 introduces a genuinely new shape. See SPEC.md §2.
+
+## AI study assistant ("Ask" button)
+
+Every page has a floating **Ask** button that opens a chat panel. It answers quick
+questions about anything taught on the site, using **only** the lessons in
+`content/`. If the lessons don't cover a question it says so instead of guessing.
+
+### Setup
+
+1. Create an OpenRouter API key at https://openrouter.ai/settings/keys.
+2. Copy `.env.example` to `.env.local` (git-ignored) and set the key:
+
+   ```bash
+   OPENROUTER_API_KEY=sk-or-v1-...
+   # optional, for OpenRouter app attribution:
+   OPENROUTER_SITE_URL=https://your-deployed-site.example
+   ```
+
+3. Restart `npm run dev` / `npm run preview`. On Vercel, add the same variables
+   under Project → Settings → Environment Variables.
+
+The key is read only by the server route `src/app/api/chat/route.ts`. **Never** give
+it a `NEXT_PUBLIC_` prefix: that would ship it to every visitor's browser. Without a
+key the site works as before and the panel says the assistant isn't configured.
+
+### Models, limits and failure modes
+
+- The model picker lists OpenRouter's **current free models**, fetched live from
+  `https://openrouter.ai/api/v1/models` and cached on the server for 10 minutes.
+  The server rejects any model that isn't free right now, so the key can't be used
+  for paid models.
+- Free models are **not unlimited or always available**. OpenRouter caps free-model
+  requests per minute and per day, and individual models get busy or are withdrawn.
+  The panel reports these cases (rate limit, unavailable model, empty list,
+  OpenRouter unreachable) and puts the unsent question back in the input box.
+- The site's own limits: 1,000 characters per question; the last 12 messages are
+  sent as history; 6 questions per minute and 60 per hour per client IP. The
+  rate limit is in memory, so it applies per server instance.
+- **New chat** (pencil icon) clears the conversation and cancels any pending reply.
+
+How the grounding works is in SPEC.md §8.

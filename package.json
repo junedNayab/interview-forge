@@ -10,6 +10,7 @@
     "import": "node scripts/import-content.mjs",
     "check:mdx": "node scripts/check-mdx.mjs",
     "check:links": "node scripts/check-links.mjs",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON \"tests/**/*.test.ts\"",
     "lint": "eslint"
   },
   "dependencies": {

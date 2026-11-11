@@ -121,6 +121,11 @@ export function getLesson(topic: string, slug: string): Lesson | undefined {
   return file && { ...file.meta, body: file.body };
 }
 
+/** Every lesson with its prose, for whole-site consumers such as the chat search index. */
+export function getAllLessonsWithBody(): Lesson[] {
+  return allFiles().map(({ meta, body }) => ({ ...meta, body }));
+}
+
 /** Clusters a topic's lessons by their `group`, preserving lesson order. */
 export function getGroupedLessons(topic: string): LessonGroup[] {
   const groups: LessonGroup[] = [];
